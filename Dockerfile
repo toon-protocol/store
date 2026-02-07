@@ -4,7 +4,7 @@
 # Build from repo root:
 #   docker build -f docker/Dockerfile -t agent-society .
 
-FROM node:20-slim AS base
+FROM node:20-slim
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
@@ -26,29 +26,8 @@ COPY packages/core/ ./packages/core/
 COPY packages/relay/ ./packages/relay/
 COPY docker/ ./docker/
 
-# Build all packages
-RUN pnpm -r build
-
-# Production stage
-FROM node:20-slim AS production
-
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-WORKDIR /app
-
-# Copy built packages
-COPY --from=base /app/node_modules ./node_modules
-COPY --from=base /app/packages/core/dist ./packages/core/dist
-COPY --from=base /app/packages/core/package.json ./packages/core/
-COPY --from=base /app/packages/relay/dist ./packages/relay/dist
-COPY --from=base /app/packages/relay/package.json ./packages/relay/
-COPY --from=base /app/docker/dist ./docker/dist
-COPY --from=base /app/docker/package.json ./docker/
-COPY --from=base /app/package.json ./
-
-# Install production dependencies only
-COPY --from=base /app/pnpm-lock.yaml ./
-COPY --from=base /app/pnpm-workspace.yaml ./
+# Build all packages (including docker package)
+RUN pnpm -r build && cd docker && pnpm run build
 
 # Expose ports
 # BLS_PORT: Business Logic Server HTTP port

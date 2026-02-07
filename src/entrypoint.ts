@@ -27,6 +27,7 @@ import {
   BootstrapService,
   NostrSpspServer,
   buildSpspResponseEvent,
+  buildIlpPeerInfoEvent,
   parseSpspRequest,
   type KnownPeer,
   type IlpPeerInfo,
@@ -397,6 +398,9 @@ async function main(): Promise<void> {
   await wsRelay.start();
   console.log(`[Setup] Relay listening on ws://0.0.0.0:${config.wsPort}`);
 
+  // Wait a moment for relay to be fully ready
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
   // Set up SPSP server for direct requests (not ILP-routed)
   // This handles SPSP requests that come via Nostr directly
   const spspServer = new NostrSpspServer(
@@ -454,7 +458,7 @@ async function main(): Promise<void> {
   } else {
     console.log('[Bootstrap] No known peers - running as bootstrap node');
 
-    // Publish our own ILP info to our local relay
+    // Store our own ILP info directly in the event store
     const ownIlpInfo: IlpPeerInfo = {
       ilpAddress: config.ilpAddress,
       btpEndpoint: config.btpEndpoint,
@@ -462,14 +466,16 @@ async function main(): Promise<void> {
       assetScale: config.assetScale,
     };
 
-    const bootstrapService = new BootstrapService(
-      { knownPeers: [] },
-      config.secretKey,
-      ownIlpInfo
-    );
-
-    // This will only publish our info without trying to bootstrap
+    // Build and store the event directly (self-write for bootstrap node)
     console.log('[Bootstrap] Publishing own ILP info to local relay');
+    try {
+      const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
+      eventStore.store(ilpInfoEvent);
+      console.log('[Bootstrap] ILP info published successfully');
+      console.log(`[Bootstrap] Event ID: ${ilpInfoEvent.id.slice(0, 16)}...`);
+    } catch (error) {
+      console.warn('[Bootstrap] Failed to publish ILP info:', error);
+    }
   }
 
   console.log('\n' + '='.repeat(50));
