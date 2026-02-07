@@ -1,0 +1,28 @@
+{
+  "name": "@agent-society/docker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Docker entrypoint for agent-society containers",
+  "type": "module",
+  "main": "dist/entrypoint.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/entrypoint.js"
+  },
+  "dependencies": {
+    "@agent-society/core": "workspace:*",
+    "@agent-society/relay": "workspace:*",
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.0.0",
+    "nostr-tools": "^2.10.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
