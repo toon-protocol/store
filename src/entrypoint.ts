@@ -4,7 +4,8 @@
  * Starts the following services:
  * 1. Nostr Relay Server (WebSocket)
  * 2. Business Logic Server (HTTP) with SPSP handling
- * 3. Bootstrap Service (connects to known peers)
+ * 3. Bootstrap Service (layered discovery: genesis + ArDrive + env var peers)
+ * 4. Social Peer Discovery (dynamic peer expansion via NIP-02 follow lists)
  *
  * Environment Variables:
  * - NODE_ID: Unique identifier for this node
@@ -14,7 +15,8 @@
  * - BLS_PORT: HTTP port for BLS (default: 3100)
  * - WS_PORT: WebSocket port for relay (default: 7100)
  * - CONNECTOR_ADMIN_URL: URL for connector's Admin API
- * - KNOWN_PEERS: JSON array of known peers for bootstrap
+ * - ARDRIVE_ENABLED: Enable/disable ArDrive peer lookup (default: true)
+ * - ADDITIONAL_PEERS: JSON array of extra peers beyond genesis list
  * - ASSET_CODE: Asset code (default: USD)
  * - ASSET_SCALE: Asset scale (default: 6)
  * - BASE_PRICE_PER_BYTE: Base price per byte (default: 10)
@@ -26,10 +28,11 @@ import { getPublicKey } from 'nostr-tools/pure';
 import {
   BootstrapService,
   NostrSpspServer,
+  SocialPeerDiscovery,
   buildSpspResponseEvent,
   buildIlpPeerInfoEvent,
   parseSpspRequest,
-  type KnownPeer,
+  type ConnectorAdminClient,
   type IlpPeerInfo,
   type SpspInfo,
   SPSP_REQUEST_KIND,
@@ -50,7 +53,7 @@ import {
 import crypto from 'crypto';
 
 // Environment configuration
-interface Config {
+export interface Config {
   nodeId: string;
   secretKey: Uint8Array;
   pubkey: string;
@@ -59,7 +62,9 @@ interface Config {
   blsPort: number;
   wsPort: number;
   connectorAdminUrl: string;
-  knownPeers: KnownPeer[];
+  ardriveEnabled: boolean;
+  additionalPeersJson: string | undefined;
+  relayUrls: string[];
   assetCode: string;
   assetScale: number;
   basePricePerByte: bigint;
@@ -68,7 +73,7 @@ interface Config {
 /**
  * Parse configuration from environment variables.
  */
-function parseConfig(): Config {
+export function parseConfig(): Config {
   const env = process.env;
 
   const nodeId = env['NODE_ID'];
@@ -95,15 +100,9 @@ function parseConfig(): Config {
 
   const connectorAdminUrl = env['CONNECTOR_ADMIN_URL'] || `http://${nodeId}:8081`;
 
-  let knownPeers: KnownPeer[] = [];
-  const knownPeersJson = env['KNOWN_PEERS'];
-  if (knownPeersJson) {
-    try {
-      knownPeers = JSON.parse(knownPeersJson);
-    } catch (e) {
-      console.warn('[Config] Failed to parse KNOWN_PEERS:', e);
-    }
-  }
+  const ardriveEnabled = env['ARDRIVE_ENABLED'] !== 'false';
+  const additionalPeersJson = env['ADDITIONAL_PEERS'] || undefined;
+  const relayUrls = [`ws://localhost:${wsPort}`];
 
   const assetCode = env['ASSET_CODE'] || 'USD';
   const assetScale = parseInt(env['ASSET_SCALE'] || '6', 10);
@@ -118,7 +117,9 @@ function parseConfig(): Config {
     blsPort,
     wsPort,
     connectorAdminUrl,
-    knownPeers,
+    ardriveEnabled,
+    additionalPeersJson,
+    relayUrls,
     assetCode,
     assetScale,
     basePricePerByte,
@@ -144,19 +145,29 @@ function generateSpspInfo(ilpAddress: string): SpspInfo {
 }
 
 /**
- * Create an HTTP connector admin client.
+ * Docker-specific admin client interface with required removePeer.
+ * Extends ConnectorAdminClient making removePeer non-optional since
+ * the Docker entrypoint always implements both addPeer and removePeer.
  */
-function createConnectorAdminClient(adminUrl: string) {
+export interface DockerConnectorAdminClient extends ConnectorAdminClient {
+  removePeer(peerId: string): Promise<void>;
+}
+
+/**
+ * Create an HTTP connector admin client matching the ConnectorAdminClient interface.
+ */
+export function createConnectorAdminClient(adminUrl: string): DockerConnectorAdminClient {
   return {
-    async addPeer(peerId: string, btpUrl: string, ilpAddress: string): Promise<void> {
+    async addPeer(config: {
+      id: string;
+      url: string;
+      authToken: string;
+      routes?: { prefix: string; priority?: number }[];
+    }): Promise<void> {
       const response = await fetch(`${adminUrl}/peers`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: peerId,
-          url: btpUrl,
-          ilpAddress,
-        }),
+        body: JSON.stringify(config),
       });
 
       if (!response.ok) {
@@ -165,19 +176,14 @@ function createConnectorAdminClient(adminUrl: string) {
       }
     },
 
-    async addRoute(prefix: string, nextHop: string): Promise<void> {
-      const response = await fetch(`${adminUrl}/routes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prefix,
-          nextHop,
-        }),
+    async removePeer(peerId: string): Promise<void> {
+      const response = await fetch(`${adminUrl}/peers/${peerId}`, {
+        method: 'DELETE',
       });
 
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`Failed to add route: ${response.status} ${text}`);
+        throw new Error(`Failed to remove peer: ${response.status} ${text}`);
       }
     },
   };
@@ -369,7 +375,7 @@ async function main(): Promise<void> {
   console.log(`[Config] Pubkey: ${config.pubkey.slice(0, 16)}...`);
   console.log(`[Config] ILP Address: ${config.ilpAddress}`);
   console.log(`[Config] BTP Endpoint: ${config.btpEndpoint}`);
-  console.log(`[Config] Known Peers: ${config.knownPeers.length}`);
+  console.log(`[Config] ArDrive Enabled: ${config.ardriveEnabled}`);
 
   // Initialize event store (in-memory for containers)
   const eventStore = new SqliteEventStore(':memory:');
@@ -412,71 +418,62 @@ async function main(): Promise<void> {
   });
   console.log('[Setup] SPSP server started');
 
-  // Bootstrap with known peers (if any)
-  if (config.knownPeers.length > 0) {
-    console.log('\n[Bootstrap] Starting bootstrap process...');
+  // Bootstrap with layered peer discovery (genesis + ArDrive + env var)
+  const ownIlpInfo: IlpPeerInfo = {
+    ilpAddress: config.ilpAddress,
+    btpEndpoint: config.btpEndpoint,
+    assetCode: config.assetCode,
+    assetScale: config.assetScale,
+  };
 
-    const ownIlpInfo: IlpPeerInfo = {
-      ilpAddress: config.ilpAddress,
-      btpEndpoint: config.btpEndpoint,
-      assetCode: config.assetCode,
-      assetScale: config.assetScale,
-    };
+  const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
 
-    const bootstrapService = new BootstrapService(
-      { knownPeers: config.knownPeers },
-      config.secretKey,
-      ownIlpInfo
-    );
+  console.log('\n[Bootstrap] Starting bootstrap process...');
+  const bootstrapService = new BootstrapService(
+    {
+      knownPeers: [],
+      ardriveEnabled: config.ardriveEnabled,
+      defaultRelayUrl: `ws://localhost:${config.wsPort}`,
+    },
+    config.secretKey,
+    ownIlpInfo
+  );
+  bootstrapService.setConnectorAdmin(adminClient);
 
-    // Set up connector admin client
-    const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
-    bootstrapService.setConnectorAdmin(adminClient);
+  try {
+    const results = await bootstrapService.bootstrap(config.additionalPeersJson);
 
-    // Run bootstrap
-    try {
-      const results = await bootstrapService.bootstrap();
-      console.log(`[Bootstrap] Bootstrapped with ${results.length} peers`);
+    console.log(`[Bootstrap] Peers bootstrapped: ${results.length}`);
+    if (config.ardriveEnabled) {
+      console.log(`[Bootstrap] ArDrive peer lookup was enabled`);
+    }
 
-      // Discover additional peers from bootstrap relays
-      for (const result of results) {
-        try {
-          const discovered = await bootstrapService.discoverPeersViaRelay(
-            result.knownPeer.relayUrl,
-            config.knownPeers.map((p) => p.pubkey)
-          );
-          console.log(
-            `[Bootstrap] Discovered ${discovered.size} additional peers from ${result.knownPeer.relayUrl}`
-          );
-        } catch (error) {
-          console.warn('[Bootstrap] Failed to discover additional peers:', error);
-        }
+    if (results.length === 0) {
+      // No peers found — running as bootstrap node
+      console.log('[Bootstrap] No peers found - running as bootstrap node');
+      console.log('[Bootstrap] Publishing own ILP info to local relay');
+      try {
+        const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
+        eventStore.store(ilpInfoEvent);
+        console.log('[Bootstrap] ILP info published successfully');
+        console.log(`[Bootstrap] Event ID: ${ilpInfoEvent.id.slice(0, 16)}...`);
+      } catch (error) {
+        console.warn('[Bootstrap] Failed to publish ILP info:', error);
       }
-    } catch (error) {
-      console.error('[Bootstrap] Bootstrap failed:', error);
     }
-  } else {
-    console.log('[Bootstrap] No known peers - running as bootstrap node');
-
-    // Store our own ILP info directly in the event store
-    const ownIlpInfo: IlpPeerInfo = {
-      ilpAddress: config.ilpAddress,
-      btpEndpoint: config.btpEndpoint,
-      assetCode: config.assetCode,
-      assetScale: config.assetScale,
-    };
-
-    // Build and store the event directly (self-write for bootstrap node)
-    console.log('[Bootstrap] Publishing own ILP info to local relay');
-    try {
-      const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
-      eventStore.store(ilpInfoEvent);
-      console.log('[Bootstrap] ILP info published successfully');
-      console.log(`[Bootstrap] Event ID: ${ilpInfoEvent.id.slice(0, 16)}...`);
-    } catch (error) {
-      console.warn('[Bootstrap] Failed to publish ILP info:', error);
-    }
+  } catch (error) {
+    console.error('[Bootstrap] Bootstrap failed:', error);
   }
+
+  // Start social graph peer discovery
+  const socialDiscovery = new SocialPeerDiscovery(
+    { relayUrls: config.relayUrls },
+    config.secretKey,
+    ownIlpInfo
+  );
+  socialDiscovery.setConnectorAdmin(adminClient);
+  const socialSubscription = socialDiscovery.start();
+  console.log('[Setup] Social graph discovery started');
 
   console.log('\n' + '='.repeat(50));
   console.log('Agent Society Container Ready');
@@ -485,6 +482,9 @@ async function main(): Promise<void> {
   // Graceful shutdown handling
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[Shutdown] Received ${signal}`);
+
+    socialSubscription.unsubscribe();
+    console.log('[Shutdown] Social discovery stopped');
 
     spspSubscription.unsubscribe();
     await wsRelay.stop();
@@ -498,8 +498,10 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
-// Run main
-main().catch((error) => {
-  console.error('[Fatal] Startup error:', error);
-  process.exit(1);
-});
+// Run main only when executed directly (not when imported for testing)
+if (process.env['VITEST'] === undefined) {
+  main().catch((error) => {
+    console.error('[Fatal] Startup error:', error);
+    process.exit(1);
+  });
+}
