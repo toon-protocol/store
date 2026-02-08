@@ -13,6 +13,7 @@ WORKDIR /app
 
 # Copy package files for dependency installation
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/bls/package.json ./packages/bls/
 COPY packages/core/package.json ./packages/core/
 COPY packages/relay/package.json ./packages/relay/
 COPY docker/package.json ./docker/
@@ -22,6 +23,7 @@ RUN pnpm install --frozen-lockfile
 
 # Copy source code
 COPY tsconfig.json ./
+COPY packages/bls/ ./packages/bls/
 COPY packages/core/ ./packages/core/
 COPY packages/relay/ ./packages/relay/
 COPY docker/ ./docker/
