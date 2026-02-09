@@ -20,6 +20,13 @@
  * - ASSET_CODE: Asset code (default: USD)
  * - ASSET_SCALE: Asset scale (default: 6)
  * - BASE_PRICE_PER_BYTE: Base price per byte (default: 10)
+ * - AGENT_RUNTIME_URL: URL for agent-runtime POST /ilp/send (optional; enables ILP-first flow)
+ * - SUPPORTED_CHAINS: Comma-separated chain identifiers (e.g., "evm:base:8453")
+ * - SETTLEMENT_ADDRESS_*: Settlement address per chain (e.g., SETTLEMENT_ADDRESS_EVM_BASE_8453=0x...)
+ * - PREFERRED_TOKEN_*: Preferred token per chain
+ * - TOKEN_NETWORK_*: Token network address per chain
+ * - SETTLEMENT_TIMEOUT: Settlement timeout in seconds
+ * - INITIAL_DEPOSIT: Initial deposit amount
  */
 
 import { serve, type ServerType } from '@hono/node-server';
@@ -27,14 +34,18 @@ import { Hono, type Context } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
 import {
   BootstrapService,
+  RelayMonitor,
+  createAgentRuntimeClient,
   NostrSpspServer,
   SocialPeerDiscovery,
   buildSpspResponseEvent,
   buildIlpPeerInfoEvent,
   parseSpspRequest,
   type ConnectorAdminClient,
+  type BootstrapEvent,
   type IlpPeerInfo,
   type SpspInfo,
+  type SpspRequestSettlementInfo,
   SPSP_REQUEST_KIND,
 } from '@agent-society/core';
 import {
@@ -68,6 +79,9 @@ export interface Config {
   assetCode: string;
   assetScale: number;
   basePricePerByte: bigint;
+  agentRuntimeUrl: string | undefined;
+  settlementInfo: SpspRequestSettlementInfo | undefined;
+  spspMinPrice: bigint | undefined;
 }
 
 /**
@@ -108,6 +122,59 @@ export function parseConfig(): Config {
   const assetScale = parseInt(env['ASSET_SCALE'] || '6', 10);
   const basePricePerByte = BigInt(env['BASE_PRICE_PER_BYTE'] || '10');
 
+  // ILP-first flow: agent-runtime URL (optional)
+  const agentRuntimeUrl = env['AGENT_RUNTIME_URL'] || undefined;
+  if (agentRuntimeUrl) {
+    try {
+      new URL(agentRuntimeUrl);
+    } catch {
+      throw new Error(`AGENT_RUNTIME_URL is not a valid URL: ${agentRuntimeUrl}`);
+    }
+  }
+
+  // Settlement info (optional, only when SUPPORTED_CHAINS is set)
+  let settlementInfo: SpspRequestSettlementInfo | undefined;
+  const supportedChainsStr = env['SUPPORTED_CHAINS'];
+  if (supportedChainsStr) {
+    const supportedChains = supportedChainsStr.split(',').map((s) => s.trim()).filter(Boolean);
+    const settlementAddresses: Record<string, string> = {};
+    const preferredTokens: Record<string, string> = {};
+
+    for (const chain of supportedChains) {
+      // Convert chain id to env var key: "evm:base:8453" -> "EVM_BASE_8453"
+      const envKey = chain.replace(/:/g, '_').toUpperCase();
+      const addr = env[`SETTLEMENT_ADDRESS_${envKey}`];
+      if (addr) settlementAddresses[chain] = addr;
+      const token = env[`PREFERRED_TOKEN_${envKey}`];
+      if (token) preferredTokens[chain] = token;
+    }
+
+    // Warn for chains without a settlement address
+    for (const chain of supportedChains) {
+      if (!settlementAddresses[chain]) {
+        console.warn(`[Config] Warning: chain "${chain}" listed in SUPPORTED_CHAINS but no SETTLEMENT_ADDRESS_* env var found`);
+      }
+    }
+
+    settlementInfo = {
+      ilpAddress,
+      supportedChains,
+      ...(Object.keys(settlementAddresses).length > 0 && { settlementAddresses }),
+      ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
+    };
+  }
+
+  // SPSP minimum price (optional, bootstrap nodes set to 0)
+  let spspMinPrice: bigint | undefined;
+  const spspMinPriceStr = env['SPSP_MIN_PRICE'];
+  if (spspMinPriceStr !== undefined && spspMinPriceStr !== '') {
+    try {
+      spspMinPrice = BigInt(spspMinPriceStr);
+    } catch {
+      throw new Error(`SPSP_MIN_PRICE is not a valid integer: ${spspMinPriceStr}`);
+    }
+  }
+
   return {
     nodeId,
     secretKey,
@@ -123,6 +190,9 @@ export function parseConfig(): Config {
     assetCode,
     assetScale,
     basePricePerByte,
+    agentRuntimeUrl,
+    settlementInfo,
+    spspMinPrice,
   };
 }
 
@@ -195,7 +265,8 @@ export function createConnectorAdminClient(adminUrl: string): DockerConnectorAdm
 function createBlsServer(
   config: Config,
   eventStore: EventStore,
-  pricingService: PricingService
+  pricingService: PricingService,
+  getBootstrapPhase?: () => string
 ): Hono {
   const app = new Hono();
 
@@ -207,6 +278,7 @@ function createBlsServer(
       pubkey: config.pubkey,
       ilpAddress: config.ilpAddress,
       timestamp: Date.now(),
+      ...(getBootstrapPhase && { bootstrapPhase: getBootstrapPhase() }),
     });
   });
 
@@ -362,6 +434,34 @@ function createBlsServer(
 }
 
 /**
+ * Wait for agent-runtime to become healthy before proceeding with bootstrap.
+ */
+export async function waitForAgentRuntime(
+  url: string,
+  options?: { timeout?: number; interval?: number }
+): Promise<void> {
+  const timeout = options?.timeout ?? 60000;
+  const interval = options?.interval ?? 2000;
+  const healthUrl = `${url}/health`;
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    try {
+      const response = await fetch(healthUrl);
+      if (response.ok) {
+        return;
+      }
+      console.log(`[Bootstrap] Agent-runtime not ready (HTTP ${response.status}), retrying...`);
+    } catch {
+      console.log(`[Bootstrap] Agent-runtime not reachable at ${healthUrl}, retrying...`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+
+  throw new Error(`Agent-runtime health check timed out after ${timeout}ms: ${url}`);
+}
+
+/**
  * Main entrypoint.
  */
 async function main(): Promise<void> {
@@ -382,17 +482,41 @@ async function main(): Promise<void> {
   console.log('[Setup] Initialized in-memory event store');
 
   // Initialize pricing service
+  const spspPrice = config.spspMinPrice !== undefined
+    ? config.spspMinPrice
+    : config.basePricePerByte / 2n;
   const pricingService = new PricingService({
     basePricePerByte: config.basePricePerByte,
-    // SPSP requests have lower price to encourage peering
     kindOverrides: new Map([
-      [SPSP_REQUEST_KIND, config.basePricePerByte / 2n], // kind:23194
+      [SPSP_REQUEST_KIND, spspPrice], // kind:23194
     ]),
   });
   console.log(`[Setup] Pricing: ${config.basePricePerByte} units/byte`);
 
-  // Create and start BLS HTTP server
-  const blsApp = createBlsServer(config, eventStore, pricingService);
+  // Set up bootstrap service early so health endpoint can report phase
+  const bootstrapService = new BootstrapService(
+    {
+      knownPeers: [],
+      ardriveEnabled: config.ardriveEnabled,
+      defaultRelayUrl: `ws://localhost:${config.wsPort}`,
+      ...(config.agentRuntimeUrl && { agentRuntimeUrl: config.agentRuntimeUrl }),
+      ...(config.settlementInfo && { settlementInfo: config.settlementInfo }),
+      ownIlpAddress: config.ilpAddress,
+      toonEncoder: encodeEventToToon,
+      toonDecoder: decodeEventFromToon,
+      basePricePerByte: config.basePricePerByte,
+    },
+    config.secretKey,
+    {
+      ilpAddress: config.ilpAddress,
+      btpEndpoint: config.btpEndpoint,
+      assetCode: config.assetCode,
+      assetScale: config.assetScale,
+    }
+  );
+
+  // Create and start BLS HTTP server (pass bootstrap phase getter for health endpoint)
+  const blsApp = createBlsServer(config, eventStore, pricingService, () => bootstrapService.getPhase());
   const blsServer: ServerType = serve({
     fetch: blsApp.fetch,
     port: config.blsPort,
@@ -429,16 +553,50 @@ async function main(): Promise<void> {
   const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
 
   console.log('\n[Bootstrap] Starting bootstrap process...');
-  const bootstrapService = new BootstrapService(
-    {
-      knownPeers: [],
-      ardriveEnabled: config.ardriveEnabled,
-      defaultRelayUrl: `ws://localhost:${config.wsPort}`,
-    },
-    config.secretKey,
-    ownIlpInfo
-  );
   bootstrapService.setConnectorAdmin(adminClient);
+
+  // Wire up agent-runtime client for ILP-first flow
+  if (config.agentRuntimeUrl) {
+    const agentRuntimeClient = createAgentRuntimeClient(config.agentRuntimeUrl);
+    bootstrapService.setAgentRuntimeClient(agentRuntimeClient);
+    console.log(`[Bootstrap] ILP-first flow enabled via ${config.agentRuntimeUrl}`);
+  }
+
+  // Register bootstrap event listener for logging
+  bootstrapService.on((event: BootstrapEvent) => {
+    switch (event.type) {
+      case 'bootstrap:phase':
+        console.log(`[Bootstrap] Phase: ${event.previousPhase || 'init'} -> ${event.phase}`);
+        break;
+      case 'bootstrap:peer-registered':
+        console.log(`[Bootstrap] Peer registered: ${event.peerId} (${event.ilpAddress})`);
+        break;
+      case 'bootstrap:channel-opened':
+        console.log(`[Bootstrap] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`);
+        break;
+      case 'bootstrap:handshake-failed':
+        console.warn(`[Bootstrap] Handshake failed for ${event.peerId}: ${event.reason}`);
+        break;
+      case 'bootstrap:announced':
+        console.log(`[Bootstrap] Announced to ${event.peerId} (eventId: ${event.eventId}, amount: ${event.amount})`);
+        break;
+      case 'bootstrap:announce-failed':
+        console.warn(`[Bootstrap] Announce failed for ${event.peerId}: ${event.reason}`);
+        break;
+      case 'bootstrap:ready':
+        console.log(`[Bootstrap] Ready: ${event.peerCount} peers, ${event.channelCount} channels`);
+        break;
+    }
+  });
+
+  // Wait for agent-runtime to be healthy before bootstrapping
+  if (config.agentRuntimeUrl) {
+    console.log(`[Bootstrap] Waiting for agent-runtime at ${config.agentRuntimeUrl}...`);
+    await waitForAgentRuntime(config.agentRuntimeUrl);
+    console.log('[Bootstrap] Agent-runtime is healthy');
+  }
+
+  let relayMonitorSubscription: { unsubscribe(): void } | undefined;
 
   try {
     const results = await bootstrapService.bootstrap(config.additionalPeersJson);
@@ -461,6 +619,49 @@ async function main(): Promise<void> {
         console.warn('[Bootstrap] Failed to publish ILP info:', error);
       }
     }
+
+    // Start RelayMonitor to discover new peers on our relay
+    if (config.agentRuntimeUrl) {
+      const relayMonitor = new RelayMonitor(
+        {
+          relayUrl: `ws://localhost:${config.wsPort}`,
+          secretKey: config.secretKey,
+          toonEncoder: encodeEventToToon,
+          toonDecoder: decodeEventFromToon,
+          basePricePerByte: config.basePricePerByte,
+          settlementInfo: config.settlementInfo,
+        }
+      );
+      relayMonitor.setConnectorAdmin(adminClient);
+      relayMonitor.setAgentRuntimeClient(
+        createAgentRuntimeClient(config.agentRuntimeUrl)
+      );
+
+      // Register same event listener for relay monitor events
+      relayMonitor.on((event: BootstrapEvent) => {
+        switch (event.type) {
+          case 'bootstrap:peer-discovered':
+            console.log(`[RelayMonitor] Peer discovered: ${event.peerPubkey.slice(0, 16)}... (${event.ilpAddress})`);
+            break;
+          case 'bootstrap:peer-registered':
+            console.log(`[RelayMonitor] Peer registered: ${event.peerId} (${event.ilpAddress})`);
+            break;
+          case 'bootstrap:channel-opened':
+            console.log(`[RelayMonitor] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`);
+            break;
+          case 'bootstrap:handshake-failed':
+            console.warn(`[RelayMonitor] Handshake failed for ${event.peerId}: ${event.reason}`);
+            break;
+          case 'bootstrap:peer-deregistered':
+            console.log(`[RelayMonitor] Peer deregistered: ${event.peerId} (${event.reason})`);
+            break;
+        }
+      });
+
+      const bootstrapPeerPubkeys = results.map((r) => r.knownPeer.pubkey);
+      relayMonitorSubscription = relayMonitor.start(bootstrapPeerPubkeys);
+      console.log('[RelayMonitor] Started monitoring relay for new peers');
+    }
   } catch (error) {
     console.error('[Bootstrap] Bootstrap failed:', error);
   }
@@ -482,6 +683,11 @@ async function main(): Promise<void> {
   // Graceful shutdown handling
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[Shutdown] Received ${signal}`);
+
+    if (relayMonitorSubscription) {
+      relayMonitorSubscription.unsubscribe();
+      console.log('[Shutdown] Relay monitor stopped');
+    }
 
     socialSubscription.unsubscribe();
     console.log('[Shutdown] Social discovery stopped');

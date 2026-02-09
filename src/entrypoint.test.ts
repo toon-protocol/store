@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { parseConfig, createConnectorAdminClient } from './entrypoint.js';
+import { parseConfig, createConnectorAdminClient, waitForAgentRuntime } from './entrypoint.js';
 
 // Mock nostr-tools/pure to avoid native crypto dependency in tests
 vi.mock('nostr-tools/pure', () => ({
@@ -27,6 +27,14 @@ describe('parseConfig', () => {
     'ASSET_CODE',
     'ASSET_SCALE',
     'BASE_PRICE_PER_BYTE',
+    'AGENT_RUNTIME_URL',
+    'SUPPORTED_CHAINS',
+    'SETTLEMENT_ADDRESS_EVM_BASE_8453',
+    'PREFERRED_TOKEN_EVM_BASE_8453',
+    'TOKEN_NETWORK_EVM_BASE_8453',
+    'SETTLEMENT_TIMEOUT',
+    'INITIAL_DEPOSIT',
+    'SPSP_MIN_PRICE',
   ];
 
   beforeEach(() => {
@@ -144,6 +152,78 @@ describe('parseConfig', () => {
 
     expect(config.relayUrls).toEqual(['ws://localhost:9999']);
   });
+
+  it('throws when AGENT_RUNTIME_URL is not a valid URL', () => {
+    Object.assign(process.env, requiredEnv, { AGENT_RUNTIME_URL: 'not-a-url' });
+
+    expect(() => parseConfig()).toThrow('AGENT_RUNTIME_URL is not a valid URL: not-a-url');
+  });
+
+  it('accepts valid AGENT_RUNTIME_URL and stores in config', () => {
+    Object.assign(process.env, requiredEnv, { AGENT_RUNTIME_URL: 'http://localhost:3000' });
+
+    const config = parseConfig();
+
+    expect(config.agentRuntimeUrl).toBe('http://localhost:3000');
+  });
+
+  it('parses SPSP_MIN_PRICE=0 as 0n bigint', () => {
+    Object.assign(process.env, requiredEnv, { SPSP_MIN_PRICE: '0' });
+
+    const config = parseConfig();
+
+    expect(config.spspMinPrice).toBe(0n);
+  });
+
+  it('parses SPSP_MIN_PRICE=5 as 5n bigint', () => {
+    Object.assign(process.env, requiredEnv, { SPSP_MIN_PRICE: '5' });
+
+    const config = parseConfig();
+
+    expect(config.spspMinPrice).toBe(5n);
+  });
+
+  it('defaults spspMinPrice to undefined when SPSP_MIN_PRICE is not set', () => {
+    Object.assign(process.env, requiredEnv);
+
+    const config = parseConfig();
+
+    expect(config.spspMinPrice).toBeUndefined();
+  });
+
+  it('throws when SPSP_MIN_PRICE is not a valid integer', () => {
+    Object.assign(process.env, requiredEnv, { SPSP_MIN_PRICE: 'abc' });
+
+    expect(() => parseConfig()).toThrow('SPSP_MIN_PRICE is not a valid integer: abc');
+  });
+
+  it('parses SUPPORTED_CHAINS with settlement address into settlementInfo', () => {
+    Object.assign(process.env, requiredEnv, {
+      SUPPORTED_CHAINS: 'evm:base:8453',
+      SETTLEMENT_ADDRESS_EVM_BASE_8453: '0x1234567890abcdef',
+    });
+
+    const config = parseConfig();
+
+    expect(config.settlementInfo).toBeDefined();
+    expect(config.settlementInfo?.supportedChains).toEqual(['evm:base:8453']);
+    expect(config.settlementInfo?.settlementAddresses).toEqual({ 'evm:base:8453': '0x1234567890abcdef' });
+  });
+
+  it('logs warning when SUPPORTED_CHAINS has chain without settlement address', () => {
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    Object.assign(process.env, requiredEnv, {
+      SUPPORTED_CHAINS: 'evm:base:8453',
+    });
+
+    parseConfig();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('chain "evm:base:8453" listed in SUPPORTED_CHAINS but no SETTLEMENT_ADDRESS_*')
+    );
+    warnSpy.mockRestore();
+  });
 });
 
 describe('createConnectorAdminClient', () => {
@@ -227,5 +307,48 @@ describe('createConnectorAdminClient', () => {
     await expect(client.removePeer('nonexistent')).rejects.toThrow(
       'Failed to remove peer: 404 Not Found'
     );
+  });
+});
+
+describe('waitForAgentRuntime', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('resolves immediately when health endpoint returns 200', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await waitForAgentRuntime('http://localhost:3000', { timeout: 5000, interval: 100 });
+
+    expect(mockFetch).toHaveBeenCalledWith('http://localhost:3000/health');
+  });
+
+  it('retries on fetch error until success', async () => {
+    const mockFetch = vi.fn()
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValueOnce({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await waitForAgentRuntime('http://localhost:3000', { timeout: 10000, interval: 10 });
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws on timeout after max attempts', async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      waitForAgentRuntime('http://localhost:3000', { timeout: 50, interval: 10 })
+    ).rejects.toThrow('Agent-runtime health check timed out after 50ms: http://localhost:3000');
   });
 });
