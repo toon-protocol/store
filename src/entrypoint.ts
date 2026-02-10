@@ -629,7 +629,7 @@ async function main(): Promise<void> {
   let channelClient: ConnectorChannelClient | undefined;
   if (config.settlementInfo) {
     settlementConfig = {
-      ownSupportedChains: config.settlementInfo.supportedChains,
+      ownSupportedChains: config.settlementInfo.supportedChains ?? [],
       ownSettlementAddresses: config.settlementInfo.settlementAddresses ?? {},
       ownPreferredTokens: config.settlementInfo.preferredTokens,
       ownTokenNetworks: config.settlementInfo.tokenNetworks,

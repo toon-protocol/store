@@ -6,6 +6,9 @@
 
 FROM node:20-slim
 
+# Install build dependencies for native modules (bufferutil, utf-8-validate, secp256k1, keccak)
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
