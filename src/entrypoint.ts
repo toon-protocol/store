@@ -62,9 +62,9 @@ import {
   encodeEventToToon,
   ILP_ERROR_CODES,
   type EventStore,
-  type HandlePaymentRequest,
-  type HandlePaymentAcceptResponse,
-  type HandlePaymentRejectResponse,
+  type HandlePacketRequest,
+  type HandlePacketAcceptResponse,
+  type HandlePacketRejectResponse,
 } from '@agent-society/relay';
 import crypto from 'crypto';
 
@@ -356,14 +356,14 @@ export function createBlsServer(
     });
   });
 
-  // Handle payment endpoint
-  app.post('/handle-payment', async (c: Context) => {
+  // Handle packet endpoint
+  app.post('/handle-packet', async (c: Context) => {
     try {
-      const body = (await c.req.json()) as HandlePaymentRequest;
+      const body = (await c.req.json()) as HandlePacketRequest;
 
       // Validate required fields
       if (!body.amount || !body.destination || !body.data) {
-        const response: HandlePaymentRejectResponse = {
+        const response: HandlePacketRejectResponse = {
           accept: false,
           code: ILP_ERROR_CODES.BAD_REQUEST,
           message: 'Missing required fields: amount, destination, data',
@@ -376,7 +376,7 @@ export function createBlsServer(
       try {
         toonBytes = Uint8Array.from(Buffer.from(body.data, 'base64'));
       } catch {
-        const response: HandlePaymentRejectResponse = {
+        const response: HandlePacketRejectResponse = {
           accept: false,
           code: ILP_ERROR_CODES.BAD_REQUEST,
           message: 'Invalid base64 encoding in data field',
@@ -389,7 +389,7 @@ export function createBlsServer(
       try {
         event = decodeEventFromToon(toonBytes);
       } catch (error) {
-        const response: HandlePaymentRejectResponse = {
+        const response: HandlePacketRejectResponse = {
           accept: false,
           code: ILP_ERROR_CODES.BAD_REQUEST,
           message: `Invalid TOON data: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -405,7 +405,7 @@ export function createBlsServer(
       if (event.kind === SPSP_REQUEST_KIND) {
         // Verify payment meets price
         if (amount < price) {
-          const response: HandlePaymentRejectResponse = {
+          const response: HandlePacketRejectResponse = {
             accept: false,
             code: ILP_ERROR_CODES.INSUFFICIENT_AMOUNT,
             message: 'Insufficient payment for SPSP request',
@@ -478,7 +478,7 @@ export function createBlsServer(
               // null result = no chain match = graceful degradation (basic SPSP response)
             } catch (settlementError) {
               // Channel open failure or timeout — return ILP REJECT
-              const rejectResponse: HandlePaymentRejectResponse = {
+              const rejectResponse: HandlePacketRejectResponse = {
                 accept: false,
                 code: ILP_ERROR_CODES.INTERNAL_ERROR,
                 message: `Settlement negotiation failed: ${settlementError instanceof Error ? settlementError.message : 'Unknown error'}`,
@@ -499,7 +499,7 @@ export function createBlsServer(
           const responseToon = encodeEventToToon(responseEvent);
           const responseData = Buffer.from(responseToon).toString('base64');
 
-          const response: HandlePaymentAcceptResponse = {
+          const response: HandlePacketAcceptResponse = {
             accept: true,
             metadata: {
               eventId: event.id,
@@ -513,7 +513,7 @@ export function createBlsServer(
             data: responseData,
           });
         } catch (error) {
-          const response: HandlePaymentRejectResponse = {
+          const response: HandlePacketRejectResponse = {
             accept: false,
             code: ILP_ERROR_CODES.BAD_REQUEST,
             message: `Failed to process SPSP request: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -526,7 +526,7 @@ export function createBlsServer(
       // Self-write bypass: owner events skip payment verification
       if (event.pubkey !== config.pubkey) {
         if (amount < price) {
-          const response: HandlePaymentRejectResponse = {
+          const response: HandlePacketRejectResponse = {
             accept: false,
             code: ILP_ERROR_CODES.INSUFFICIENT_AMOUNT,
             message: 'Insufficient payment amount',
@@ -542,7 +542,7 @@ export function createBlsServer(
       // Store the event
       eventStore.store(event);
 
-      const response: HandlePaymentAcceptResponse = {
+      const response: HandlePacketAcceptResponse = {
         accept: true,
         metadata: {
           eventId: event.id,
@@ -552,7 +552,7 @@ export function createBlsServer(
 
       return c.json(response);
     } catch (error) {
-      const response: HandlePaymentRejectResponse = {
+      const response: HandlePacketRejectResponse = {
         accept: false,
         code: ILP_ERROR_CODES.INTERNAL_ERROR,
         message: error instanceof Error ? error.message : 'Internal server error',
