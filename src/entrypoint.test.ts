@@ -605,7 +605,7 @@ describe('waitForAgentRuntime', () => {
   });
 });
 
-describe('createBlsServer /handle-payment settlement', () => {
+describe('createBlsServer /handle-packet settlement', () => {
   const SENDER_PUBKEY = 'b'.repeat(64);
 
   const testConfig: Config = {
@@ -650,7 +650,7 @@ describe('createBlsServer /handle-payment settlement', () => {
     addPeer: vi.fn().mockResolvedValue(undefined),
   };
 
-  // Helper: build a valid /handle-payment request body with a kind:23194 SPSP event
+  // Helper: build a valid /handle-packet request body with a kind:23194 SPSP event
   function buildSpspPaymentBody(amount = '100') {
     return {
       amount,
@@ -719,7 +719,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       mockSettlementConfig, mockChannelClient, mockAdminClient
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildSpspPaymentBody()),
@@ -763,7 +763,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       mockSettlementConfig, mockChannelClient, mockAdminClient
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildSpspPaymentBody()),
@@ -797,7 +797,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       mockSettlementConfig, mockChannelClient, mockAdminClient
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildSpspPaymentBody()),
@@ -829,7 +829,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       mockSettlementConfig, mockChannelClient, mockAdminClient
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildSpspPaymentBody()),
@@ -856,7 +856,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       testConfig, mockEventStore as never, pricingService
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildSpspPaymentBody()),
@@ -880,7 +880,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       testConfig, mockEventStore as never, pricingService
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildSpspPaymentBody()),
@@ -910,7 +910,7 @@ describe('createBlsServer /handle-payment settlement', () => {
       testConfig, mockEventStore as never, pricingService
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1021,13 +1021,13 @@ describe('SPSP path equivalence (AC: 9)', () => {
     const mockChannelClient = { openChannel: vi.fn(), getChannelState: vi.fn() };
     const mockAdminClient = { addPeer: vi.fn().mockResolvedValue(undefined) };
 
-    // BLS path: invoke /handle-payment
+    // BLS path: invoke /handle-packet
     const app = createBlsServer(
       testConfig, mockEventStore as never, pricingService, undefined,
       settlementConfig, mockChannelClient, mockAdminClient
     );
 
-    const res = await app.request('/handle-payment', {
+    const res = await app.request('/handle-packet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
