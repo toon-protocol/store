@@ -41,7 +41,13 @@ import {
   buildSpspResponseEvent,
   buildIlpPeerInfoEvent,
   parseSpspRequest,
+  negotiateAndOpenChannel,
   type ConnectorAdminClient,
+  type ConnectorChannelClient,
+  type OpenChannelParams,
+  type OpenChannelResult,
+  type ChannelState,
+  type SettlementNegotiationConfig,
   type BootstrapEvent,
   type IlpPeerInfo,
   type SpspInfo,
@@ -54,7 +60,6 @@ import {
   PricingService,
   decodeEventFromToon,
   encodeEventToToon,
-  generateFulfillment,
   ILP_ERROR_CODES,
   type EventStore,
   type HandlePaymentRequest,
@@ -81,6 +86,8 @@ export interface Config {
   basePricePerByte: bigint;
   agentRuntimeUrl: string | undefined;
   settlementInfo: SpspRequestSettlementInfo | undefined;
+  initialDeposit: string | undefined;
+  settlementTimeout: number | undefined;
   spspMinPrice: bigint | undefined;
 }
 
@@ -139,6 +146,7 @@ export function parseConfig(): Config {
     const supportedChains = supportedChainsStr.split(',').map((s) => s.trim()).filter(Boolean);
     const settlementAddresses: Record<string, string> = {};
     const preferredTokens: Record<string, string> = {};
+    const tokenNetworks: Record<string, string> = {};
 
     for (const chain of supportedChains) {
       // Convert chain id to env var key: "evm:base:8453" -> "EVM_BASE_8453"
@@ -147,6 +155,8 @@ export function parseConfig(): Config {
       if (addr) settlementAddresses[chain] = addr;
       const token = env[`PREFERRED_TOKEN_${envKey}`];
       if (token) preferredTokens[chain] = token;
+      const tokenNet = env[`TOKEN_NETWORK_${envKey}`];
+      if (tokenNet) tokenNetworks[chain] = tokenNet;
     }
 
     // Warn for chains without a settlement address
@@ -161,7 +171,29 @@ export function parseConfig(): Config {
       supportedChains,
       ...(Object.keys(settlementAddresses).length > 0 && { settlementAddresses }),
       ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
+      ...(Object.keys(tokenNetworks).length > 0 && { tokenNetworks }),
     };
+  }
+
+  // Initial deposit for payment channels (optional)
+  let initialDeposit: string | undefined;
+  const initialDepositStr = env['INITIAL_DEPOSIT'];
+  if (initialDepositStr !== undefined && initialDepositStr !== '') {
+    if (!/^\d+$/.test(initialDepositStr)) {
+      throw new Error(`INITIAL_DEPOSIT must be a non-negative integer string: ${initialDepositStr}`);
+    }
+    initialDeposit = initialDepositStr;
+  }
+
+  // Settlement timeout in seconds (optional)
+  let settlementTimeout: number | undefined;
+  const settlementTimeoutStr = env['SETTLEMENT_TIMEOUT'];
+  if (settlementTimeoutStr !== undefined && settlementTimeoutStr !== '') {
+    const parsed = parseInt(settlementTimeoutStr, 10);
+    if (isNaN(parsed) || parsed <= 0) {
+      throw new Error(`SETTLEMENT_TIMEOUT must be a positive integer: ${settlementTimeoutStr}`);
+    }
+    settlementTimeout = parsed;
   }
 
   // SPSP minimum price (optional, bootstrap nodes set to 0)
@@ -192,6 +224,8 @@ export function parseConfig(): Config {
     basePricePerByte,
     agentRuntimeUrl,
     settlementInfo,
+    initialDeposit,
+    settlementTimeout,
     spspMinPrice,
   };
 }
@@ -260,25 +294,65 @@ export function createConnectorAdminClient(adminUrl: string): DockerConnectorAdm
 }
 
 /**
+ * Create an HTTP channel client matching the ConnectorChannelClient interface.
+ * Calls the connector Admin API to open/query payment channels.
+ */
+export function createChannelClient(connectorAdminUrl: string): ConnectorChannelClient {
+  return {
+    async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
+      const response = await fetch(`${connectorAdminUrl}/admin/channels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Failed to open channel: ${response.status} ${text}`);
+      }
+
+      return (await response.json()) as OpenChannelResult;
+    },
+
+    async getChannelState(channelId: string): Promise<ChannelState> {
+      const response = await fetch(`${connectorAdminUrl}/admin/channels/${channelId}`);
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Failed to get channel state: ${response.status} ${text}`);
+      }
+
+      return (await response.json()) as ChannelState;
+    },
+  };
+}
+
+/**
  * Create the BLS HTTP server with SPSP handling.
  */
-function createBlsServer(
+export function createBlsServer(
   config: Config,
   eventStore: EventStore,
   pricingService: PricingService,
-  getBootstrapPhase?: () => string
+  getBootstrapPhase?: () => string,
+  settlementConfig?: SettlementNegotiationConfig,
+  channelClient?: ConnectorChannelClient,
+  adminClient?: ConnectorAdminClient,
+  getBootstrapCounts?: () => { peerCount: number; channelCount: number }
 ): Hono {
   const app = new Hono();
 
   // Health check endpoint
   app.get('/health', (c: Context) => {
+    const bootstrapPhase = getBootstrapPhase?.();
     return c.json({
       status: 'healthy',
       nodeId: config.nodeId,
       pubkey: config.pubkey,
       ilpAddress: config.ilpAddress,
       timestamp: Date.now(),
-      ...(getBootstrapPhase && { bootstrapPhase: getBootstrapPhase() }),
+      ...(bootstrapPhase && { bootstrapPhase }),
+      ...(bootstrapPhase === 'ready' && getBootstrapCounts && getBootstrapCounts()),
     });
   });
 
@@ -350,13 +424,72 @@ function createBlsServer(
           // Generate fresh SPSP parameters
           const spspInfo = generateSpspInfo(config.ilpAddress);
 
+          // Build base SPSP response
+          const spspResponse: {
+            requestId: string;
+            destinationAccount: string;
+            sharedSecret: string;
+            negotiatedChain?: string;
+            settlementAddress?: string;
+            tokenAddress?: string;
+            tokenNetworkAddress?: string;
+            channelId?: string;
+            settlementTimeout?: number;
+          } = {
+            requestId: spspRequest.requestId,
+            destinationAccount: spspInfo.destinationAccount,
+            sharedSecret: spspInfo.sharedSecret,
+          };
+
+          // Attempt settlement negotiation if request has settlement fields and config available
+          if (spspRequest.supportedChains && settlementConfig && channelClient) {
+            try {
+              const settlementResult = await negotiateAndOpenChannel({
+                request: spspRequest,
+                config: settlementConfig,
+                channelClient,
+                senderPubkey: event.pubkey,
+              });
+
+              if (settlementResult) {
+                // Merge settlement fields into response
+                spspResponse.negotiatedChain = settlementResult.negotiatedChain;
+                spspResponse.settlementAddress = settlementResult.settlementAddress;
+                spspResponse.tokenAddress = settlementResult.tokenAddress;
+                spspResponse.tokenNetworkAddress = settlementResult.tokenNetworkAddress;
+                spspResponse.channelId = settlementResult.channelId;
+                spspResponse.settlementTimeout = settlementResult.settlementTimeout;
+
+                // Register peer with settlement config (non-fatal)
+                if (adminClient && spspRequest.settlementAddresses?.[settlementResult.negotiatedChain]) {
+                  try {
+                    const peerId = `nostr-${event.pubkey.slice(0, 16)}`;
+                    await adminClient.addPeer({
+                      id: peerId,
+                      url: spspRequest.ilpAddress ? `btp+ws://${spspRequest.ilpAddress}` : '',
+                      authToken: '',
+                      routes: spspRequest.ilpAddress ? [{ prefix: spspRequest.ilpAddress }] : [],
+                    });
+                  } catch (peerError) {
+                    console.warn(`[BLS] Failed to register peer after channel open: ${peerError instanceof Error ? peerError.message : 'Unknown error'}`);
+                  }
+                }
+              }
+              // null result = no chain match = graceful degradation (basic SPSP response)
+            } catch (settlementError) {
+              // Channel open failure or timeout — return ILP REJECT
+              const rejectResponse: HandlePaymentRejectResponse = {
+                accept: false,
+                code: ILP_ERROR_CODES.INTERNAL_ERROR,
+                message: `Settlement negotiation failed: ${settlementError instanceof Error ? settlementError.message : 'Unknown error'}`,
+              };
+              return c.json(rejectResponse, 500);
+            }
+          }
+
           // Build encrypted response
           const responseEvent = buildSpspResponseEvent(
-            {
-              requestId: spspRequest.requestId,
-              destinationAccount: spspInfo.destinationAccount,
-              sharedSecret: spspInfo.sharedSecret,
-            },
+            spspResponse,
             event.pubkey,
             config.secretKey,
             event.id
@@ -368,7 +501,6 @@ function createBlsServer(
 
           const response: HandlePaymentAcceptResponse = {
             accept: true,
-            fulfillment: generateFulfillment(event.id),
             metadata: {
               eventId: event.id,
               storedAt: Date.now(),
@@ -412,7 +544,6 @@ function createBlsServer(
 
       const response: HandlePaymentAcceptResponse = {
         accept: true,
-        fulfillment: generateFulfillment(event.id),
         metadata: {
           eventId: event.id,
           storedAt: Date.now(),
@@ -493,6 +624,27 @@ async function main(): Promise<void> {
   });
   console.log(`[Setup] Pricing: ${config.basePricePerByte} units/byte`);
 
+  // Build settlement config and channel client (shared by BLS server and Nostr SPSP server)
+  let settlementConfig: SettlementNegotiationConfig | undefined;
+  let channelClient: ConnectorChannelClient | undefined;
+  if (config.settlementInfo) {
+    settlementConfig = {
+      ownSupportedChains: config.settlementInfo.supportedChains ?? [],
+      ownSettlementAddresses: config.settlementInfo.settlementAddresses ?? {},
+      ownPreferredTokens: config.settlementInfo.preferredTokens,
+      ownTokenNetworks: config.settlementInfo.tokenNetworks,
+      initialDeposit: config.initialDeposit ?? '0',
+      settlementTimeout: config.settlementTimeout ?? 86400,
+      channelOpenTimeout: 30000,
+      pollInterval: 1000,
+    };
+    channelClient = createChannelClient(config.connectorAdminUrl);
+    console.log('[Setup] Settlement config and channel client configured');
+  }
+
+  // Create admin client (shared by BLS server, bootstrap, relay monitor, social discovery)
+  const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
+
   // Set up bootstrap service early so health endpoint can report phase
   const bootstrapService = new BootstrapService(
     {
@@ -515,8 +667,16 @@ async function main(): Promise<void> {
     }
   );
 
+  // Bootstrap peer/channel counters (read lazily by health endpoint via closure)
+  let peerCount = 0;
+  let channelCount = 0;
+
   // Create and start BLS HTTP server (pass bootstrap phase getter for health endpoint)
-  const blsApp = createBlsServer(config, eventStore, pricingService, () => bootstrapService.getPhase());
+  const blsApp = createBlsServer(
+    config, eventStore, pricingService, () => bootstrapService.getPhase(),
+    settlementConfig, channelClient, adminClient,
+    () => ({ peerCount, channelCount })
+  );
   const blsServer: ServerType = serve({
     fetch: blsApp.fetch,
     port: config.blsPort,
@@ -535,7 +695,10 @@ async function main(): Promise<void> {
   // This handles SPSP requests that come via Nostr directly
   const spspServer = new NostrSpspServer(
     [`ws://localhost:${config.wsPort}`],
-    config.secretKey
+    config.secretKey,
+    undefined, // pool — use default
+    settlementConfig,
+    channelClient
   );
   const spspSubscription = spspServer.handleSpspRequests(() => {
     return generateSpspInfo(config.ilpAddress);
@@ -549,8 +712,6 @@ async function main(): Promise<void> {
     assetCode: config.assetCode,
     assetScale: config.assetScale,
   };
-
-  const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
 
   console.log('\n[Bootstrap] Starting bootstrap process...');
   bootstrapService.setConnectorAdmin(adminClient);
@@ -569,9 +730,11 @@ async function main(): Promise<void> {
         console.log(`[Bootstrap] Phase: ${event.previousPhase || 'init'} -> ${event.phase}`);
         break;
       case 'bootstrap:peer-registered':
+        peerCount++;
         console.log(`[Bootstrap] Peer registered: ${event.peerId} (${event.ilpAddress})`);
         break;
       case 'bootstrap:channel-opened':
+        channelCount++;
         console.log(`[Bootstrap] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`);
         break;
       case 'bootstrap:handshake-failed':
