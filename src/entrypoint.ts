@@ -829,13 +829,14 @@ async function main(): Promise<void> {
     console.error('[Bootstrap] Bootstrap failed:', error);
   }
 
-  // Start social graph peer discovery
+  // Start social graph peer discovery (passive — logs discoveries, caller decides when to peer)
   const socialDiscovery = new SocialPeerDiscovery(
     { relayUrls: config.relayUrls },
-    config.secretKey,
-    ownIlpInfo
+    config.secretKey
   );
-  socialDiscovery.setConnectorAdmin(adminClient);
+  socialDiscovery.on((event) => {
+    console.log(`[SocialDiscovery] ${event.type}: ${event.pubkey.slice(0, 16)}...`);
+  });
   const socialSubscription = socialDiscovery.start();
   console.log('[Setup] Social graph discovery started');
 
