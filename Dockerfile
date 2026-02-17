@@ -1,8 +1,8 @@
-# Agent Society Container
+# Crosstown Container
 # Runs BLS (Business Logic Server) + Nostr Relay + Bootstrap Service
 #
 # Build from repo root:
-#   docker build -f docker/Dockerfile -t agent-society .
+#   docker build -f docker/Dockerfile -t crosstown .
 
 FROM node:20-slim
 

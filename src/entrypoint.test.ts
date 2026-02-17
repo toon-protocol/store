@@ -22,8 +22,8 @@ const {
   mockGenerateFulfillment: vi.fn(),
 }));
 
-// Mock @agent-society/core — keep real types/constants, mock functions used by createBlsServer
-vi.mock('@agent-society/core', async (importOriginal) => {
+// Mock @crosstown/core — keep real types/constants, mock functions used by createBlsServer
+vi.mock('@crosstown/core', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
@@ -33,8 +33,8 @@ vi.mock('@agent-society/core', async (importOriginal) => {
   };
 });
 
-// Mock @agent-society/relay — keep real ILP_ERROR_CODES/PricingService, mock encode/decode
-vi.mock('@agent-society/relay', async (importOriginal) => {
+// Mock @crosstown/relay — keep real ILP_ERROR_CODES/PricingService, mock encode/decode
+vi.mock('@crosstown/relay', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
@@ -45,8 +45,8 @@ vi.mock('@agent-society/relay', async (importOriginal) => {
 });
 
 import { parseConfig, createConnectorAdminClient, createChannelClient, waitForAgentRuntime, createBlsServer, type Config } from './entrypoint.js';
-import { SPSP_REQUEST_KIND } from '@agent-society/core';
-import { PricingService, ILP_ERROR_CODES } from '@agent-society/relay';
+import { SPSP_REQUEST_KIND } from '@crosstown/core';
+import { PricingService, ILP_ERROR_CODES } from '@crosstown/relay';
 
 describe('parseConfig', () => {
   const requiredEnv = {

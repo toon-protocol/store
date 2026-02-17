@@ -1,8 +1,8 @@
 {
-  "name": "@agent-society/docker",
+  "name": "@crosstown/docker",
   "version": "0.1.0",
   "private": true,
-  "description": "Docker entrypoint for agent-society containers",
+  "description": "Docker entrypoint for crosstown containers",
   "type": "module",
   "main": "dist/entrypoint.js",
   "scripts": {
@@ -11,8 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@agent-society/core": "workspace:*",
-    "@agent-society/relay": "workspace:*",
+    "@crosstown/core": "workspace:*",
+    "@crosstown/relay": "workspace:*",
     "@hono/node-server": "^1.13.7",
     "hono": "^4.0.0",
     "nostr-tools": "^2.10.4",
