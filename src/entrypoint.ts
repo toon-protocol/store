@@ -1,5 +1,5 @@
 /**
- * Agent Society Container Entrypoint
+ * Crosstown Container Entrypoint
  *
  * Starts the following services:
  * 1. Nostr Relay Server (WebSocket)
@@ -53,7 +53,7 @@ import {
   type SpspInfo,
   type SpspRequestSettlementInfo,
   SPSP_REQUEST_KIND,
-} from '@agent-society/core';
+} from '@crosstown/core';
 import {
   SqliteEventStore,
   NostrRelayServer,
@@ -65,7 +65,7 @@ import {
   type HandlePacketRequest,
   type HandlePacketAcceptResponse,
   type HandlePacketRejectResponse,
-} from '@agent-society/relay';
+} from '@crosstown/relay';
 import crypto from 'crypto';
 
 // Environment configuration
@@ -597,7 +597,7 @@ export async function waitForAgentRuntime(
  */
 async function main(): Promise<void> {
   console.log('\n' + '='.repeat(50));
-  console.log('Agent Society Container Starting');
+  console.log('Crosstown Container Starting');
   console.log('='.repeat(50) + '\n');
 
   // Parse configuration
@@ -829,18 +829,19 @@ async function main(): Promise<void> {
     console.error('[Bootstrap] Bootstrap failed:', error);
   }
 
-  // Start social graph peer discovery
+  // Start social graph peer discovery (passive — logs discoveries, caller decides when to peer)
   const socialDiscovery = new SocialPeerDiscovery(
     { relayUrls: config.relayUrls },
-    config.secretKey,
-    ownIlpInfo
+    config.secretKey
   );
-  socialDiscovery.setConnectorAdmin(adminClient);
+  socialDiscovery.on((event) => {
+    console.log(`[SocialDiscovery] ${event.type}: ${event.pubkey.slice(0, 16)}...`);
+  });
   const socialSubscription = socialDiscovery.start();
   console.log('[Setup] Social graph discovery started');
 
   console.log('\n' + '='.repeat(50));
-  console.log('Agent Society Container Ready');
+  console.log('Crosstown Container Ready');
   console.log('='.repeat(50) + '\n');
 
   // Graceful shutdown handling
