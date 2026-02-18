@@ -1,0 +1,7 @@
+# Patch agent-runtime image to add missing dependencies
+FROM connector:latest
+
+WORKDIR /app
+
+# Install missing dependencies (use Express 4.x for compatibility)
+RUN npm install express@4
