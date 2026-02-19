@@ -69,7 +69,7 @@ describe('parseConfig', () => {
     'ASSET_CODE',
     'ASSET_SCALE',
     'BASE_PRICE_PER_BYTE',
-    'AGENT_RUNTIME_URL',
+    'CONNECTOR_URL',
     'SUPPORTED_CHAINS',
     'SETTLEMENT_ADDRESS_EVM_BASE_8453',
     'PREFERRED_TOKEN_EVM_BASE_8453',
@@ -197,18 +197,18 @@ describe('parseConfig', () => {
     expect(config.relayUrls).toEqual(['ws://localhost:9999']);
   });
 
-  it('throws when AGENT_RUNTIME_URL is not a valid URL', () => {
-    Object.assign(process.env, requiredEnv, { AGENT_RUNTIME_URL: 'not-a-url' });
+  it('throws when CONNECTOR_URL is not a valid URL', () => {
+    Object.assign(process.env, requiredEnv, { CONNECTOR_URL: 'not-a-url' });
 
-    expect(() => parseConfig()).toThrow('AGENT_RUNTIME_URL is not a valid URL: not-a-url');
+    expect(() => parseConfig()).toThrow('CONNECTOR_URL is not a valid URL: not-a-url');
   });
 
-  it('accepts valid AGENT_RUNTIME_URL and stores in config', () => {
-    Object.assign(process.env, requiredEnv, { AGENT_RUNTIME_URL: 'http://localhost:3000' });
+  it('accepts valid CONNECTOR_URL and stores in config', () => {
+    Object.assign(process.env, requiredEnv, { CONNECTOR_URL: 'http://localhost:3000' });
 
     const config = parseConfig();
 
-    expect(config.agentRuntimeUrl).toBe('http://localhost:3000');
+    expect(config.connectorUrl).toBe('http://localhost:3000');
   });
 
   it('parses SPSP_MIN_PRICE=0 as 0n bigint', () => {
@@ -623,7 +623,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     assetCode: 'USD',
     assetScale: 6,
     basePricePerByte: 10n,
-    agentRuntimeUrl: undefined,
+    connectorUrl: undefined,
     settlementInfo: undefined,
     initialDeposit: undefined,
     settlementTimeout: undefined,
@@ -945,7 +945,7 @@ describe('SPSP path equivalence (AC: 9)', () => {
     assetCode: 'USD',
     assetScale: 6,
     basePricePerByte: 10n,
-    agentRuntimeUrl: undefined,
+    connectorUrl: undefined,
     settlementInfo: undefined,
     initialDeposit: undefined,
     settlementTimeout: undefined,
@@ -1076,7 +1076,7 @@ describe('createBlsServer /health peer/channel counts', () => {
     assetCode: 'USD',
     assetScale: 6,
     basePricePerByte: 10n,
-    agentRuntimeUrl: undefined,
+    connectorUrl: undefined,
     settlementInfo: undefined,
     initialDeposit: undefined,
     settlementTimeout: undefined,

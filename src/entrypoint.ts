@@ -20,7 +20,7 @@
  * - ASSET_CODE: Asset code (default: USD)
  * - ASSET_SCALE: Asset scale (default: 6)
  * - BASE_PRICE_PER_BYTE: Base price per byte (default: 10)
- * - AGENT_RUNTIME_URL: URL for agent-runtime POST /ilp/send (optional; enables ILP-first flow)
+ * - CONNECTOR_URL: URL for connector POST /ilp/send (optional; enables ILP-first flow)
  * - SUPPORTED_CHAINS: Comma-separated chain identifiers (e.g., "evm:base:8453")
  * - SETTLEMENT_ADDRESS_*: Settlement address per chain (e.g., SETTLEMENT_ADDRESS_EVM_BASE_8453=0x...)
  * - PREFERRED_TOKEN_*: Preferred token per chain
@@ -84,7 +84,7 @@ export interface Config {
   assetCode: string;
   assetScale: number;
   basePricePerByte: bigint;
-  agentRuntimeUrl: string | undefined;
+  connectorUrl: string | undefined;
   settlementInfo: SpspRequestSettlementInfo | undefined;
   initialDeposit: string | undefined;
   settlementTimeout: number | undefined;
@@ -129,13 +129,13 @@ export function parseConfig(): Config {
   const assetScale = parseInt(env['ASSET_SCALE'] || '6', 10);
   const basePricePerByte = BigInt(env['BASE_PRICE_PER_BYTE'] || '10');
 
-  // ILP-first flow: agent-runtime URL (optional)
-  const agentRuntimeUrl = env['AGENT_RUNTIME_URL'] || undefined;
-  if (agentRuntimeUrl) {
+  // ILP-first flow: connector URL (optional)
+  const connectorUrl = env['CONNECTOR_URL'] || undefined;
+  if (connectorUrl) {
     try {
-      new URL(agentRuntimeUrl);
+      new URL(connectorUrl);
     } catch {
-      throw new Error(`AGENT_RUNTIME_URL is not a valid URL: ${agentRuntimeUrl}`);
+      throw new Error(`CONNECTOR_URL is not a valid URL: ${connectorUrl}`);
     }
   }
 
@@ -222,7 +222,7 @@ export function parseConfig(): Config {
     assetCode,
     assetScale,
     basePricePerByte,
-    agentRuntimeUrl,
+    connectorUrl,
     settlementInfo,
     initialDeposit,
     settlementTimeout,
@@ -651,7 +651,7 @@ async function main(): Promise<void> {
       knownPeers: [],
       ardriveEnabled: config.ardriveEnabled,
       defaultRelayUrl: `ws://localhost:${config.wsPort}`,
-      ...(config.agentRuntimeUrl && { agentRuntimeUrl: config.agentRuntimeUrl }),
+      ...(config.connectorUrl && { connectorUrl: config.connectorUrl }),
       ...(config.settlementInfo && { settlementInfo: config.settlementInfo }),
       ownIlpAddress: config.ilpAddress,
       toonEncoder: encodeEventToToon,
@@ -717,10 +717,10 @@ async function main(): Promise<void> {
   bootstrapService.setConnectorAdmin(adminClient);
 
   // Wire up agent-runtime client for ILP-first flow
-  if (config.agentRuntimeUrl) {
-    const agentRuntimeClient = createAgentRuntimeClient(config.agentRuntimeUrl);
+  if (config.connectorUrl) {
+    const agentRuntimeClient = createAgentRuntimeClient(config.connectorUrl);
     bootstrapService.setAgentRuntimeClient(agentRuntimeClient);
-    console.log(`[Bootstrap] ILP-first flow enabled via ${config.agentRuntimeUrl}`);
+    console.log(`[Bootstrap] ILP-first flow enabled via ${config.connectorUrl}`);
   }
 
   // Register bootstrap event listener for logging
@@ -753,9 +753,9 @@ async function main(): Promise<void> {
   });
 
   // Wait for agent-runtime to be healthy before bootstrapping
-  if (config.agentRuntimeUrl) {
-    console.log(`[Bootstrap] Waiting for agent-runtime at ${config.agentRuntimeUrl}...`);
-    await waitForAgentRuntime(config.agentRuntimeUrl);
+  if (config.connectorUrl) {
+    console.log(`[Bootstrap] Waiting for agent-runtime at ${config.connectorUrl}...`);
+    await waitForAgentRuntime(config.connectorUrl);
     console.log('[Bootstrap] Agent-runtime is healthy');
   }
 
@@ -784,7 +784,7 @@ async function main(): Promise<void> {
     }
 
     // Start RelayMonitor to discover new peers on our relay
-    if (config.agentRuntimeUrl) {
+    if (config.connectorUrl) {
       const relayMonitor = new RelayMonitor(
         {
           relayUrl: `ws://localhost:${config.wsPort}`,
@@ -797,7 +797,7 @@ async function main(): Promise<void> {
       );
       relayMonitor.setConnectorAdmin(adminClient);
       relayMonitor.setAgentRuntimeClient(
-        createAgentRuntimeClient(config.agentRuntimeUrl)
+        createAgentRuntimeClient(config.connectorUrl)
       );
 
       // Register same event listener for relay monitor events
