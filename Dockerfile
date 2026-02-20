@@ -58,8 +58,9 @@ RUN mkdir -p /prod/packages/bls /prod/packages/core /prod/packages/relay && \
 
 # Clean up native module build artifacts to save space
 # Note: Keep build/ directories as they contain compiled .node files needed at runtime
+# Note: Keep simple-git dependencies intact (it uses src/ directories)
 RUN find /prod/node_modules -type d -name 'deps' -prune -exec rm -rf {} + && \
-    find /prod/node_modules -type d -name 'src' -prune -exec rm -rf {} + && \
+    find /prod/node_modules -type d -name 'src' -prune ! -path '*/simple-git/*' ! -path '*/debug/*' -exec rm -rf {} + && \
     find /prod/node_modules -type f -name 'binding.gyp' -delete
 
 # ── Stage 2: Runtime ─────────────────────────────────────────
