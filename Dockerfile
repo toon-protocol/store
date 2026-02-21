@@ -24,6 +24,7 @@ WORKDIR /app
 # Copy dependency manifests for installation
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
 COPY packages/bls/package.json ./packages/bls/
+COPY packages/client/package.json ./packages/client/
 COPY packages/core/package.json ./packages/core/
 COPY packages/relay/package.json ./packages/relay/
 COPY docker/package.json ./docker/
@@ -34,6 +35,7 @@ RUN pnpm install --frozen-lockfile
 # Copy source code
 COPY tsconfig.json ./
 COPY packages/bls/ ./packages/bls/
+COPY packages/client/ ./packages/client/
 COPY packages/core/ ./packages/core/
 COPY packages/relay/ ./packages/relay/
 COPY docker/ ./docker/
@@ -46,11 +48,13 @@ RUN pnpm -r build && cd docker && pnpm run build
 RUN pnpm --filter @crosstown/docker deploy --prod /prod
 
 # Copy package.json files and built artifacts to production deployment
-RUN mkdir -p /prod/packages/bls /prod/packages/core /prod/packages/relay && \
+RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay && \
     cp packages/bls/package.json /prod/packages/bls/ && \
+    cp packages/client/package.json /prod/packages/client/ && \
     cp packages/core/package.json /prod/packages/core/ && \
     cp packages/relay/package.json /prod/packages/relay/ && \
     cp -r packages/bls/dist /prod/packages/bls/ && \
+    cp -r packages/client/dist /prod/packages/client/ && \
     cp -r packages/core/dist /prod/packages/core/ && \
     cp -r packages/relay/dist /prod/packages/relay/ && \
     cp -r docker/dist /prod/docker/ && \
@@ -100,5 +104,5 @@ USER crosstown
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 
-# Run the entrypoint
-CMD ["node", "dist/entrypoint.js"]
+# Run the docker entrypoint
+CMD ["node", "/app/dist/entrypoint.js"]
