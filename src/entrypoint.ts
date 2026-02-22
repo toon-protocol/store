@@ -27,6 +27,9 @@
  * - TOKEN_NETWORK_*: Token network address per chain
  * - SETTLEMENT_TIMEOUT: Settlement timeout in seconds
  * - INITIAL_DEPOSIT: Initial deposit amount
+ * - FORGEJO_URL: URL for Forgejo API (for NIP-34 integration)
+ * - FORGEJO_TOKEN: API token for Forgejo
+ * - FORGEJO_OWNER: Default repository owner
  */
 
 import { serve, type ServerType } from '@hono/node-server';
@@ -89,6 +92,9 @@ export interface Config {
   initialDeposit: string | undefined;
   settlementTimeout: number | undefined;
   spspMinPrice: bigint | undefined;
+  forgejoUrl: string | undefined;
+  forgejoToken: string | undefined;
+  forgejoOwner: string | undefined;
 }
 
 /**
@@ -207,6 +213,11 @@ export function parseConfig(): Config {
     }
   }
 
+  // NIP-34 Git Integration (Forgejo) - optional
+  const forgejoUrl = env['FORGEJO_URL'];
+  const forgejoToken = env['FORGEJO_TOKEN'];
+  const forgejoOwner = env['FORGEJO_OWNER'];
+
   return {
     nodeId,
     secretKey,
@@ -227,6 +238,9 @@ export function parseConfig(): Config {
     initialDeposit,
     settlementTimeout,
     spspMinPrice,
+    forgejoUrl,
+    forgejoToken,
+    forgejoOwner,
   };
 }
 
@@ -338,7 +352,8 @@ export function createBlsServer(
   settlementConfig?: SettlementNegotiationConfig,
   channelClient?: ConnectorChannelClient,
   adminClient?: ConnectorAdminClient,
-  getBootstrapCounts?: () => { peerCount: number; channelCount: number }
+  getBootstrapCounts?: () => { peerCount: number; channelCount: number },
+  onNIP34Event?: (event: any) => Promise<void>
 ): Hono {
   const app = new Hono();
 
@@ -542,6 +557,22 @@ export function createBlsServer(
       // Store the event
       eventStore.store(event);
 
+      // Trigger NIP-34 handler if configured (async, non-blocking)
+      if (onNIP34Event) {
+        const isNIP34 =
+          event.kind === 30617 ||
+          event.kind === 1617 ||
+          event.kind === 1618 ||
+          event.kind === 1621 ||
+          (event.kind >= 1630 && event.kind <= 1633);
+
+        if (isNIP34) {
+          onNIP34Event(event).catch((error) => {
+            console.error(`[BLS] NIP-34 handler error for event ${event.id}:`, error);
+          });
+        }
+      }
+
       const response: HandlePacketAcceptResponse = {
         accept: true,
         metadata: {
@@ -624,6 +655,29 @@ async function main(): Promise<void> {
   });
   console.log(`[Setup] Pricing: ${config.basePricePerByte} units/byte`);
 
+  // Initialize NIP-34 Handler (Git Operations via Nostr)
+  let nip34Handler: any | undefined;
+  if (config.forgejoUrl && config.forgejoToken && config.forgejoOwner) {
+    try {
+      // Import via package exports (bundled version with all dependencies)
+      // @ts-ignore - types are available at runtime
+      const nip34Module = await import('@crosstown/core/nip34');
+      const { NIP34Handler } = nip34Module;
+      nip34Handler = new NIP34Handler({
+        forgejoUrl: config.forgejoUrl,
+        forgejoToken: config.forgejoToken,
+        defaultOwner: config.forgejoOwner,
+        verbose: true,
+      });
+      console.log(`[Setup] ✅ NIP-34 Git integration enabled (Forgejo: ${config.forgejoUrl})`);
+    } catch (error) {
+      console.warn('[Setup] ⚠️  Failed to initialize NIP-34 handler:', error);
+      console.warn('[Setup] NIP-34 Git integration will be disabled');
+    }
+  } else {
+    console.log('[Setup] 📝 NIP-34 Git integration disabled (set FORGEJO_URL, FORGEJO_TOKEN, FORGEJO_OWNER to enable)');
+  }
+
   // Build settlement config and channel client (shared by BLS server and Nostr SPSP server)
   let settlementConfig: SettlementNegotiationConfig | undefined;
   let channelClient: ConnectorChannelClient | undefined;
@@ -675,7 +729,14 @@ async function main(): Promise<void> {
   const blsApp = createBlsServer(
     config, eventStore, pricingService, () => bootstrapService.getPhase(),
     settlementConfig, channelClient, adminClient,
-    () => ({ peerCount, channelCount })
+    () => ({ peerCount, channelCount }),
+    nip34Handler ? async (event: any) => {
+      try {
+        await nip34Handler.handleEvent(event);
+      } catch (error) {
+        console.error(`[BLS] NIP-34 handler error for event ${event.id}:`, error);
+      }
+    } : undefined
   );
   const blsServer: ServerType = serve({
     fetch: blsApp.fetch,
