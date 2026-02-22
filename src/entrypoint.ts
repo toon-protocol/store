@@ -732,7 +732,10 @@ async function main(): Promise<void> {
     () => ({ peerCount, channelCount }),
     nip34Handler ? async (event: any) => {
       try {
-        await nip34Handler.handleEvent(event);
+        const result = await nip34Handler.handleEvent(event);
+        if (!result.success) {
+          console.error(`[NIP34] Handler returned error: ${result.message}`);
+        }
       } catch (error) {
         console.error(`[BLS] NIP-34 handler error for event ${event.id}:`, error);
       }
