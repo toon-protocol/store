@@ -83,6 +83,7 @@ export interface Config {
   connectorAdminUrl: string;
   ardriveEnabled: boolean;
   additionalPeersJson: string | undefined;
+  bootstrapPeersJson: string | undefined;
   relayUrls: string[];
   assetCode: string;
   assetScale: number;
@@ -129,6 +130,7 @@ export function parseConfig(): Config {
 
   const ardriveEnabled = env['ARDRIVE_ENABLED'] !== 'false';
   const additionalPeersJson = env['ADDITIONAL_PEERS'] || undefined;
+  const bootstrapPeersJson = env['BOOTSTRAP_PEERS'] || undefined;
   const relayUrls = [`ws://localhost:${wsPort}`];
 
   const assetCode = env['ASSET_CODE'] || 'USD';
@@ -229,6 +231,7 @@ export function parseConfig(): Config {
     connectorAdminUrl,
     ardriveEnabled,
     additionalPeersJson,
+    bootstrapPeersJson,
     relayUrls,
     assetCode,
     assetScale,
@@ -279,13 +282,21 @@ export function createConnectorAdminClient(adminUrl: string): DockerConnectorAdm
     async addPeer(config: {
       id: string;
       url: string;
-      authToken: string;
+      authToken?: string;
       routes?: { prefix: string; priority?: number }[];
     }): Promise<void> {
-      const response = await fetch(`${adminUrl}/peers`, {
+      // Ensure authToken is a string (empty string for permissionless)
+      const payload = {
+        id: config.id,
+        url: config.url,
+        authToken: typeof config.authToken === 'string' ? config.authToken : '',
+        ...(config.routes && { routes: config.routes }),
+      };
+
+      const response = await fetch(`${adminUrl}/admin/peers`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -295,7 +306,7 @@ export function createConnectorAdminClient(adminUrl: string): DockerConnectorAdm
     },
 
     async removePeer(peerId: string): Promise<void> {
-      const response = await fetch(`${adminUrl}/peers/${peerId}`, {
+      const response = await fetch(`${adminUrl}/admin/peers/${peerId}`, {
         method: 'DELETE',
       });
 
@@ -699,10 +710,30 @@ async function main(): Promise<void> {
   // Create admin client (shared by BLS server, bootstrap, relay monitor, social discovery)
   const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
 
+  // Parse bootstrap peers from environment
+  let knownPeers: Array<{ pubkey: string; relayUrl: string; btpEndpoint: string }> = [];
+  if (config.bootstrapPeersJson) {
+    try {
+      const parsed = JSON.parse(config.bootstrapPeersJson);
+      if (Array.isArray(parsed)) {
+        knownPeers = parsed
+          .filter((peer: any) => peer.pubkey && peer.btpEndpoint)
+          .map((peer: any) => ({
+            pubkey: peer.pubkey,
+            relayUrl: peer.relay || peer.relayUrl || `ws://localhost:${config.wsPort}`,
+            btpEndpoint: peer.btpEndpoint,
+          }));
+        console.log(`[Bootstrap] Loaded ${knownPeers.length} bootstrap peer(s) from BOOTSTRAP_PEERS`);
+      }
+    } catch (error) {
+      console.warn('[Bootstrap] Failed to parse BOOTSTRAP_PEERS:', error);
+    }
+  }
+
   // Set up bootstrap service early so health endpoint can report phase
   const bootstrapService = new BootstrapService(
     {
-      knownPeers: [],
+      knownPeers,
       ardriveEnabled: config.ardriveEnabled,
       defaultRelayUrl: `ws://localhost:${config.wsPort}`,
       ...(config.connectorUrl && { connectorUrl: config.connectorUrl }),
@@ -781,10 +812,12 @@ async function main(): Promise<void> {
   bootstrapService.setConnectorAdmin(adminClient);
 
   // Wire up agent-runtime client for ILP-first flow
+  // Use admin URL since /admin/ilp/send endpoint is on the admin API (port 8081)
+  let agentRuntimeClient: ReturnType<typeof createAgentRuntimeClient> | undefined;
   if (config.connectorUrl) {
-    const agentRuntimeClient = createAgentRuntimeClient(config.connectorUrl);
+    agentRuntimeClient = createAgentRuntimeClient(config.connectorAdminUrl);
     bootstrapService.setAgentRuntimeClient(agentRuntimeClient);
-    console.log(`[Bootstrap] ILP-first flow enabled via ${config.connectorUrl}`);
+    console.log(`[Bootstrap] ILP-first flow enabled via ${config.connectorAdminUrl}`);
   }
 
   // Register bootstrap event listener for logging
@@ -833,25 +866,62 @@ async function main(): Promise<void> {
       console.log(`[Bootstrap] ArDrive peer lookup was enabled`);
     }
 
-    if (results.length === 0) {
-      // No peers found — running as bootstrap node
-      console.log('[Bootstrap] No peers found - running as bootstrap node');
-      console.log('[Bootstrap] Publishing own ILP info to local relay');
-      try {
-        const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
-        eventStore.store(ilpInfoEvent);
-        console.log('[Bootstrap] ILP info published successfully');
-        console.log(`[Bootstrap] Event ID: ${ilpInfoEvent.id.slice(0, 16)}...`);
-      } catch (error) {
-        console.warn('[Bootstrap] Failed to publish ILP info:', error);
+    // Always publish own ILP info for mesh discovery
+    console.log('[Bootstrap] Publishing own ILP info');
+    const firstPeer = knownPeers[0];
+    try {
+      const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
+
+      // Publish to local relay (free)
+      eventStore.store(ilpInfoEvent);
+      console.log('[Bootstrap] Published to local relay');
+
+      // If we have bootstrap peers and agent-runtime, publish to genesis relay via ILP (paid)
+      const genesisResult = results[0];
+      if (firstPeer && genesisResult && agentRuntimeClient) {
+        const genesisIlpAddress = genesisResult.peerInfo.ilpAddress;
+        console.log(`[Bootstrap] Publishing to genesis relay via ILP: ${genesisIlpAddress}`);
+
+        // Encode event to TOON for ILP packet
+        const toonBytes = encodeEventToToon(ilpInfoEvent);
+        const base64Toon = Buffer.from(toonBytes).toString('base64');
+
+        // Calculate payment amount
+        const amount = String(BigInt(toonBytes.length) * BigInt(config.basePricePerByte));
+
+        // Send as paid ILP packet
+        agentRuntimeClient.sendIlpPacket({
+          destination: genesisIlpAddress,
+          amount,
+          data: base64Toon,
+        }).then((ilpResult: { accepted: boolean; fulfillment?: string; code?: string; message?: string }) => {
+          if (ilpResult.accepted) {
+            console.log(`[Bootstrap] Published to genesis relay via ILP (fulfillment: ${ilpResult.fulfillment})`);
+          } else {
+            console.warn(`[Bootstrap] Genesis relay rejected publish: ${ilpResult.code} ${ilpResult.message}`);
+          }
+        }).catch((err: Error) => {
+          console.warn('[Bootstrap] Failed to publish to genesis relay via ILP:', err.message);
+        });
       }
+
+      console.log(`[Bootstrap] Event ID: ${ilpInfoEvent.id.slice(0, 16)}...`);
+    } catch (error) {
+      console.warn('[Bootstrap] Failed to publish ILP info:', error);
     }
 
-    // Start RelayMonitor to discover new peers on our relay
+    // Determine which relay to monitor for peer discovery
+    // If we bootstrapped from other peers, monitor the genesis relay
+    // Otherwise monitor our own relay
+    const monitorRelayUrl = firstPeer?.relayUrl
+      ? firstPeer.relayUrl
+      : `ws://localhost:${config.wsPort}`;
+
+    // Start RelayMonitor to discover new peers
     if (config.connectorUrl) {
       const relayMonitor = new RelayMonitor(
         {
-          relayUrl: `ws://localhost:${config.wsPort}`,
+          relayUrl: monitorRelayUrl,
           secretKey: config.secretKey,
           toonEncoder: encodeEventToToon,
           toonDecoder: decodeEventFromToon,
