@@ -487,15 +487,37 @@ export function createBlsServer(
                 spspResponse.settlementTimeout = settlementResult.settlementTimeout;
 
                 // Register peer with settlement config (non-fatal)
-                if (adminClient && spspRequest.settlementAddresses?.[settlementResult.negotiatedChain]) {
+                if (adminClient && spspRequest.ilpAddress && spspRequest.settlementAddresses?.[settlementResult.negotiatedChain]) {
                   try {
                     const peerId = `nostr-${event.pubkey.slice(0, 16)}`;
-                    await adminClient.addPeer({
-                      id: peerId,
-                      url: spspRequest.ilpAddress ? `btp+ws://${spspRequest.ilpAddress}` : '',
-                      authToken: '',
-                      routes: spspRequest.ilpAddress ? [{ prefix: spspRequest.ilpAddress }] : [],
-                    });
+
+                    // Look up the peer's kind:10032 event to get their BTP endpoint
+                    const peerEvents = eventStore.query([{
+                      kinds: [10032],
+                      authors: [event.pubkey],
+                      limit: 1
+                    }]);
+
+                    let btpUrl = '';
+                    if (peerEvents.length > 0 && peerEvents[0]) {
+                      try {
+                        const peerInfo: IlpPeerInfo = JSON.parse(peerEvents[0].content);
+                        btpUrl = peerInfo.btpEndpoint;
+                      } catch (parseError) {
+                        console.warn(`[BLS] Failed to parse peer info event: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+                      }
+                    }
+
+                    // Only register if we have a valid BTP URL
+                    if (btpUrl && (btpUrl.startsWith('ws://') || btpUrl.startsWith('wss://'))) {
+                      await adminClient.addPeer({
+                        id: peerId,
+                        url: btpUrl,
+                        authToken: '',
+                        routes: [{ prefix: spspRequest.ilpAddress }],
+                      });
+                      console.log(`[BLS] Registered peer ${peerId} (${spspRequest.ilpAddress}) at ${btpUrl} after channel open`);
+                    }
                   } catch (peerError) {
                     console.warn(`[BLS] Failed to register peer after channel open: ${peerError instanceof Error ? peerError.message : 'Unknown error'}`);
                   }
@@ -503,13 +525,53 @@ export function createBlsServer(
               }
               // null result = no chain match = graceful degradation (basic SPSP response)
             } catch (settlementError) {
-              // Channel open failure or timeout — return ILP REJECT
-              const rejectResponse: HandlePacketRejectResponse = {
-                accept: false,
-                code: ILP_ERROR_CODES.INTERNAL_ERROR,
-                message: `Settlement negotiation failed: ${settlementError instanceof Error ? settlementError.message : 'Unknown error'}`,
-              };
-              return c.json(rejectResponse, 500);
+              // Channel open failure or timeout — log warning but continue (graceful degradation)
+              console.warn(
+                `[BLS] Settlement negotiation failed (continuing without settlement): ${settlementError instanceof Error ? settlementError.message : 'Unknown error'}`
+              );
+              // Don't return — continue to peer registration below
+            }
+          }
+
+          // Register peer after successful SPSP handshake (regardless of settlement)
+          // Payment was verified above, so this is a legitimate peer
+          if (adminClient && spspRequest.ilpAddress) {
+            try {
+              const peerId = `nostr-${event.pubkey.slice(0, 16)}`;
+
+              // Look up the peer's kind:10032 event to get their BTP endpoint
+              const peerEvents = eventStore.query([{
+                kinds: [10032],
+                authors: [event.pubkey],
+                limit: 1
+              }]);
+              console.log(`[BLS] DEBUG: Queried for peer ${event.pubkey.slice(0, 16)}, found ${peerEvents.length} events`);
+
+              let btpUrl = '';
+              if (peerEvents.length > 0 && peerEvents[0]) {
+                try {
+                  const peerInfo: IlpPeerInfo = JSON.parse(peerEvents[0].content);
+                  btpUrl = peerInfo.btpEndpoint;
+                  console.log(`[BLS] DEBUG: Found BTP endpoint: ${btpUrl}`);
+                } catch (parseError) {
+                  console.warn(`[BLS] Failed to parse peer info event: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+                }
+              }
+
+              // Only register if we have a valid BTP URL
+              if (btpUrl && (btpUrl.startsWith('ws://') || btpUrl.startsWith('wss://'))) {
+                await adminClient.addPeer({
+                  id: peerId,
+                  url: btpUrl,
+                  authToken: '',
+                  routes: [{ prefix: spspRequest.ilpAddress }],
+                });
+                console.log(`[BLS] Registered peer ${peerId} (${spspRequest.ilpAddress}) at ${btpUrl} after SPSP handshake`);
+              } else {
+                console.warn(`[BLS] Cannot register peer ${peerId}: no valid BTP endpoint found (got: ${btpUrl})`);
+              }
+            } catch (peerError) {
+              console.warn(`[BLS] Failed to register peer after SPSP handshake: ${peerError instanceof Error ? peerError.message : 'Unknown error'}`);
             }
           }
 
@@ -650,9 +712,11 @@ async function main(): Promise<void> {
   console.log(`[Config] BTP Endpoint: ${config.btpEndpoint}`);
   console.log(`[Config] ArDrive Enabled: ${config.ardriveEnabled}`);
 
-  // Initialize event store (in-memory for containers)
-  const eventStore = new SqliteEventStore(':memory:');
-  console.log('[Setup] Initialized in-memory event store');
+  // Initialize event store (persistent in DATA_DIR)
+  const dataDir = process.env['DATA_DIR'] || '/data';
+  const dbPath = `${dataDir}/events.db`;
+  const eventStore = new SqliteEventStore(dbPath);
+  console.log(`[Setup] Initialized event store at ${dbPath}`);
 
   // Initialize pricing service
   const spspPrice = config.spspMinPrice !== undefined
