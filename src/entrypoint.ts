@@ -870,6 +870,11 @@ async function main(): Promise<void> {
     btpEndpoint: config.btpEndpoint,
     assetCode: config.assetCode,
     assetScale: config.assetScale,
+    // Include settlement configuration if available
+    ...(config.settlementInfo?.supportedChains && { supportedChains: config.settlementInfo.supportedChains }),
+    ...(config.settlementInfo?.settlementAddresses && { settlementAddresses: config.settlementInfo.settlementAddresses }),
+    ...(config.settlementInfo?.preferredTokens && { preferredTokens: config.settlementInfo.preferredTokens }),
+    ...(config.settlementInfo?.tokenNetworks && { tokenNetworks: config.settlementInfo.tokenNetworks }),
   };
 
   console.log('\n[Bootstrap] Starting bootstrap process...');
