@@ -701,6 +701,10 @@ describe('createBlsServer /handle-packet settlement', () => {
     initialDeposit: undefined,
     settlementTimeout: undefined,
     spspMinPrice: 0n,
+    bootstrapPeersJson: undefined,
+    forgejoUrl: undefined,
+    forgejoToken: undefined,
+    forgejoOwner: undefined,
   };
 
   const mockSettlementConfig = {
@@ -853,7 +857,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     expect(body.data).toBeDefined();
 
@@ -892,7 +896,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     // negotiateAndOpenChannel should NOT be called
     expect(mockNegotiateAndOpenChannel).not.toHaveBeenCalled();
@@ -933,7 +937,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     // Channel open failure results in graceful degradation:
     // returns 200 with basic SPSP response (no settlement fields)
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
   });
 
@@ -960,7 +964,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     // negotiateAndOpenChannel should NOT be called
     expect(mockNegotiateAndOpenChannel).not.toHaveBeenCalled();
@@ -986,7 +990,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     expect(body).not.toHaveProperty('fulfillment');
   });
@@ -1022,7 +1026,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     expect(body).not.toHaveProperty('fulfillment');
   });
@@ -1051,6 +1055,10 @@ describe('SPSP path equivalence (AC: 9)', () => {
     initialDeposit: undefined,
     settlementTimeout: undefined,
     spspMinPrice: 0n,
+    bootstrapPeersJson: undefined,
+    forgejoUrl: undefined,
+    forgejoToken: undefined,
+    forgejoOwner: undefined,
   };
 
   const settlementConfig = {
@@ -1190,6 +1198,10 @@ describe('createBlsServer /health peer/channel counts', () => {
     initialDeposit: undefined,
     settlementTimeout: undefined,
     spspMinPrice: 0n,
+    bootstrapPeersJson: undefined,
+    forgejoUrl: undefined,
+    forgejoToken: undefined,
+    forgejoOwner: undefined,
   };
 
   it('returns peerCount and channelCount when bootstrap phase is ready', async () => {
@@ -1209,7 +1221,7 @@ describe('createBlsServer /health peer/channel counts', () => {
 
     const res = await app.request('/health');
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.status).toBe('healthy');
     expect(body.bootstrapPhase).toBe('ready');
     expect(body.peerCount).toBe(3);
@@ -1233,7 +1245,7 @@ describe('createBlsServer /health peer/channel counts', () => {
 
     const res = await app.request('/health');
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.status).toBe('healthy');
     expect(body.bootstrapPhase).toBe('discovering');
     expect(body).not.toHaveProperty('peerCount');
