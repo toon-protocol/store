@@ -44,9 +44,16 @@ vi.mock('@crosstown/relay', async (importOriginal) => {
   };
 });
 
-import { parseConfig, createConnectorAdminClient, createChannelClient, waitForAgentRuntime, createBlsServer, type Config } from './entrypoint.js';
+import {
+  parseConfig,
+  createConnectorAdminClient,
+  createChannelClient,
+  waitForAgentRuntime,
+  createBlsServer,
+  type Config,
+} from './entrypoint.js';
 import { SPSP_REQUEST_KIND } from '@crosstown/core';
-import { PricingService, ILP_ERROR_CODES } from '@crosstown/relay';
+import { PricingService } from '@crosstown/relay';
 
 describe('parseConfig', () => {
   const requiredEnv = {
@@ -171,7 +178,9 @@ describe('parseConfig', () => {
     process.env['NOSTR_SECRET_KEY'] = 'a'.repeat(64);
     process.env['ILP_ADDRESS'] = 'g.test';
 
-    expect(() => parseConfig()).toThrow('NODE_ID environment variable is required');
+    expect(() => parseConfig()).toThrow(
+      'NODE_ID environment variable is required'
+    );
   });
 
   it('throws when NOSTR_SECRET_KEY is invalid', () => {
@@ -179,14 +188,18 @@ describe('parseConfig', () => {
     process.env['ILP_ADDRESS'] = 'g.test';
     process.env['NOSTR_SECRET_KEY'] = 'too-short';
 
-    expect(() => parseConfig()).toThrow('NOSTR_SECRET_KEY must be a 64-character hex string');
+    expect(() => parseConfig()).toThrow(
+      'NOSTR_SECRET_KEY must be a 64-character hex string'
+    );
   });
 
   it('throws when ILP_ADDRESS is missing', () => {
     process.env['NODE_ID'] = 'test-node';
     process.env['NOSTR_SECRET_KEY'] = 'a'.repeat(64);
 
-    expect(() => parseConfig()).toThrow('ILP_ADDRESS environment variable is required');
+    expect(() => parseConfig()).toThrow(
+      'ILP_ADDRESS environment variable is required'
+    );
   });
 
   it('builds relayUrls from wsPort', () => {
@@ -200,11 +213,15 @@ describe('parseConfig', () => {
   it('throws when CONNECTOR_URL is not a valid URL', () => {
     Object.assign(process.env, requiredEnv, { CONNECTOR_URL: 'not-a-url' });
 
-    expect(() => parseConfig()).toThrow('CONNECTOR_URL is not a valid URL: not-a-url');
+    expect(() => parseConfig()).toThrow(
+      'CONNECTOR_URL is not a valid URL: not-a-url'
+    );
   });
 
   it('accepts valid CONNECTOR_URL and stores in config', () => {
-    Object.assign(process.env, requiredEnv, { CONNECTOR_URL: 'http://localhost:3000' });
+    Object.assign(process.env, requiredEnv, {
+      CONNECTOR_URL: 'http://localhost:3000',
+    });
 
     const config = parseConfig();
 
@@ -238,7 +255,9 @@ describe('parseConfig', () => {
   it('throws when SPSP_MIN_PRICE is not a valid integer', () => {
     Object.assign(process.env, requiredEnv, { SPSP_MIN_PRICE: 'abc' });
 
-    expect(() => parseConfig()).toThrow('SPSP_MIN_PRICE is not a valid integer: abc');
+    expect(() => parseConfig()).toThrow(
+      'SPSP_MIN_PRICE is not a valid integer: abc'
+    );
   });
 
   it('parses SUPPORTED_CHAINS with settlement address into settlementInfo', () => {
@@ -251,11 +270,12 @@ describe('parseConfig', () => {
 
     expect(config.settlementInfo).toBeDefined();
     expect(config.settlementInfo?.supportedChains).toEqual(['evm:base:8453']);
-    expect(config.settlementInfo?.settlementAddresses).toEqual({ 'evm:base:8453': '0x1234567890abcdef' });
+    expect(config.settlementInfo?.settlementAddresses).toEqual({
+      'evm:base:8453': '0x1234567890abcdef',
+    });
   });
 
   it('logs warning when SUPPORTED_CHAINS has chain without settlement address', () => {
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     Object.assign(process.env, requiredEnv, {
       SUPPORTED_CHAINS: 'evm:base:8453',
@@ -264,7 +284,9 @@ describe('parseConfig', () => {
     parseConfig();
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('chain "evm:base:8453" listed in SUPPORTED_CHAINS but no SETTLEMENT_ADDRESS_*')
+      expect.stringContaining(
+        'chain "evm:base:8453" listed in SUPPORTED_CHAINS but no SETTLEMENT_ADDRESS_*'
+      )
     );
     warnSpy.mockRestore();
   });
@@ -288,7 +310,9 @@ describe('parseConfig', () => {
   it('throws when INITIAL_DEPOSIT is not a non-negative integer string', () => {
     Object.assign(process.env, requiredEnv, { INITIAL_DEPOSIT: 'abc' });
 
-    expect(() => parseConfig()).toThrow('INITIAL_DEPOSIT must be a non-negative integer string: abc');
+    expect(() => parseConfig()).toThrow(
+      'INITIAL_DEPOSIT must be a non-negative integer string: abc'
+    );
   });
 
   it('parses SETTLEMENT_TIMEOUT from env var', () => {
@@ -308,9 +332,13 @@ describe('parseConfig', () => {
   });
 
   it('throws when SETTLEMENT_TIMEOUT is not a valid number', () => {
-    Object.assign(process.env, requiredEnv, { SETTLEMENT_TIMEOUT: 'not-a-number' });
+    Object.assign(process.env, requiredEnv, {
+      SETTLEMENT_TIMEOUT: 'not-a-number',
+    });
 
-    expect(() => parseConfig()).toThrow('SETTLEMENT_TIMEOUT must be a positive integer: not-a-number');
+    expect(() => parseConfig()).toThrow(
+      'SETTLEMENT_TIMEOUT must be a positive integer: not-a-number'
+    );
   });
 
   it('parses single TOKEN_NETWORK_* env var into settlementInfo.tokenNetworks', () => {
@@ -322,7 +350,9 @@ describe('parseConfig', () => {
 
     const config = parseConfig();
 
-    expect(config.settlementInfo?.tokenNetworks).toEqual({ 'evm:base:8453': '0xTOKEN_NET' });
+    expect(config.settlementInfo?.tokenNetworks).toEqual({
+      'evm:base:8453': '0xTOKEN_NET',
+    });
   });
 
   it('parses multiple TOKEN_NETWORK_* env vars across chains', () => {
@@ -400,11 +430,14 @@ describe('createConnectorAdminClient', () => {
 
     await client.addPeer(peerConfig);
 
-    expect(mockFetch).toHaveBeenCalledWith('http://localhost:8081/peers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(peerConfig),
-    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      'http://localhost:8081/admin/peers',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(peerConfig),
+      }
+    );
   });
 
   it('addPeer() throws on non-ok response', async () => {
@@ -429,9 +462,12 @@ describe('createConnectorAdminClient', () => {
     const client = createConnectorAdminClient(adminUrl);
     await client.removePeer('nostr-aabb11cc22dd33ee');
 
-    expect(mockFetch).toHaveBeenCalledWith('http://localhost:8081/peers/nostr-aabb11cc22dd33ee', {
-      method: 'DELETE',
-    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      'http://localhost:8081/admin/peers/nostr-aabb11cc22dd33ee',
+      {
+        method: 'DELETE',
+      }
+    );
   });
 
   it('removePeer() throws on non-ok response', async () => {
@@ -464,7 +500,8 @@ describe('createChannelClient', () => {
   it('openChannel() sends POST to correct URL with correct body', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ channelId: '0xCHANNEL', status: 'opening' }),
+      json: () =>
+        Promise.resolve({ channelId: '0xCHANNEL', status: 'opening' }),
     });
     vi.stubGlobal('fetch', mockFetch);
 
@@ -481,17 +518,21 @@ describe('createChannelClient', () => {
 
     await client.openChannel(params);
 
-    expect(mockFetch).toHaveBeenCalledWith('http://localhost:8081/admin/channels', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      'http://localhost:8081/admin/channels',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      }
+    );
   });
 
   it('openChannel() returns { channelId, status } from response', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ channelId: '0xCHANNEL_ID', status: 'opening' }),
+      json: () =>
+        Promise.resolve({ channelId: '0xCHANNEL_ID', status: 'opening' }),
     });
     vi.stubGlobal('fetch', mockFetch);
 
@@ -516,34 +557,54 @@ describe('createChannelClient', () => {
     const client = createChannelClient(adminUrl);
 
     await expect(
-      client.openChannel({ peerId: 'test', chain: 'evm:base:8453', peerAddress: '0x1' })
+      client.openChannel({
+        peerId: 'test',
+        chain: 'evm:base:8453',
+        peerAddress: '0x1',
+      })
     ).rejects.toThrow('Failed to open channel: 500 Internal Server Error');
   });
 
   it('getChannelState() sends GET to correct URL', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ channelId: '0xCH1', status: 'open', chain: 'evm:base:8453' }),
+      json: () =>
+        Promise.resolve({
+          channelId: '0xCH1',
+          status: 'open',
+          chain: 'evm:base:8453',
+        }),
     });
     vi.stubGlobal('fetch', mockFetch);
 
     const client = createChannelClient(adminUrl);
     await client.getChannelState('0xCH1');
 
-    expect(mockFetch).toHaveBeenCalledWith('http://localhost:8081/admin/channels/0xCH1');
+    expect(mockFetch).toHaveBeenCalledWith(
+      'http://localhost:8081/admin/channels/0xCH1'
+    );
   });
 
   it('getChannelState() returns { channelId, status, chain } from response', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ channelId: '0xCH1', status: 'open', chain: 'evm:base:8453' }),
+      json: () =>
+        Promise.resolve({
+          channelId: '0xCH1',
+          status: 'open',
+          chain: 'evm:base:8453',
+        }),
     });
     vi.stubGlobal('fetch', mockFetch);
 
     const client = createChannelClient(adminUrl);
     const result = await client.getChannelState('0xCH1');
 
-    expect(result).toEqual({ channelId: '0xCH1', status: 'open', chain: 'evm:base:8453' });
+    expect(result).toEqual({
+      channelId: '0xCH1',
+      status: 'open',
+      chain: 'evm:base:8453',
+    });
   });
 
   it('getChannelState() throws on non-OK response', async () => {
@@ -565,7 +626,7 @@ describe('createChannelClient', () => {
 describe('waitForAgentRuntime', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn());
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
+
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
@@ -578,19 +639,26 @@ describe('waitForAgentRuntime', () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
-    await waitForAgentRuntime('http://localhost:3000', { timeout: 5000, interval: 100 });
+    await waitForAgentRuntime('http://localhost:3000', {
+      timeout: 5000,
+      interval: 100,
+    });
 
     expect(mockFetch).toHaveBeenCalledWith('http://localhost:3000/health');
   });
 
   it('retries on fetch error until success', async () => {
-    const mockFetch = vi.fn()
+    const mockFetch = vi
+      .fn()
       .mockRejectedValueOnce(new Error('ECONNREFUSED'))
       .mockRejectedValueOnce(new Error('ECONNREFUSED'))
       .mockResolvedValueOnce({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
-    await waitForAgentRuntime('http://localhost:3000', { timeout: 10000, interval: 10 });
+    await waitForAgentRuntime('http://localhost:3000', {
+      timeout: 10000,
+      interval: 10,
+    });
 
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
@@ -600,8 +668,13 @@ describe('waitForAgentRuntime', () => {
     vi.stubGlobal('fetch', mockFetch);
 
     await expect(
-      waitForAgentRuntime('http://localhost:3000', { timeout: 50, interval: 10 })
-    ).rejects.toThrow('Agent-runtime health check timed out after 50ms: http://localhost:3000');
+      waitForAgentRuntime('http://localhost:3000', {
+        timeout: 50,
+        interval: 10,
+      })
+    ).rejects.toThrow(
+      'Agent-runtime health check timed out after 50ms: http://localhost:3000'
+    );
   });
 });
 
@@ -628,6 +701,10 @@ describe('createBlsServer /handle-packet settlement', () => {
     initialDeposit: undefined,
     settlementTimeout: undefined,
     spspMinPrice: 0n,
+    bootstrapPeersJson: undefined,
+    forgejoUrl: undefined,
+    forgejoToken: undefined,
+    forgejoOwner: undefined,
   };
 
   const mockSettlementConfig = {
@@ -715,8 +792,13 @@ describe('createBlsServer /handle-packet settlement', () => {
 
     const mockEventStore = { store: vi.fn() };
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService, undefined,
-      mockSettlementConfig, mockChannelClient, mockAdminClient
+      testConfig,
+      mockEventStore as never,
+      pricingService,
+      undefined,
+      mockSettlementConfig,
+      mockChannelClient,
+      mockAdminClient
     );
 
     const res = await app.request('/handle-packet', {
@@ -759,8 +841,13 @@ describe('createBlsServer /handle-packet settlement', () => {
 
     const mockEventStore = { store: vi.fn() };
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService, undefined,
-      mockSettlementConfig, mockChannelClient, mockAdminClient
+      testConfig,
+      mockEventStore as never,
+      pricingService,
+      undefined,
+      mockSettlementConfig,
+      mockChannelClient,
+      mockAdminClient
     );
 
     const res = await app.request('/handle-packet', {
@@ -770,7 +857,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     expect(body.data).toBeDefined();
 
@@ -793,8 +880,13 @@ describe('createBlsServer /handle-packet settlement', () => {
 
     const mockEventStore = { store: vi.fn() };
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService, undefined,
-      mockSettlementConfig, mockChannelClient, mockAdminClient
+      testConfig,
+      mockEventStore as never,
+      pricingService,
+      undefined,
+      mockSettlementConfig,
+      mockChannelClient,
+      mockAdminClient
     );
 
     const res = await app.request('/handle-packet', {
@@ -804,7 +896,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     // negotiateAndOpenChannel should NOT be called
     expect(mockNegotiateAndOpenChannel).not.toHaveBeenCalled();
@@ -814,19 +906,26 @@ describe('createBlsServer /handle-packet settlement', () => {
     expect(spspResponseArg.channelId).toBeUndefined();
   });
 
-  it('channel open failure returns REJECT response', async () => {
+  it('channel open failure gracefully degrades to basic SPSP response', async () => {
     mockParseSpspRequest.mockReturnValue({
       requestId: 'req-4',
       timestamp: Date.now(),
       supportedChains: ['evm:base:8453'],
       settlementAddresses: { 'evm:base:8453': '0xPEER_ADDR' },
     });
-    mockNegotiateAndOpenChannel.mockRejectedValue(new Error('Channel open failed'));
+    mockNegotiateAndOpenChannel.mockRejectedValue(
+      new Error('Channel open failed')
+    );
 
     const mockEventStore = { store: vi.fn() };
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService, undefined,
-      mockSettlementConfig, mockChannelClient, mockAdminClient
+      testConfig,
+      mockEventStore as never,
+      pricingService,
+      undefined,
+      mockSettlementConfig,
+      mockChannelClient,
+      mockAdminClient
     );
 
     const res = await app.request('/handle-packet', {
@@ -835,11 +934,11 @@ describe('createBlsServer /handle-packet settlement', () => {
       body: JSON.stringify(buildSpspPaymentBody()),
     });
 
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.accept).toBe(false);
-    expect(body.code).toBe(ILP_ERROR_CODES.INTERNAL_ERROR);
-    expect(body.message).toContain('Channel open failed');
+    // Channel open failure results in graceful degradation:
+    // returns 200 with basic SPSP response (no settlement fields)
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.accept).toBe(true);
   });
 
   it('no settlement config returns basic response regardless of request fields', async () => {
@@ -853,7 +952,9 @@ describe('createBlsServer /handle-packet settlement', () => {
     const mockEventStore = { store: vi.fn() };
     // No settlementConfig or channelClient passed
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService
+      testConfig,
+      mockEventStore as never,
+      pricingService
     );
 
     const res = await app.request('/handle-packet', {
@@ -863,7 +964,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     // negotiateAndOpenChannel should NOT be called
     expect(mockNegotiateAndOpenChannel).not.toHaveBeenCalled();
@@ -877,7 +978,9 @@ describe('createBlsServer /handle-packet settlement', () => {
 
     const mockEventStore = { store: vi.fn() };
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService
+      testConfig,
+      mockEventStore as never,
+      pricingService
     );
 
     const res = await app.request('/handle-packet', {
@@ -887,7 +990,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     expect(body).not.toHaveProperty('fulfillment');
   });
@@ -907,7 +1010,9 @@ describe('createBlsServer /handle-packet settlement', () => {
 
     const mockEventStore = { store: vi.fn() };
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService
+      testConfig,
+      mockEventStore as never,
+      pricingService
     );
 
     const res = await app.request('/handle-packet', {
@@ -921,7 +1026,7 @@ describe('createBlsServer /handle-packet settlement', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.accept).toBe(true);
     expect(body).not.toHaveProperty('fulfillment');
   });
@@ -950,6 +1055,10 @@ describe('SPSP path equivalence (AC: 9)', () => {
     initialDeposit: undefined,
     settlementTimeout: undefined,
     spspMinPrice: 0n,
+    bootstrapPeersJson: undefined,
+    forgejoUrl: undefined,
+    forgejoToken: undefined,
+    forgejoOwner: undefined,
   };
 
   const settlementConfig = {
@@ -1018,13 +1127,21 @@ describe('SPSP path equivalence (AC: 9)', () => {
     });
 
     const mockEventStore = { store: vi.fn() };
-    const mockChannelClient = { openChannel: vi.fn(), getChannelState: vi.fn() };
+    const mockChannelClient = {
+      openChannel: vi.fn(),
+      getChannelState: vi.fn(),
+    };
     const mockAdminClient = { addPeer: vi.fn().mockResolvedValue(undefined) };
 
     // BLS path: invoke /handle-packet
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService, undefined,
-      settlementConfig, mockChannelClient, mockAdminClient
+      testConfig,
+      mockEventStore as never,
+      pricingService,
+      undefined,
+      settlementConfig,
+      mockChannelClient,
+      mockAdminClient
     );
 
     const res = await app.request('/handle-packet', {
@@ -1081,6 +1198,10 @@ describe('createBlsServer /health peer/channel counts', () => {
     initialDeposit: undefined,
     settlementTimeout: undefined,
     spspMinPrice: 0n,
+    bootstrapPeersJson: undefined,
+    forgejoUrl: undefined,
+    forgejoToken: undefined,
+    forgejoOwner: undefined,
   };
 
   it('returns peerCount and channelCount when bootstrap phase is ready', async () => {
@@ -1088,15 +1209,19 @@ describe('createBlsServer /health peer/channel counts', () => {
     const pricingService = new PricingService({ basePricePerByte: 10n });
 
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService,
+      testConfig,
+      mockEventStore as never,
+      pricingService,
       () => 'ready',
-      undefined, undefined, undefined,
+      undefined,
+      undefined,
+      undefined,
       () => ({ peerCount: 3, channelCount: 2 })
     );
 
     const res = await app.request('/health');
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.status).toBe('healthy');
     expect(body.bootstrapPhase).toBe('ready');
     expect(body.peerCount).toBe(3);
@@ -1108,15 +1233,19 @@ describe('createBlsServer /health peer/channel counts', () => {
     const pricingService = new PricingService({ basePricePerByte: 10n });
 
     const app = createBlsServer(
-      testConfig, mockEventStore as never, pricingService,
+      testConfig,
+      mockEventStore as never,
+      pricingService,
       () => 'discovering',
-      undefined, undefined, undefined,
+      undefined,
+      undefined,
+      undefined,
       () => ({ peerCount: 1, channelCount: 0 })
     );
 
     const res = await app.request('/health');
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.status).toBe('healthy');
     expect(body.bootstrapPhase).toBe('discovering');
     expect(body).not.toHaveProperty('peerCount');
