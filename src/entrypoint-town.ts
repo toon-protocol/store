@@ -1,13 +1,43 @@
 /**
- * SDK-Based Crosstown Container Entrypoint (Town)
+ * SDK Reference Implementation -- Crosstown Container Entrypoint (Town)
  *
- * Replaces the manually-wired entrypoint.ts with SDK pipeline components
- * from @crosstown/sdk and handler implementations from @crosstown/town.
+ * This file is the canonical reference implementation for building an ILP-gated
+ * Nostr relay using @crosstown/sdk and @crosstown/town. Developers should study
+ * this file to understand how SDK components compose into a production service.
+ *
+ * ## SDK Pattern: Identity -> Pipeline Components -> Handler Registration -> Lifecycle
+ *
+ * The construction follows a deliberate order:
+ * 1. **Identity** -- Derive a unified secp256k1 identity (Nostr pubkey + EVM address)
+ *    from a single secret key using `fromSecretKey()`.
+ * 2. **Pipeline components** -- Create verification and pricing stages that form
+ *    the inbound packet processing pipeline.
+ * 3. **Handler registration** -- Wire domain-specific handlers (event storage, SPSP)
+ *    into a `HandlerRegistry` that dispatches by Nostr event kind.
+ * 4. **Lifecycle** -- Start services (HTTP, WebSocket, bootstrap, discovery) and
+ *    wire graceful shutdown to clean up subscriptions and connections.
+ *
+ * ## Why Approach A (Individual Components) Instead of createNode()
+ *
+ * `createNode()` assumes an embedded connector (it creates and manages the connector
+ * lifecycle internally). In Docker deployment, the connector runs as a separate
+ * container, so we use individual SDK components (`fromSecretKey`,
+ * `createVerificationPipeline`, `createPricingValidator`, `HandlerRegistry`,
+ * `createHandlerContext`) wired to an external BLS HTTP endpoint. This gives full
+ * control over the connector admin client and channel client configuration.
+ *
+ * ## SDK Features Exercised
+ *
+ * - **Identity:** `fromSecretKey()` -- unified secp256k1 identity (Nostr + EVM)
+ * - **Verification:** `createVerificationPipeline()` -- Schnorr signature verification
+ * - **Pricing:** `createPricingValidator()` -- per-byte pricing, self-write bypass
+ * - **Handlers:** `HandlerRegistry` -- kind-based dispatch (.onDefault, .on)
+ * - **Context:** `createHandlerContext()` -- raw TOON passthrough, lazy decode
+ * - **Town handlers:** `createEventStorageHandler()`, `createSpspHandshakeHandler()`
+ * - **Bootstrap:** `BootstrapService`, `RelayMonitor`, `SocialPeerDiscovery`
+ * - **Channels:** Settlement negotiation and payment channel lifecycle
  *
  * Pipeline: size check -> shallow TOON parse -> Schnorr verify -> pricing validate -> handler dispatch
- *
- * Uses Approach A: individual SDK components wired to the BLS HTTP endpoint
- * (external connector mode -- NOT createNode() which assumes embedded connector).
  */
 
 import { serve, type ServerType } from '@hono/node-server';
@@ -68,20 +98,43 @@ function createPipelineHandler(
   channelClient: ConnectorChannelClient | undefined,
   adminClient: ReturnType<typeof createConnectorAdminClient> | undefined
 ) {
+  // --- Identity derivation ---
+  // fromSecretKey() produces a NodeIdentity with both a Nostr pubkey (x-only
+  // Schnorr/BIP-340) and an EVM address (Keccak-256) from a single secp256k1
+  // secret key. This unified identity lets the node sign Nostr events and
+  // participate in on-chain payment channel settlement with the same key.
   const identity = fromSecretKey(config.secretKey);
 
-  // SDK pipeline components
+  // --- Verification pipeline ---
+  // Schnorr signature verification ensures every inbound event was signed by
+  // the claimed pubkey. This runs AFTER shallow TOON parse but BEFORE decode,
+  // because verifying the serialized bytes is the only safe order -- decoding
+  // first would trust unverified data. devMode: false enables full verification
+  // (devMode: true would skip verification entirely for local testing).
   const verifier = createVerificationPipeline({ devMode: false });
+
+  // --- Pricing validator ---
+  // Per-byte pricing: requiredAmount = rawBytes.length * basePricePerByte.
+  // ownPubkey enables the self-write bypass -- events from this node's own
+  // pubkey are free, which is essential for publishing kind:10032 peer info
+  // without paying yourself. kindPricing overrides the base price for specific
+  // event kinds; here SPSP requests get a lower price because they are small
+  // handshake messages, not content events.
   const pricer = createPricingValidator({
     basePricePerByte: config.basePricePerByte,
     ownPubkey: identity.pubkey,
     kindPricing: {
-      [SPSP_REQUEST_KIND]:
-        config.spspMinPrice ?? config.basePricePerByte / 2n,
+      [SPSP_REQUEST_KIND]: config.spspMinPrice ?? config.basePricePerByte / 2n,
     },
   });
 
-  // Handler registry with Town handlers
+  // --- Handler registry ---
+  // HandlerRegistry dispatches to handlers by Nostr event kind. .onDefault()
+  // registers the fallback handler for all event kinds not explicitly registered.
+  // .on(kind, handler) registers a kind-specific handler. This pattern lets
+  // the relay treat SPSP handshake events differently from normal content events
+  // while keeping the dispatch logic centralized. Town provides the concrete
+  // handler implementations; the SDK provides the registry and context.
   const registry = new HandlerRegistry();
   registry.onDefault(createEventStorageHandler({ eventStore }));
   registry.on(
@@ -96,21 +149,30 @@ function createPipelineHandler(
     })
   );
 
-  // TOON decoder for HandlerContext
+  // --- TOON decoder for HandlerContext ---
+  // The handler context receives raw TOON data as a base64 string (TOON
+  // passthrough). Handlers that need structured NostrEvent data call
+  // ctx.decode(), which uses this decoder. The lazy decode pattern means
+  // decode only happens when a handler explicitly requests it -- handlers
+  // that only need routing metadata (kind, pubkey) can skip the decode cost.
   const toonDecoder = (toon: string) => {
     const bytes = Buffer.from(toon, 'base64');
     return decodeEventFromToon(bytes);
   };
 
+  // --- 5-stage pipeline ---
+  // The pipeline processes each inbound ILP packet through 5 sequential stages:
+  // size check -> shallow parse -> verify -> price -> dispatch. Each stage can
+  // reject the packet early, avoiding unnecessary work in later stages.
   return async (
     request: HandlePacketRequest
   ): Promise<HandlePacketAcceptResponse | HandlePacketRejectResponse> => {
-    // 1. Size check
+    // Stage 1: Size check -- reject before allocating a Buffer (DoS mitigation)
     if (request.data.length > MAX_PAYLOAD_BASE64_LENGTH) {
       return { accept: false, code: 'F08', message: 'Payload too large' };
     }
 
-    // 2. Shallow TOON parse
+    // Stage 2: Shallow TOON parse -- extract routing metadata without full decode
     const toonBytes = Buffer.from(request.data, 'base64');
     let meta;
     try {
@@ -119,7 +181,7 @@ function createPipelineHandler(
       return { accept: false, code: 'F06', message: 'Invalid TOON payload' };
     }
 
-    // 3. Schnorr signature verification
+    // Stage 3: Schnorr signature verification on serialized bytes
     const verifyResult = await verifier.verify(meta, request.data);
     if (!verifyResult.verified) {
       if (verifyResult.rejection) {
@@ -128,7 +190,7 @@ function createPipelineHandler(
       return { accept: false, code: 'F06', message: 'Verification failed' };
     }
 
-    // 4. Pricing validation (with self-write bypass)
+    // Stage 4: Pricing validation (with self-write bypass for own pubkey)
     let amount: bigint;
     try {
       amount = BigInt(request.amount);
@@ -147,7 +209,7 @@ function createPipelineHandler(
       };
     }
 
-    // 5. Build HandlerContext and dispatch
+    // Stage 5: Build HandlerContext (TOON passthrough + lazy decode) and dispatch
     const ctx = createHandlerContext({
       toon: request.data,
       meta,
@@ -177,13 +239,20 @@ async function main(): Promise<void> {
   console.log(`[Config] Pubkey: ${config.pubkey.slice(0, 16)}...`);
   console.log(`[Config] ILP Address: ${config.ilpAddress}`);
 
-  // Initialize stores and services
+  // --- EventStore initialization ---
+  // SqliteEventStore persists events in TOON-native format -- events are stored
+  // as TOON bytes, not JSON. This is the relay's source of truth for all events
+  // and also serves NIP-01 REQ queries via the WebSocket relay.
   const dataDir = process.env['DATA_DIR'] || '/data';
   const dbPath = `${dataDir}/events.db`;
   const eventStore = new SqliteEventStore(dbPath);
   console.log(`[Setup] Initialized event store at ${dbPath}`);
 
-  // Settlement config
+  // --- Settlement configuration and channel client ---
+  // When settlement info is provided (chain IDs, token addresses, etc.), the
+  // node can negotiate payment channels with peers during SPSP handshake.
+  // The channel client communicates with the connector's channel management API
+  // to open/close on-chain payment channels.
   let settlementConfig: SettlementNegotiationConfig | undefined;
   let channelClient: ConnectorChannelClient | undefined;
   if (config.settlementInfo) {
@@ -217,7 +286,13 @@ async function main(): Promise<void> {
   // Parse bootstrap peers once (reused by BootstrapService and publishOwnIlpInfo)
   const knownPeers = parseBootstrapPeers(config);
 
-  // BLS HTTP server (Hono)
+  // --- Bootstrap lifecycle management ---
+  // BootstrapService orchestrates the bootstrap lifecycle: discovering known
+  // peers, performing SPSP handshakes, opening payment channels, and
+  // transitioning through phases (init -> peering -> channels -> ready).
+  // RelayMonitor watches for new kind:10032 events on peer relays to discover
+  // peers that join after initial bootstrap. SocialPeerDiscovery finds peers
+  // via social graph on public Nostr relays.
   const bootstrapService = new BootstrapService(
     {
       knownPeers,
@@ -269,12 +344,14 @@ async function main(): Promise<void> {
       const result = await handlePacket(body);
       return c.json(result, result.accept ? 200 : 400);
     } catch (error) {
+      // Log the full error server-side for debugging, but return a generic
+      // message to the caller to avoid leaking internal details (CWE-209).
+      console.error('[handle-packet] Unexpected error:', error);
       return c.json(
         {
           accept: false,
           code: 'T00',
-          message:
-            error instanceof Error ? error.message : 'Internal server error',
+          message: 'Internal server error',
         },
         500
       );
@@ -356,7 +433,11 @@ async function main(): Promise<void> {
     );
     console.log(`[Bootstrap] Peers bootstrapped: ${results.length}`);
 
-    // Publish own ILP info (self-write bypass)
+    // --- Self-write bypass ---
+    // Publishing our own kind:10032 peer info event to the local relay
+    // and to the genesis relay via ILP. The pricing validator's self-write
+    // bypass ensures this node's own events are stored without payment --
+    // without this, the node would need to pay itself to advertise.
     publishOwnIlpInfo(
       config,
       eventStore,
@@ -411,7 +492,10 @@ async function main(): Promise<void> {
   console.log('Crosstown Container Ready (SDK/Town)');
   console.log('='.repeat(50) + '\n');
 
-  // Graceful shutdown
+  // --- Graceful shutdown ---
+  // Unsubscribe relay monitor and social discovery to stop WebSocket
+  // connections, then stop the Nostr relay and BLS HTTP server. This ensures
+  // no dangling connections or subscriptions remain after the process exits.
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[Shutdown] Received ${signal}`);
     if (relayMonitorSubscription) relayMonitorSubscription.unsubscribe();
