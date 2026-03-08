@@ -12,7 +12,7 @@
  *    from a single secret key using `fromSecretKey()`.
  * 2. **Pipeline components** -- Create verification and pricing stages that form
  *    the inbound packet processing pipeline.
- * 3. **Handler registration** -- Wire domain-specific handlers (event storage, SPSP)
+ * 3. **Handler registration** -- Wire domain-specific handlers (event storage)
  *    into a `HandlerRegistry` that dispatches by Nostr event kind.
  * 4. **Lifecycle** -- Start services (HTTP, WebSocket, bootstrap, discovery) and
  *    wire graceful shutdown to clean up subscriptions and connections.
@@ -33,7 +33,7 @@
  * - **Pricing:** `createPricingValidator()` -- per-byte pricing, self-write bypass
  * - **Handlers:** `HandlerRegistry` -- kind-based dispatch (.onDefault, .on)
  * - **Context:** `createHandlerContext()` -- raw TOON passthrough, lazy decode
- * - **Town handlers:** `createEventStorageHandler()`, `createSpspHandshakeHandler()`
+ * - **Town handlers:** `createEventStorageHandler()`
  * - **Bootstrap:** `BootstrapService`, `RelayMonitor`, `SocialPeerDiscovery`
  * - **Channels:** Settlement negotiation and payment channel lifecycle
  *
@@ -55,7 +55,6 @@ import type {
 } from '@crosstown/sdk';
 import {
   createEventStorageHandler,
-  createSpspHandshakeHandler,
 } from '@crosstown/town';
 import {
   BootstrapService,
@@ -63,11 +62,8 @@ import {
   createAgentRuntimeClient,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
-  SPSP_REQUEST_KIND,
 } from '@crosstown/core';
 import type {
-  ConnectorChannelClient,
-  SettlementNegotiationConfig,
   BootstrapEvent,
   BootstrapResult,
   IlpPeerInfo,
@@ -83,9 +79,8 @@ import type { EventStore } from '@crosstown/relay';
 import {
   parseConfig,
   createConnectorAdminClient,
-  createChannelClient,
   waitForAgentRuntime,
-} from './entrypoint.js';
+} from './shared.js';
 
 // ---------- SDK Pipeline Constants ----------
 const MAX_PAYLOAD_BASE64_LENGTH = 1_048_576;
@@ -93,10 +88,7 @@ const MAX_PAYLOAD_BASE64_LENGTH = 1_048_576;
 // ---------- SDK Pipeline Handler ----------
 function createPipelineHandler(
   eventStore: EventStore,
-  config: ReturnType<typeof parseConfig>,
-  settlementConfig: SettlementNegotiationConfig | undefined,
-  channelClient: ConnectorChannelClient | undefined,
-  adminClient: ReturnType<typeof createConnectorAdminClient> | undefined
+  config: ReturnType<typeof parseConfig>
 ) {
   // --- Identity derivation ---
   // fromSecretKey() produces a NodeIdentity with both a Nostr pubkey (x-only
@@ -117,37 +109,17 @@ function createPipelineHandler(
   // Per-byte pricing: requiredAmount = rawBytes.length * basePricePerByte.
   // ownPubkey enables the self-write bypass -- events from this node's own
   // pubkey are free, which is essential for publishing kind:10032 peer info
-  // without paying yourself. kindPricing overrides the base price for specific
-  // event kinds; here SPSP requests get a lower price because they are small
-  // handshake messages, not content events.
+  // without paying yourself.
   const pricer = createPricingValidator({
     basePricePerByte: config.basePricePerByte,
     ownPubkey: identity.pubkey,
-    kindPricing: {
-      [SPSP_REQUEST_KIND]: config.spspMinPrice ?? config.basePricePerByte / 2n,
-    },
   });
 
   // --- Handler registry ---
   // HandlerRegistry dispatches to handlers by Nostr event kind. .onDefault()
   // registers the fallback handler for all event kinds not explicitly registered.
-  // .on(kind, handler) registers a kind-specific handler. This pattern lets
-  // the relay treat SPSP handshake events differently from normal content events
-  // while keeping the dispatch logic centralized. Town provides the concrete
-  // handler implementations; the SDK provides the registry and context.
   const registry = new HandlerRegistry();
   registry.onDefault(createEventStorageHandler({ eventStore }));
-  registry.on(
-    SPSP_REQUEST_KIND,
-    createSpspHandshakeHandler({
-      secretKey: config.secretKey,
-      ilpAddress: config.ilpAddress,
-      eventStore,
-      settlementConfig,
-      channelClient,
-      adminClient,
-    })
-  );
 
   // --- TOON decoder for HandlerContext ---
   // The handler context receives raw TOON data as a base64 string (TOON
@@ -248,37 +220,10 @@ async function main(): Promise<void> {
   const eventStore = new SqliteEventStore(dbPath);
   console.log(`[Setup] Initialized event store at ${dbPath}`);
 
-  // --- Settlement configuration and channel client ---
-  // When settlement info is provided (chain IDs, token addresses, etc.), the
-  // node can negotiate payment channels with peers during SPSP handshake.
-  // The channel client communicates with the connector's channel management API
-  // to open/close on-chain payment channels.
-  let settlementConfig: SettlementNegotiationConfig | undefined;
-  let channelClient: ConnectorChannelClient | undefined;
-  if (config.settlementInfo) {
-    settlementConfig = {
-      ownSupportedChains: config.settlementInfo.supportedChains ?? [],
-      ownSettlementAddresses: config.settlementInfo.settlementAddresses ?? {},
-      ownPreferredTokens: config.settlementInfo.preferredTokens,
-      ownTokenNetworks: config.settlementInfo.tokenNetworks,
-      initialDeposit: config.initialDeposit ?? '0',
-      settlementTimeout: config.settlementTimeout ?? 86400,
-      channelOpenTimeout: 30000,
-      pollInterval: 1000,
-    };
-    channelClient = createChannelClient(config.connectorAdminUrl);
-  }
-
   const adminClient = createConnectorAdminClient(config.connectorAdminUrl);
 
   // Create SDK pipeline handler
-  const handlePacket = createPipelineHandler(
-    eventStore,
-    config,
-    settlementConfig,
-    channelClient,
-    adminClient
-  );
+  const handlePacket = createPipelineHandler(eventStore, config);
   console.log(
     '[Setup] SDK pipeline wired: size -> parse -> verify -> price -> dispatch'
   );
@@ -288,8 +233,8 @@ async function main(): Promise<void> {
 
   // --- Bootstrap lifecycle management ---
   // BootstrapService orchestrates the bootstrap lifecycle: discovering known
-  // peers, performing SPSP handshakes, opening payment channels, and
-  // transitioning through phases (init -> peering -> channels -> ready).
+  // peers, registering with the connector, opening payment channels, and
+  // transitioning through phases (discovering -> registering -> announcing -> ready).
   // RelayMonitor watches for new kind:10032 events on peer relays to discover
   // peers that join after initial bootstrap. SocialPeerDiscovery finds peers
   // via social graph on public Nostr relays.
@@ -335,7 +280,12 @@ async function main(): Promise<void> {
   app.post('/handle-packet', async (c: Context) => {
     try {
       const body = (await c.req.json()) as HandlePacketRequest;
-      if (!body.amount || !body.destination || !body.data) {
+      if (
+        body.amount === undefined ||
+        body.amount === null ||
+        !body.destination ||
+        !body.data
+      ) {
         return c.json(
           { accept: false, code: 'F00', message: 'Missing required fields' },
           400
@@ -404,9 +354,9 @@ async function main(): Promise<void> {
           `[Bootstrap] Channel opened: ${event.channelId} with ${event.peerId}`
         );
         break;
-      case 'bootstrap:handshake-failed':
+      case 'bootstrap:settlement-failed':
         console.warn(
-          `[Bootstrap] Handshake failed for ${event.peerId}: ${event.reason}`
+          `[Bootstrap] Settlement failed for ${event.peerId}: ${event.reason}`
         );
         break;
       case 'bootstrap:ready':
