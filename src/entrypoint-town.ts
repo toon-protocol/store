@@ -34,7 +34,7 @@
  * - **Handlers:** `HandlerRegistry` -- kind-based dispatch (.onDefault, .on)
  * - **Context:** `createHandlerContext()` -- raw TOON passthrough, lazy decode
  * - **Town handlers:** `createEventStorageHandler()`
- * - **Bootstrap:** `BootstrapService`, `RelayMonitor`, `SocialPeerDiscovery`
+ * - **Bootstrap:** `BootstrapService`, `DiscoveryTracker`, `SocialPeerDiscovery`
  * - **Channels:** Settlement negotiation and payment channel lifecycle
  *
  * Pipeline: size check -> shallow TOON parse -> Schnorr verify -> pricing validate -> handler dispatch
@@ -58,10 +58,11 @@ import {
 } from '@crosstown/town';
 import {
   BootstrapService,
-  RelayMonitor,
+  createDiscoveryTracker,
   createAgentRuntimeClient,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
+  ILP_PEER_INFO_KIND,
 } from '@crosstown/core';
 import type {
   BootstrapEvent,
@@ -235,9 +236,9 @@ async function main(): Promise<void> {
   // BootstrapService orchestrates the bootstrap lifecycle: discovering known
   // peers, registering with the connector, opening payment channels, and
   // transitioning through phases (discovering -> registering -> announcing -> ready).
-  // RelayMonitor watches for new kind:10032 events on peer relays to discover
-  // peers that join after initial bootstrap. SocialPeerDiscovery finds peers
-  // via social graph on public Nostr relays.
+  // DiscoveryTracker processes kind:10032 events for peer discovery after
+  // initial bootstrap. SocialPeerDiscovery finds peers via social graph on
+  // public Nostr relays.
   const bootstrapService = new BootstrapService(
     {
       knownPeers,
@@ -292,6 +293,16 @@ async function main(): Promise<void> {
         );
       }
       const result = await handlePacket(body);
+      // Feed accepted kind:10032 events to discovery tracker for peer discovery
+      if (result.accept && discoveryTracker) {
+        try {
+          const toonBytes = Buffer.from(body.data, 'base64');
+          const decoded = decodeEventFromToon(toonBytes);
+          if (decoded && decoded.kind === ILP_PEER_INFO_KIND) {
+            discoveryTracker.processEvent(decoded);
+          }
+        } catch { /* decode failed, ignore */ }
+      }
       return c.json(result, result.accept ? 200 : 400);
     } catch (error) {
       // Log the full error server-side for debugging, but return a generic
@@ -375,7 +386,20 @@ async function main(): Promise<void> {
     console.log('[Bootstrap] Agent-runtime is healthy');
   }
 
-  let relayMonitorSubscription: { unsubscribe(): void } | undefined;
+  // Create discovery tracker for post-bootstrap peer discovery (only when connector is available)
+  let discoveryTracker: ReturnType<typeof createDiscoveryTracker> | undefined;
+  if (config.connectorUrl) {
+    discoveryTracker = createDiscoveryTracker({
+      secretKey: config.secretKey,
+      settlementInfo: config.settlementInfo,
+    });
+    discoveryTracker.setConnectorAdmin(adminClient);
+    discoveryTracker.on((event: BootstrapEvent) => {
+      if (event.type === 'bootstrap:peer-registered') {
+        console.log(`[DiscoveryTracker] Peer registered: ${event.peerId}`);
+      }
+    });
+  }
 
   try {
     const results = await bootstrapService.bootstrap(
@@ -396,31 +420,11 @@ async function main(): Promise<void> {
       agentRuntimeClient
     );
 
-    // Start RelayMonitor
-    if (config.connectorUrl) {
-      const firstPeer = knownPeers[0];
-      const monitorRelayUrl =
-        firstPeer?.relayUrl ?? `ws://localhost:${config.wsPort}`;
-      const relayMonitor = new RelayMonitor({
-        relayUrl: monitorRelayUrl,
-        secretKey: config.secretKey,
-        toonEncoder: encodeEventToToon,
-        toonDecoder: decodeEventFromToon,
-        basePricePerByte: config.basePricePerByte,
-        settlementInfo: config.settlementInfo,
-      });
-      relayMonitor.setConnectorAdmin(adminClient);
-      relayMonitor.setAgentRuntimeClient(
-        createAgentRuntimeClient(config.connectorUrl)
-      );
-      relayMonitor.on((event: BootstrapEvent) => {
-        if (event.type === 'bootstrap:peer-registered') {
-          console.log(`[RelayMonitor] Peer registered: ${event.peerId}`);
-        }
-      });
+    // Mark bootstrap peers as excluded from discovery (already peered)
+    if (discoveryTracker) {
       const bootstrapPeerPubkeys = results.map((r) => r.knownPeer.pubkey);
-      relayMonitorSubscription = relayMonitor.start(bootstrapPeerPubkeys);
-      console.log('[RelayMonitor] Started monitoring relay for new peers');
+      discoveryTracker.addExcludedPubkeys(bootstrapPeerPubkeys);
+      console.log('[DiscoveryTracker] Excluded bootstrap peers from discovery');
     }
   } catch (error) {
     console.error('[Bootstrap] Bootstrap failed:', error);
@@ -443,12 +447,11 @@ async function main(): Promise<void> {
   console.log('='.repeat(50) + '\n');
 
   // --- Graceful shutdown ---
-  // Unsubscribe relay monitor and social discovery to stop WebSocket
-  // connections, then stop the Nostr relay and BLS HTTP server. This ensures
-  // no dangling connections or subscriptions remain after the process exits.
+  // Unsubscribe social discovery to stop WebSocket connections, then stop
+  // the Nostr relay and BLS HTTP server. This ensures no dangling connections
+  // or subscriptions remain after the process exits.
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[Shutdown] Received ${signal}`);
-    if (relayMonitorSubscription) relayMonitorSubscription.unsubscribe();
     socialSubscription.unsubscribe();
     await wsRelay.stop();
     blsServer.close();

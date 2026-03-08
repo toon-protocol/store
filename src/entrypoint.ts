@@ -37,7 +37,7 @@ import { Hono, type Context } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
 import {
   BootstrapService,
-  RelayMonitor,
+  createDiscoveryTracker,
   createAgentRuntimeClient,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
@@ -49,6 +49,7 @@ import {
   type BootstrapEvent,
   type IlpPeerInfo,
   type SettlementConfig,
+  ILP_PEER_INFO_KIND,
 } from '@crosstown/core';
 import {
   SqliteEventStore,
@@ -437,6 +438,11 @@ export function createBlsServer(
       // Store the event
       eventStore.store(event);
 
+      // Feed kind:10032 events to discovery tracker for peer discovery
+      if (event.kind === ILP_PEER_INFO_KIND) {
+        discoveryTracker.processEvent(event);
+      }
+
       // Trigger NIP-34 handler if configured (async, non-blocking)
       if (onNIP34Event) {
         const isNIP34 =
@@ -764,7 +770,46 @@ async function main(): Promise<void> {
     console.log('[Bootstrap] Agent-runtime is healthy');
   }
 
-  let relayMonitorSubscription: { unsubscribe(): void } | undefined;
+  // Create discovery tracker for post-bootstrap peer discovery
+  const discoveryTracker = createDiscoveryTracker({
+    secretKey: config.secretKey,
+    settlementInfo: config.settlementInfo,
+  });
+  if (config.connectorUrl) {
+    discoveryTracker.setConnectorAdmin(adminClient);
+    if (channelClient) {
+      discoveryTracker.setChannelClient(channelClient);
+    }
+    discoveryTracker.on((event: BootstrapEvent) => {
+      switch (event.type) {
+        case 'bootstrap:peer-discovered':
+          console.log(
+            `[DiscoveryTracker] Peer discovered: ${event.peerPubkey.slice(0, 16)}... (${event.ilpAddress})`
+          );
+          break;
+        case 'bootstrap:peer-registered':
+          console.log(
+            `[DiscoveryTracker] Peer registered: ${event.peerId} (${event.ilpAddress})`
+          );
+          break;
+        case 'bootstrap:channel-opened':
+          console.log(
+            `[DiscoveryTracker] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`
+          );
+          break;
+        case 'bootstrap:settlement-failed':
+          console.warn(
+            `[DiscoveryTracker] Settlement failed for ${event.peerId}: ${event.reason}`
+          );
+          break;
+        case 'bootstrap:peer-deregistered':
+          console.log(
+            `[DiscoveryTracker] Peer deregistered: ${event.peerId} (${event.reason})`
+          );
+          break;
+      }
+    });
+  }
 
   try {
     const results = await bootstrapService.bootstrap(
@@ -841,66 +886,10 @@ async function main(): Promise<void> {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
     }
 
-    // Determine which relay to monitor for peer discovery
-    // If we bootstrapped from other peers, monitor the genesis relay
-    // Otherwise monitor our own relay
-    const monitorRelayUrl = firstPeer?.relayUrl
-      ? firstPeer.relayUrl
-      : `ws://localhost:${config.wsPort}`;
-
-    // Start RelayMonitor to discover new peers
-    if (config.connectorUrl) {
-      const relayMonitor = new RelayMonitor({
-        relayUrl: monitorRelayUrl,
-        secretKey: config.secretKey,
-        toonEncoder: encodeEventToToon,
-        toonDecoder: decodeEventFromToon,
-        basePricePerByte: config.basePricePerByte,
-        settlementInfo: config.settlementInfo,
-      });
-      relayMonitor.setConnectorAdmin(adminClient);
-      relayMonitor.setAgentRuntimeClient(
-        createAgentRuntimeClient(config.connectorUrl)
-      );
-      if (channelClient) {
-        relayMonitor.setChannelClient(channelClient);
-      }
-
-      // Register same event listener for relay monitor events
-      relayMonitor.on((event: BootstrapEvent) => {
-        switch (event.type) {
-          case 'bootstrap:peer-discovered':
-            console.log(
-              `[RelayMonitor] Peer discovered: ${event.peerPubkey.slice(0, 16)}... (${event.ilpAddress})`
-            );
-            break;
-          case 'bootstrap:peer-registered':
-            console.log(
-              `[RelayMonitor] Peer registered: ${event.peerId} (${event.ilpAddress})`
-            );
-            break;
-          case 'bootstrap:channel-opened':
-            console.log(
-              `[RelayMonitor] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`
-            );
-            break;
-          case 'bootstrap:settlement-failed':
-            console.warn(
-              `[RelayMonitor] Settlement failed for ${event.peerId}: ${event.reason}`
-            );
-            break;
-          case 'bootstrap:peer-deregistered':
-            console.log(
-              `[RelayMonitor] Peer deregistered: ${event.peerId} (${event.reason})`
-            );
-            break;
-        }
-      });
-
-      const bootstrapPeerPubkeys = results.map((r) => r.knownPeer.pubkey);
-      relayMonitorSubscription = relayMonitor.start(bootstrapPeerPubkeys);
-      console.log('[RelayMonitor] Started monitoring relay for new peers');
-    }
+    // Mark bootstrap peers as excluded from discovery (already peered)
+    const bootstrapPeerPubkeys = results.map((r) => r.knownPeer.pubkey);
+    discoveryTracker.addExcludedPubkeys(bootstrapPeerPubkeys);
+    console.log('[DiscoveryTracker] Excluded bootstrap peers from discovery');
   } catch (error) {
     console.error('[Bootstrap] Bootstrap failed:', error);
   }
@@ -925,11 +914,6 @@ async function main(): Promise<void> {
   // Graceful shutdown handling
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[Shutdown] Received ${signal}`);
-
-    if (relayMonitorSubscription) {
-      relayMonitorSubscription.unsubscribe();
-      console.log('[Shutdown] Relay monitor stopped');
-    }
 
     socialSubscription.unsubscribe();
     console.log('[Shutdown] Social discovery stopped');
