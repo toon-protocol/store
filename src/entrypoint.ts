@@ -3,7 +3,7 @@
  *
  * Starts the following services:
  * 1. Nostr Relay Server (WebSocket)
- * 2. Business Logic Server (HTTP) with SPSP handling
+ * 2. Business Logic Server (HTTP) for incoming ILP packets
  * 3. Bootstrap Service (layered discovery: genesis + ArDrive + env var peers)
  * 4. Social Peer Discovery (dynamic peer expansion via NIP-02 follow lists)
  *
@@ -37,25 +37,19 @@ import { Hono, type Context } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
 import {
   BootstrapService,
-  RelayMonitor,
-  createAgentRuntimeClient,
-  NostrSpspServer,
+  createDiscoveryTracker,
+  createHttpIlpClient,
   SocialPeerDiscovery,
-  buildSpspResponseEvent,
   buildIlpPeerInfoEvent,
-  parseSpspRequest,
-  negotiateAndOpenChannel,
   type ConnectorAdminClient,
   type ConnectorChannelClient,
   type OpenChannelParams,
   type OpenChannelResult,
   type ChannelState,
-  type SettlementNegotiationConfig,
   type BootstrapEvent,
   type IlpPeerInfo,
-  type SpspInfo,
-  type SpspRequestSettlementInfo,
-  SPSP_REQUEST_KIND,
+  type SettlementConfig,
+  ILP_PEER_INFO_KIND,
 } from '@crosstown/core';
 import {
   SqliteEventStore,
@@ -69,7 +63,6 @@ import {
   type HandlePacketAcceptResponse,
   type HandlePacketRejectResponse,
 } from '@crosstown/relay';
-import crypto from 'crypto';
 
 // Environment configuration
 export interface Config {
@@ -89,10 +82,9 @@ export interface Config {
   assetScale: number;
   basePricePerByte: bigint;
   connectorUrl: string | undefined;
-  settlementInfo: SpspRequestSettlementInfo | undefined;
+  settlementInfo: SettlementConfig | undefined;
   initialDeposit: string | undefined;
   settlementTimeout: number | undefined;
-  spspMinPrice: bigint | undefined;
   forgejoUrl: string | undefined;
   forgejoToken: string | undefined;
   forgejoOwner: string | undefined;
@@ -149,7 +141,7 @@ export function parseConfig(): Config {
   }
 
   // Settlement info (optional, only when SUPPORTED_CHAINS is set)
-  let settlementInfo: SpspRequestSettlementInfo | undefined;
+  let settlementInfo: SettlementConfig | undefined;
   const supportedChainsStr = env['SUPPORTED_CHAINS'];
   if (supportedChainsStr) {
     const supportedChains = supportedChainsStr
@@ -181,7 +173,6 @@ export function parseConfig(): Config {
     }
 
     settlementInfo = {
-      ilpAddress,
       supportedChains,
       ...(Object.keys(settlementAddresses).length > 0 && {
         settlementAddresses,
@@ -216,19 +207,6 @@ export function parseConfig(): Config {
     settlementTimeout = parsed;
   }
 
-  // SPSP minimum price (optional, bootstrap nodes set to 0)
-  let spspMinPrice: bigint | undefined;
-  const spspMinPriceStr = env['SPSP_MIN_PRICE'];
-  if (spspMinPriceStr !== undefined && spspMinPriceStr !== '') {
-    try {
-      spspMinPrice = BigInt(spspMinPriceStr);
-    } catch {
-      throw new Error(
-        `SPSP_MIN_PRICE is not a valid integer: ${spspMinPriceStr}`
-      );
-    }
-  }
-
   // NIP-34 Git Integration (Forgejo) - optional
   const forgejoUrl = env['FORGEJO_URL'];
   const forgejoToken = env['FORGEJO_TOKEN'];
@@ -254,28 +232,9 @@ export function parseConfig(): Config {
     settlementInfo,
     initialDeposit,
     settlementTimeout,
-    spspMinPrice,
     forgejoUrl,
     forgejoToken,
     forgejoOwner,
-  };
-}
-
-/**
- * Generate fresh SPSP parameters for a receiver.
- */
-function generateSpspInfo(ilpAddress: string): SpspInfo {
-  // Generate unique payment pointer
-  const paymentId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-  const destinationAccount = `${ilpAddress}.spsp.${paymentId}`;
-
-  // Generate 32-byte shared secret
-  const sharedSecretBytes = crypto.randomBytes(32);
-  const sharedSecret = sharedSecretBytes.toString('base64');
-
-  return {
-    destinationAccount,
-    sharedSecret,
   };
 }
 
@@ -375,15 +334,15 @@ export function createChannelClient(
 }
 
 /**
- * Create the BLS HTTP server with SPSP handling.
+ * Create the BLS HTTP server for incoming ILP packets.
  */
 export function createBlsServer(
   config: Config,
   eventStore: EventStore,
   pricingService: PricingService,
   getBootstrapPhase?: () => string,
-  settlementConfig?: SettlementNegotiationConfig,
-  channelClient?: ConnectorChannelClient,
+  _settlementConfig?: unknown,
+  _channelClient?: unknown,
   adminClient?: ConnectorAdminClient,
   getBootstrapCounts?: () => { peerCount: number; channelCount: number },
   onNIP34Event?: (event: any) => Promise<void>
@@ -411,8 +370,13 @@ export function createBlsServer(
     try {
       const body = (await c.req.json()) as HandlePacketRequest;
 
-      // Validate required fields
-      if (!body.amount || !body.destination || !body.data) {
+      // Validate required fields (use === checks to avoid truthiness bug with amount="0")
+      if (
+        body.amount === undefined ||
+        body.amount === null ||
+        !body.destination ||
+        !body.data
+      ) {
         const response: HandlePacketRejectResponse = {
           accept: false,
           code: ILP_ERROR_CODES.BAD_REQUEST,
@@ -454,238 +418,7 @@ export function createBlsServer(
       );
       const amount = BigInt(body.amount);
 
-      // Check if this is an SPSP request (kind:23194)
-      if (event.kind === SPSP_REQUEST_KIND) {
-        // Verify payment meets price
-        if (amount < price) {
-          const response: HandlePacketRejectResponse = {
-            accept: false,
-            code: ILP_ERROR_CODES.INSUFFICIENT_AMOUNT,
-            message: 'Insufficient payment for SPSP request',
-            metadata: {
-              required: price.toString(),
-              received: amount.toString(),
-            },
-          };
-          return c.json(response, 400);
-        }
-
-        // Parse and handle SPSP request
-        try {
-          const spspRequest = parseSpspRequest(
-            event,
-            config.secretKey,
-            event.pubkey
-          );
-
-          // Generate fresh SPSP parameters
-          const spspInfo = generateSpspInfo(config.ilpAddress);
-
-          // Build base SPSP response
-          const spspResponse: {
-            requestId: string;
-            destinationAccount: string;
-            sharedSecret: string;
-            negotiatedChain?: string;
-            settlementAddress?: string;
-            tokenAddress?: string;
-            tokenNetworkAddress?: string;
-            channelId?: string;
-            settlementTimeout?: number;
-          } = {
-            requestId: spspRequest.requestId,
-            destinationAccount: spspInfo.destinationAccount,
-            sharedSecret: spspInfo.sharedSecret,
-          };
-
-          // Attempt settlement negotiation if request has settlement fields and config available
-          if (
-            spspRequest.supportedChains &&
-            settlementConfig &&
-            channelClient
-          ) {
-            try {
-              const settlementResult = await negotiateAndOpenChannel({
-                request: spspRequest,
-                config: settlementConfig,
-                channelClient,
-                senderPubkey: event.pubkey,
-              });
-
-              if (settlementResult) {
-                // Merge settlement fields into response
-                spspResponse.negotiatedChain = settlementResult.negotiatedChain;
-                spspResponse.settlementAddress =
-                  settlementResult.settlementAddress;
-                spspResponse.tokenAddress = settlementResult.tokenAddress;
-                spspResponse.tokenNetworkAddress =
-                  settlementResult.tokenNetworkAddress;
-                spspResponse.channelId = settlementResult.channelId;
-                spspResponse.settlementTimeout =
-                  settlementResult.settlementTimeout;
-
-                // Register peer with settlement config (non-fatal)
-                if (
-                  adminClient &&
-                  spspRequest.ilpAddress &&
-                  spspRequest.settlementAddresses?.[
-                    settlementResult.negotiatedChain
-                  ]
-                ) {
-                  try {
-                    const peerId = `nostr-${event.pubkey.slice(0, 16)}`;
-
-                    // Look up the peer's kind:10032 event to get their BTP endpoint
-                    const peerEvents = eventStore.query([
-                      {
-                        kinds: [10032],
-                        authors: [event.pubkey],
-                        limit: 1,
-                      },
-                    ]);
-
-                    let btpUrl = '';
-                    if (peerEvents.length > 0 && peerEvents[0]) {
-                      try {
-                        const peerInfo: IlpPeerInfo = JSON.parse(
-                          peerEvents[0].content
-                        );
-                        btpUrl = peerInfo.btpEndpoint;
-                      } catch (parseError) {
-                        console.warn(
-                          `[BLS] Failed to parse peer info event: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`
-                        );
-                      }
-                    }
-
-                    // Only register if we have a valid BTP URL
-                    if (
-                      btpUrl &&
-                      (btpUrl.startsWith('ws://') ||
-                        btpUrl.startsWith('wss://'))
-                    ) {
-                      await adminClient.addPeer({
-                        id: peerId,
-                        url: btpUrl,
-                        authToken: '',
-                        routes: [{ prefix: spspRequest.ilpAddress }],
-                      });
-                      console.log(
-                        `[BLS] Registered peer ${peerId} (${spspRequest.ilpAddress}) at ${btpUrl} after channel open`
-                      );
-                    }
-                  } catch (peerError) {
-                    console.warn(
-                      `[BLS] Failed to register peer after channel open: ${peerError instanceof Error ? peerError.message : 'Unknown error'}`
-                    );
-                  }
-                }
-              }
-              // null result = no chain match = graceful degradation (basic SPSP response)
-            } catch (settlementError) {
-              // Channel open failure or timeout — log warning but continue (graceful degradation)
-              console.warn(
-                `[BLS] Settlement negotiation failed (continuing without settlement): ${settlementError instanceof Error ? settlementError.message : 'Unknown error'}`
-              );
-              // Don't return — continue to peer registration below
-            }
-          }
-
-          // Register peer after successful SPSP handshake (regardless of settlement)
-          // Payment was verified above, so this is a legitimate peer
-          if (adminClient && spspRequest.ilpAddress) {
-            try {
-              const peerId = `nostr-${event.pubkey.slice(0, 16)}`;
-
-              // Look up the peer's kind:10032 event to get their BTP endpoint
-              const peerEvents = eventStore.query([
-                {
-                  kinds: [10032],
-                  authors: [event.pubkey],
-                  limit: 1,
-                },
-              ]);
-              console.log(
-                `[BLS] DEBUG: Queried for peer ${event.pubkey.slice(0, 16)}, found ${peerEvents.length} events`
-              );
-
-              let btpUrl = '';
-              if (peerEvents.length > 0 && peerEvents[0]) {
-                try {
-                  const peerInfo: IlpPeerInfo = JSON.parse(
-                    peerEvents[0].content
-                  );
-                  btpUrl = peerInfo.btpEndpoint;
-                  console.log(`[BLS] DEBUG: Found BTP endpoint: ${btpUrl}`);
-                } catch (parseError) {
-                  console.warn(
-                    `[BLS] Failed to parse peer info event: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`
-                  );
-                }
-              }
-
-              // Only register if we have a valid BTP URL
-              if (
-                btpUrl &&
-                (btpUrl.startsWith('ws://') || btpUrl.startsWith('wss://'))
-              ) {
-                await adminClient.addPeer({
-                  id: peerId,
-                  url: btpUrl,
-                  authToken: '',
-                  routes: [{ prefix: spspRequest.ilpAddress }],
-                });
-                console.log(
-                  `[BLS] Registered peer ${peerId} (${spspRequest.ilpAddress}) at ${btpUrl} after SPSP handshake`
-                );
-              } else {
-                console.warn(
-                  `[BLS] Cannot register peer ${peerId}: no valid BTP endpoint found (got: ${btpUrl})`
-                );
-              }
-            } catch (peerError) {
-              console.warn(
-                `[BLS] Failed to register peer after SPSP handshake: ${peerError instanceof Error ? peerError.message : 'Unknown error'}`
-              );
-            }
-          }
-
-          // Build encrypted response
-          const responseEvent = buildSpspResponseEvent(
-            spspResponse,
-            event.pubkey,
-            config.secretKey,
-            event.id
-          );
-
-          // Encode response as TOON for fulfillment data
-          const responseToon = encodeEventToToon(responseEvent);
-          const responseData = Buffer.from(responseToon).toString('base64');
-
-          const response: HandlePacketAcceptResponse = {
-            accept: true,
-            metadata: {
-              eventId: event.id,
-              storedAt: Date.now(),
-            },
-          };
-
-          // Include response event data in the response
-          return c.json({
-            ...response,
-            data: responseData,
-          });
-        } catch (error) {
-          const response: HandlePacketRejectResponse = {
-            accept: false,
-            code: ILP_ERROR_CODES.BAD_REQUEST,
-            message: `Failed to process SPSP request: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          };
-          return c.json(response, 400);
-        }
-      }
-
-      // For other event kinds, verify payment and store
+      // Verify payment and store
       // Self-write bypass: owner events skip payment verification
       if (event.pubkey !== config.pubkey) {
         if (amount < price) {
@@ -704,6 +437,11 @@ export function createBlsServer(
 
       // Store the event
       eventStore.store(event);
+
+      // Feed kind:10032 events to discovery tracker for peer discovery
+      if (event.kind === ILP_PEER_INFO_KIND) {
+        discoveryTracker.processEvent(event);
+      }
 
       // Trigger NIP-34 handler if configured (async, non-blocking)
       if (onNIP34Event) {
@@ -734,11 +472,13 @@ export function createBlsServer(
 
       return c.json(response);
     } catch (error) {
+      // Log the full error server-side for debugging, but return a generic
+      // message to the caller to avoid leaking internal details (CWE-209).
+      console.error('[handle-packet] Unexpected error:', error);
       const response: HandlePacketRejectResponse = {
         accept: false,
         code: ILP_ERROR_CODES.INTERNAL_ERROR,
-        message:
-          error instanceof Error ? error.message : 'Internal server error',
+        message: 'Internal server error',
       };
       return c.json(response, 500);
     }
@@ -748,9 +488,9 @@ export function createBlsServer(
 }
 
 /**
- * Wait for agent-runtime to become healthy before proceeding with bootstrap.
+ * Wait for connector to become healthy before proceeding with bootstrap.
  */
-export async function waitForAgentRuntime(
+export async function waitForConnector(
   url: string,
   options?: { timeout?: number; interval?: number }
 ): Promise<void> {
@@ -766,20 +506,25 @@ export async function waitForAgentRuntime(
         return;
       }
       console.log(
-        `[Bootstrap] Agent-runtime not ready (HTTP ${response.status}), retrying...`
+        `[Bootstrap] Connector not ready (HTTP ${response.status}), retrying...`
       );
     } catch {
       console.log(
-        `[Bootstrap] Agent-runtime not reachable at ${healthUrl}, retrying...`
+        `[Bootstrap] Connector not reachable at ${healthUrl}, retrying...`
       );
     }
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
 
   throw new Error(
-    `Agent-runtime health check timed out after ${timeout}ms: ${url}`
+    `Connector health check timed out after ${timeout}ms: ${url}`
   );
 }
+
+/**
+ * @deprecated Use waitForConnector instead
+ */
+export const waitForAgentRuntime = waitForConnector;
 
 /**
  * Main entrypoint.
@@ -804,15 +549,8 @@ async function main(): Promise<void> {
   console.log(`[Setup] Initialized event store at ${dbPath}`);
 
   // Initialize pricing service
-  const spspPrice =
-    config.spspMinPrice !== undefined
-      ? config.spspMinPrice
-      : config.basePricePerByte / 2n;
   const pricingService = new PricingService({
     basePricePerByte: config.basePricePerByte,
-    kindOverrides: new Map([
-      [SPSP_REQUEST_KIND, spspPrice], // kind:23194
-    ]),
   });
   console.log(`[Setup] Pricing: ${config.basePricePerByte} units/byte`);
 
@@ -843,22 +581,11 @@ async function main(): Promise<void> {
     );
   }
 
-  // Build settlement config and channel client (shared by BLS server and Nostr SPSP server)
-  let settlementConfig: SettlementNegotiationConfig | undefined;
+  // Build channel client for payment channel operations
   let channelClient: ConnectorChannelClient | undefined;
   if (config.settlementInfo) {
-    settlementConfig = {
-      ownSupportedChains: config.settlementInfo.supportedChains ?? [],
-      ownSettlementAddresses: config.settlementInfo.settlementAddresses ?? {},
-      ownPreferredTokens: config.settlementInfo.preferredTokens,
-      ownTokenNetworks: config.settlementInfo.tokenNetworks,
-      initialDeposit: config.initialDeposit ?? '0',
-      settlementTimeout: config.settlementTimeout ?? 86400,
-      channelOpenTimeout: 30000,
-      pollInterval: 1000,
-    };
     channelClient = createChannelClient(config.connectorAdminUrl);
-    console.log('[Setup] Settlement config and channel client configured');
+    console.log('[Setup] Channel client configured');
   }
 
   // Create admin client (shared by BLS server, bootstrap, relay monitor, social discovery)
@@ -920,8 +647,8 @@ async function main(): Promise<void> {
     eventStore,
     pricingService,
     () => bootstrapService.getPhase(),
-    settlementConfig,
-    channelClient,
+    undefined, // reserved (formerly settlementConfig)
+    undefined, // reserved (formerly channelClient)
     adminClient,
     () => ({ peerCount, channelCount }),
     nip34Handler
@@ -956,20 +683,6 @@ async function main(): Promise<void> {
   // Wait a moment for relay to be fully ready
   await new Promise((resolve) => setTimeout(resolve, 500));
 
-  // Set up SPSP server for direct requests (not ILP-routed)
-  // This handles SPSP requests that come via Nostr directly
-  const spspServer = new NostrSpspServer(
-    [`ws://localhost:${config.wsPort}`],
-    config.secretKey,
-    undefined, // pool — use default
-    settlementConfig,
-    channelClient
-  );
-  const spspSubscription = spspServer.handleSpspRequests(() => {
-    return generateSpspInfo(config.ilpAddress);
-  });
-  console.log('[Setup] SPSP server started');
-
   // Bootstrap with layered peer discovery (genesis + ArDrive + env var)
   const ownIlpInfo: IlpPeerInfo = {
     ilpAddress: config.ilpAddress,
@@ -993,15 +706,18 @@ async function main(): Promise<void> {
 
   console.log('\n[Bootstrap] Starting bootstrap process...');
   bootstrapService.setConnectorAdmin(adminClient);
+  if (channelClient) {
+    bootstrapService.setChannelClient(channelClient);
+  }
 
-  // Wire up agent-runtime client for ILP-first flow
+  // Wire up ILP client for sending packets via the connector
   // Use admin URL since /admin/ilp/send endpoint is on the admin API (port 8081)
-  let agentRuntimeClient:
-    | ReturnType<typeof createAgentRuntimeClient>
+  let ilpClient:
+    | ReturnType<typeof createHttpIlpClient>
     | undefined;
   if (config.connectorUrl) {
-    agentRuntimeClient = createAgentRuntimeClient(config.connectorAdminUrl);
-    bootstrapService.setAgentRuntimeClient(agentRuntimeClient);
+    ilpClient = createHttpIlpClient(config.connectorAdminUrl);
+    bootstrapService.setIlpClient(ilpClient);
     console.log(
       `[Bootstrap] ILP-first flow enabled via ${config.connectorAdminUrl}`
     );
@@ -1027,9 +743,9 @@ async function main(): Promise<void> {
           `[Bootstrap] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`
         );
         break;
-      case 'bootstrap:handshake-failed':
+      case 'bootstrap:settlement-failed':
         console.warn(
-          `[Bootstrap] Handshake failed for ${event.peerId}: ${event.reason}`
+          `[Bootstrap] Settlement failed for ${event.peerId}: ${event.reason}`
         );
         break;
       case 'bootstrap:announced':
@@ -1050,16 +766,55 @@ async function main(): Promise<void> {
     }
   });
 
-  // Wait for agent-runtime to be healthy before bootstrapping
+  // Wait for connector to be healthy before bootstrapping
   if (config.connectorUrl) {
     console.log(
-      `[Bootstrap] Waiting for agent-runtime at ${config.connectorUrl}...`
+      `[Bootstrap] Waiting for connector at ${config.connectorUrl}...`
     );
-    await waitForAgentRuntime(config.connectorUrl);
-    console.log('[Bootstrap] Agent-runtime is healthy');
+    await waitForConnector(config.connectorUrl);
+    console.log('[Bootstrap] Connector is healthy');
   }
 
-  let relayMonitorSubscription: { unsubscribe(): void } | undefined;
+  // Create discovery tracker for post-bootstrap peer discovery
+  const discoveryTracker = createDiscoveryTracker({
+    secretKey: config.secretKey,
+    settlementInfo: config.settlementInfo,
+  });
+  if (config.connectorUrl) {
+    discoveryTracker.setConnectorAdmin(adminClient);
+    if (channelClient) {
+      discoveryTracker.setChannelClient(channelClient);
+    }
+    discoveryTracker.on((event: BootstrapEvent) => {
+      switch (event.type) {
+        case 'bootstrap:peer-discovered':
+          console.log(
+            `[DiscoveryTracker] Peer discovered: ${event.peerPubkey.slice(0, 16)}... (${event.ilpAddress})`
+          );
+          break;
+        case 'bootstrap:peer-registered':
+          console.log(
+            `[DiscoveryTracker] Peer registered: ${event.peerId} (${event.ilpAddress})`
+          );
+          break;
+        case 'bootstrap:channel-opened':
+          console.log(
+            `[DiscoveryTracker] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`
+          );
+          break;
+        case 'bootstrap:settlement-failed':
+          console.warn(
+            `[DiscoveryTracker] Settlement failed for ${event.peerId}: ${event.reason}`
+          );
+          break;
+        case 'bootstrap:peer-deregistered':
+          console.log(
+            `[DiscoveryTracker] Peer deregistered: ${event.peerId} (${event.reason})`
+          );
+          break;
+      }
+    });
+  }
 
   try {
     const results = await bootstrapService.bootstrap(
@@ -1081,9 +836,9 @@ async function main(): Promise<void> {
       eventStore.store(ilpInfoEvent);
       console.log('[Bootstrap] Published to local relay');
 
-      // If we have bootstrap peers and agent-runtime, publish to genesis relay via ILP (paid)
+      // If we have bootstrap peers and connector, publish to genesis relay via ILP (paid)
       const genesisResult = results[0];
-      if (firstPeer && genesisResult && agentRuntimeClient) {
+      if (firstPeer && genesisResult && ilpClient) {
         const genesisIlpAddress = genesisResult.peerInfo.ilpAddress;
         console.log(
           `[Bootstrap] Publishing to genesis relay via ILP: ${genesisIlpAddress}`
@@ -1099,7 +854,7 @@ async function main(): Promise<void> {
         );
 
         // Send as paid ILP packet
-        agentRuntimeClient
+        ilpClient
           .sendIlpPacket({
             destination: genesisIlpAddress,
             amount,
@@ -1136,63 +891,10 @@ async function main(): Promise<void> {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
     }
 
-    // Determine which relay to monitor for peer discovery
-    // If we bootstrapped from other peers, monitor the genesis relay
-    // Otherwise monitor our own relay
-    const monitorRelayUrl = firstPeer?.relayUrl
-      ? firstPeer.relayUrl
-      : `ws://localhost:${config.wsPort}`;
-
-    // Start RelayMonitor to discover new peers
-    if (config.connectorUrl) {
-      const relayMonitor = new RelayMonitor({
-        relayUrl: monitorRelayUrl,
-        secretKey: config.secretKey,
-        toonEncoder: encodeEventToToon,
-        toonDecoder: decodeEventFromToon,
-        basePricePerByte: config.basePricePerByte,
-        settlementInfo: config.settlementInfo,
-      });
-      relayMonitor.setConnectorAdmin(adminClient);
-      relayMonitor.setAgentRuntimeClient(
-        createAgentRuntimeClient(config.connectorUrl)
-      );
-
-      // Register same event listener for relay monitor events
-      relayMonitor.on((event: BootstrapEvent) => {
-        switch (event.type) {
-          case 'bootstrap:peer-discovered':
-            console.log(
-              `[RelayMonitor] Peer discovered: ${event.peerPubkey.slice(0, 16)}... (${event.ilpAddress})`
-            );
-            break;
-          case 'bootstrap:peer-registered':
-            console.log(
-              `[RelayMonitor] Peer registered: ${event.peerId} (${event.ilpAddress})`
-            );
-            break;
-          case 'bootstrap:channel-opened':
-            console.log(
-              `[RelayMonitor] Channel opened: ${event.channelId} with ${event.peerId} on ${event.negotiatedChain}`
-            );
-            break;
-          case 'bootstrap:handshake-failed':
-            console.warn(
-              `[RelayMonitor] Handshake failed for ${event.peerId}: ${event.reason}`
-            );
-            break;
-          case 'bootstrap:peer-deregistered':
-            console.log(
-              `[RelayMonitor] Peer deregistered: ${event.peerId} (${event.reason})`
-            );
-            break;
-        }
-      });
-
-      const bootstrapPeerPubkeys = results.map((r) => r.knownPeer.pubkey);
-      relayMonitorSubscription = relayMonitor.start(bootstrapPeerPubkeys);
-      console.log('[RelayMonitor] Started monitoring relay for new peers');
-    }
+    // Mark bootstrap peers as excluded from discovery (already peered)
+    const bootstrapPeerPubkeys = results.map((r) => r.knownPeer.pubkey);
+    discoveryTracker.addExcludedPubkeys(bootstrapPeerPubkeys);
+    console.log('[DiscoveryTracker] Excluded bootstrap peers from discovery');
   } catch (error) {
     console.error('[Bootstrap] Bootstrap failed:', error);
   }
@@ -1218,15 +920,9 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[Shutdown] Received ${signal}`);
 
-    if (relayMonitorSubscription) {
-      relayMonitorSubscription.unsubscribe();
-      console.log('[Shutdown] Relay monitor stopped');
-    }
-
     socialSubscription.unsubscribe();
     console.log('[Shutdown] Social discovery stopped');
 
-    spspSubscription.unsubscribe();
     await wsRelay.stop();
     blsServer.close();
 

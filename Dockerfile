@@ -27,6 +27,8 @@ COPY packages/bls/package.json ./packages/bls/
 COPY packages/client/package.json ./packages/client/
 COPY packages/core/package.json ./packages/core/
 COPY packages/relay/package.json ./packages/relay/
+COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/town/package.json ./packages/town/
 COPY docker/package.json ./docker/
 
 # Install all dependencies (including devDependencies needed for build)
@@ -38,6 +40,8 @@ COPY packages/bls/ ./packages/bls/
 COPY packages/client/ ./packages/client/
 COPY packages/core/ ./packages/core/
 COPY packages/relay/ ./packages/relay/
+COPY packages/sdk/ ./packages/sdk/
+COPY packages/town/ ./packages/town/
 COPY docker/ ./docker/
 
 # Build all packages
@@ -48,15 +52,19 @@ RUN pnpm -r build && cd docker && pnpm run build
 RUN pnpm --filter @crosstown/docker deploy --prod /prod
 
 # Copy package.json files and built artifacts to production deployment
-RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay && \
+RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay /prod/packages/sdk /prod/packages/town && \
     cp packages/bls/package.json /prod/packages/bls/ && \
     cp packages/client/package.json /prod/packages/client/ && \
     cp packages/core/package.json /prod/packages/core/ && \
     cp packages/relay/package.json /prod/packages/relay/ && \
+    cp packages/sdk/package.json /prod/packages/sdk/ && \
+    cp packages/town/package.json /prod/packages/town/ && \
     cp -r packages/bls/dist /prod/packages/bls/ && \
     cp -r packages/client/dist /prod/packages/client/ && \
     cp -r packages/core/dist /prod/packages/core/ && \
     cp -r packages/relay/dist /prod/packages/relay/ && \
+    cp -r packages/sdk/dist /prod/packages/sdk/ && \
+    cp -r packages/town/dist /prod/packages/town/ && \
     cp -r docker/dist /prod/docker/ && \
     cp tsconfig.json /prod/
 
@@ -104,5 +112,5 @@ USER crosstown
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 
-# Run the docker entrypoint
-CMD ["node", "/app/dist/entrypoint.js"]
+# Run the SDK-based docker entrypoint (Town)
+CMD ["node", "/app/dist/entrypoint-town.js"]
