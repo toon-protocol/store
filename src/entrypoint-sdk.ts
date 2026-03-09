@@ -150,6 +150,7 @@ async function main(): Promise<void> {
     secretKey: config.secretKey,
     connector: connector as unknown as EmbeddableConnectorLike,
     ilpAddress: config.ilpAddress,
+    btpEndpoint: config.btpEndpoint,
     assetCode: config.assetCode,
     assetScale: config.assetScale,
     basePricePerByte: config.basePricePerByte,
