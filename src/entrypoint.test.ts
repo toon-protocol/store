@@ -28,7 +28,7 @@ import {
   parseConfig,
   createConnectorAdminClient,
   createChannelClient,
-  waitForAgentRuntime,
+  waitForConnector,
   createBlsServer,
   type Config,
 } from './entrypoint.js';
@@ -569,7 +569,7 @@ describe('createChannelClient', () => {
   });
 });
 
-describe('waitForAgentRuntime', () => {
+describe('waitForConnector', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn());
 
@@ -585,7 +585,7 @@ describe('waitForAgentRuntime', () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
-    await waitForAgentRuntime('http://localhost:3000', {
+    await waitForConnector('http://localhost:3000', {
       timeout: 5000,
       interval: 100,
     });
@@ -601,7 +601,7 @@ describe('waitForAgentRuntime', () => {
       .mockResolvedValueOnce({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
-    await waitForAgentRuntime('http://localhost:3000', {
+    await waitForConnector('http://localhost:3000', {
       timeout: 10000,
       interval: 10,
     });
@@ -614,12 +614,12 @@ describe('waitForAgentRuntime', () => {
     vi.stubGlobal('fetch', mockFetch);
 
     await expect(
-      waitForAgentRuntime('http://localhost:3000', {
+      waitForConnector('http://localhost:3000', {
         timeout: 50,
         interval: 10,
       })
     ).rejects.toThrow(
-      'Agent-runtime health check timed out after 50ms: http://localhost:3000'
+      'Connector health check timed out after 50ms: http://localhost:3000'
     );
   });
 });

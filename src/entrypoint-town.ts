@@ -59,7 +59,7 @@ import {
 import {
   BootstrapService,
   createDiscoveryTracker,
-  createAgentRuntimeClient,
+  createHttpIlpClient,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   ILP_PEER_INFO_KIND,
@@ -80,7 +80,7 @@ import type { EventStore } from '@crosstown/relay';
 import {
   parseConfig,
   createConnectorAdminClient,
-  waitForAgentRuntime,
+  waitForConnector,
 } from './shared.js';
 
 // ---------- SDK Pipeline Constants ----------
@@ -335,12 +335,12 @@ async function main(): Promise<void> {
   // Bootstrap
   bootstrapService.setConnectorAdmin(adminClient);
 
-  let agentRuntimeClient:
-    | ReturnType<typeof createAgentRuntimeClient>
+  let ilpClient:
+    | ReturnType<typeof createHttpIlpClient>
     | undefined;
   if (config.connectorUrl) {
-    agentRuntimeClient = createAgentRuntimeClient(config.connectorAdminUrl);
-    bootstrapService.setAgentRuntimeClient(agentRuntimeClient);
+    ilpClient = createHttpIlpClient(config.connectorAdminUrl);
+    bootstrapService.setIlpClient(ilpClient);
     console.log(
       `[Bootstrap] ILP-first flow enabled via ${config.connectorAdminUrl}`
     );
@@ -380,10 +380,10 @@ async function main(): Promise<void> {
 
   if (config.connectorUrl) {
     console.log(
-      `[Bootstrap] Waiting for agent-runtime at ${config.connectorUrl}...`
+      `[Bootstrap] Waiting for connector at ${config.connectorUrl}...`
     );
-    await waitForAgentRuntime(config.connectorUrl);
-    console.log('[Bootstrap] Agent-runtime is healthy');
+    await waitForConnector(config.connectorUrl);
+    console.log('[Bootstrap] Connector is healthy');
   }
 
   // Create discovery tracker for post-bootstrap peer discovery (only when connector is available)
@@ -417,7 +417,7 @@ async function main(): Promise<void> {
       eventStore,
       knownPeers,
       results,
-      agentRuntimeClient
+      ilpClient
     );
 
     // Mark bootstrap peers as excluded from discovery (already peered)
@@ -499,7 +499,7 @@ function publishOwnIlpInfo(
   eventStore: EventStore,
   knownPeers: { pubkey: string; relayUrl: string; btpEndpoint: string }[],
   results: BootstrapResult[],
-  agentRuntimeClient: ReturnType<typeof createAgentRuntimeClient> | undefined
+  ilpClient: ReturnType<typeof createHttpIlpClient> | undefined
 ) {
   const ownIlpInfo: IlpPeerInfo = {
     ilpAddress: config.ilpAddress,
@@ -527,13 +527,13 @@ function publishOwnIlpInfo(
 
     const firstPeer = knownPeers[0];
     const genesisResult = results[0];
-    if (firstPeer && genesisResult && agentRuntimeClient) {
+    if (firstPeer && genesisResult && ilpClient) {
       const genesisIlpAddress = genesisResult.peerInfo.ilpAddress;
       const toonBytes = encodeEventToToon(ilpInfoEvent);
       const base64Toon = Buffer.from(toonBytes).toString('base64');
       const amount = String(BigInt(toonBytes.length) * config.basePricePerByte);
 
-      agentRuntimeClient
+      ilpClient
         .sendIlpPacket({
           destination: genesisIlpAddress,
           amount,

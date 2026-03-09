@@ -285,9 +285,9 @@ export function createChannelClient(
 }
 
 /**
- * Wait for agent-runtime health endpoint to become available.
+ * Wait for connector health endpoint to become available.
  */
-export async function waitForAgentRuntime(
+export async function waitForConnector(
   url: string,
   options?: { timeout?: number; interval?: number }
 ): Promise<void> {
@@ -303,17 +303,22 @@ export async function waitForAgentRuntime(
         return;
       }
       console.log(
-        `[Bootstrap] Agent-runtime not ready (HTTP ${response.status}), retrying...`
+        `[Bootstrap] Connector not ready (HTTP ${response.status}), retrying...`
       );
     } catch {
       console.log(
-        `[Bootstrap] Agent-runtime not reachable at ${healthUrl}, retrying...`
+        `[Bootstrap] Connector not reachable at ${healthUrl}, retrying...`
       );
     }
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
 
   throw new Error(
-    `Agent-runtime health check timed out after ${timeout}ms: ${url}`
+    `Connector health check timed out after ${timeout}ms: ${url}`
   );
 }
+
+/**
+ * @deprecated Use waitForConnector instead
+ */
+export const waitForAgentRuntime = waitForConnector;

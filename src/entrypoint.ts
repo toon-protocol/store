@@ -38,7 +38,7 @@ import { getPublicKey } from 'nostr-tools/pure';
 import {
   BootstrapService,
   createDiscoveryTracker,
-  createAgentRuntimeClient,
+  createHttpIlpClient,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   type ConnectorAdminClient,
@@ -488,9 +488,9 @@ export function createBlsServer(
 }
 
 /**
- * Wait for agent-runtime to become healthy before proceeding with bootstrap.
+ * Wait for connector to become healthy before proceeding with bootstrap.
  */
-export async function waitForAgentRuntime(
+export async function waitForConnector(
   url: string,
   options?: { timeout?: number; interval?: number }
 ): Promise<void> {
@@ -506,20 +506,25 @@ export async function waitForAgentRuntime(
         return;
       }
       console.log(
-        `[Bootstrap] Agent-runtime not ready (HTTP ${response.status}), retrying...`
+        `[Bootstrap] Connector not ready (HTTP ${response.status}), retrying...`
       );
     } catch {
       console.log(
-        `[Bootstrap] Agent-runtime not reachable at ${healthUrl}, retrying...`
+        `[Bootstrap] Connector not reachable at ${healthUrl}, retrying...`
       );
     }
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
 
   throw new Error(
-    `Agent-runtime health check timed out after ${timeout}ms: ${url}`
+    `Connector health check timed out after ${timeout}ms: ${url}`
   );
 }
+
+/**
+ * @deprecated Use waitForConnector instead
+ */
+export const waitForAgentRuntime = waitForConnector;
 
 /**
  * Main entrypoint.
@@ -705,14 +710,14 @@ async function main(): Promise<void> {
     bootstrapService.setChannelClient(channelClient);
   }
 
-  // Wire up agent-runtime client for ILP-first flow
+  // Wire up ILP client for sending packets via the connector
   // Use admin URL since /admin/ilp/send endpoint is on the admin API (port 8081)
-  let agentRuntimeClient:
-    | ReturnType<typeof createAgentRuntimeClient>
+  let ilpClient:
+    | ReturnType<typeof createHttpIlpClient>
     | undefined;
   if (config.connectorUrl) {
-    agentRuntimeClient = createAgentRuntimeClient(config.connectorAdminUrl);
-    bootstrapService.setAgentRuntimeClient(agentRuntimeClient);
+    ilpClient = createHttpIlpClient(config.connectorAdminUrl);
+    bootstrapService.setIlpClient(ilpClient);
     console.log(
       `[Bootstrap] ILP-first flow enabled via ${config.connectorAdminUrl}`
     );
@@ -761,13 +766,13 @@ async function main(): Promise<void> {
     }
   });
 
-  // Wait for agent-runtime to be healthy before bootstrapping
+  // Wait for connector to be healthy before bootstrapping
   if (config.connectorUrl) {
     console.log(
-      `[Bootstrap] Waiting for agent-runtime at ${config.connectorUrl}...`
+      `[Bootstrap] Waiting for connector at ${config.connectorUrl}...`
     );
-    await waitForAgentRuntime(config.connectorUrl);
-    console.log('[Bootstrap] Agent-runtime is healthy');
+    await waitForConnector(config.connectorUrl);
+    console.log('[Bootstrap] Connector is healthy');
   }
 
   // Create discovery tracker for post-bootstrap peer discovery
@@ -831,9 +836,9 @@ async function main(): Promise<void> {
       eventStore.store(ilpInfoEvent);
       console.log('[Bootstrap] Published to local relay');
 
-      // If we have bootstrap peers and agent-runtime, publish to genesis relay via ILP (paid)
+      // If we have bootstrap peers and connector, publish to genesis relay via ILP (paid)
       const genesisResult = results[0];
-      if (firstPeer && genesisResult && agentRuntimeClient) {
+      if (firstPeer && genesisResult && ilpClient) {
         const genesisIlpAddress = genesisResult.peerInfo.ilpAddress;
         console.log(
           `[Bootstrap] Publishing to genesis relay via ILP: ${genesisIlpAddress}`
@@ -849,7 +854,7 @@ async function main(): Promise<void> {
         );
 
         // Send as paid ILP packet
-        agentRuntimeClient
+        ilpClient
           .sendIlpPacket({
             destination: genesisIlpAddress,
             amount,
