@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@crosstown/bls": "workspace:*",
-    "@crosstown/connector": "^1.7.0",
+    "@crosstown/connector": "^1.7.1",
     "@crosstown/core": "workspace:*",
     "@crosstown/relay": "workspace:*",
     "@crosstown/sdk": "workspace:*",
