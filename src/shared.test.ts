@@ -433,7 +433,7 @@ describe('createChannelClient', () => {
     const params = {
       peerId: 'nostr-aabb11cc22dd33ee',
       chain: 'evm:base:8453',
-      token: '0xAGENT_TOKEN',
+      token: '0xUSDC_TOKEN',
       tokenNetwork: '0xTOKEN_NETWORK',
       peerAddress: '0xPEER_ADDRESS',
       initialDeposit: '1000000',
