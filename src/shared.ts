@@ -40,6 +40,7 @@ export interface Config {
   forgejoUrl: string | undefined;
   forgejoToken: string | undefined;
   forgejoOwner: string | undefined;
+  x402Enabled: boolean;
 }
 
 /**
@@ -186,6 +187,9 @@ export function parseConfig(): Config {
   const forgejoToken = env['FORGEJO_TOKEN'];
   const forgejoOwner = env['FORGEJO_OWNER'];
 
+  // x402 publish endpoint (default: disabled)
+  const x402Enabled = env['CROSSTOWN_X402_ENABLED'] === 'true';
+
   return {
     nodeId,
     secretKey,
@@ -209,6 +213,7 @@ export function parseConfig(): Config {
     forgejoUrl,
     forgejoToken,
     forgejoOwner,
+    x402Enabled,
   };
 }
 
