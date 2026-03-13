@@ -6,6 +6,7 @@
  */
 
 import { getPublicKey } from 'nostr-tools/pure';
+import { resolveChainConfig } from '@crosstown/core';
 import type {
   ConnectorAdminClient,
   ConnectorChannelClient,
@@ -91,10 +92,12 @@ export function parseConfig(): Config {
     }
   }
 
-  // Settlement info (optional, only when SUPPORTED_CHAINS is set)
+  // Settlement info (optional)
+  // Priority: SUPPORTED_CHAINS (explicit) > CROSSTOWN_CHAIN (convenience preset)
   let settlementInfo: SettlementConfig | undefined;
   const supportedChainsStr = env['SUPPORTED_CHAINS'];
   if (supportedChainsStr) {
+    // Explicit env var pattern: SUPPORTED_CHAINS + per-chain env vars
     const supportedChains = supportedChainsStr
       .split(',')
       .map((s) => s.trim())
@@ -128,6 +131,26 @@ export function parseConfig(): Config {
       ...(Object.keys(settlementAddresses).length > 0 && {
         settlementAddresses,
       }),
+      ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
+      ...(Object.keys(tokenNetworks).length > 0 && { tokenNetworks }),
+    };
+  } else if (env['CROSSTOWN_CHAIN']) {
+    // Convenience shorthand: derive settlement config from a chain preset.
+    // CROSSTOWN_RPC_URL and CROSSTOWN_TOKEN_NETWORK overrides are handled
+    // internally by resolveChainConfig().
+    const chainConfig = resolveChainConfig(env['CROSSTOWN_CHAIN']);
+    const chainKey = `evm:base:${chainConfig.chainId}`;
+
+    const preferredTokens: Record<string, string> = {
+      [chainKey]: chainConfig.usdcAddress,
+    };
+    const tokenNetworks: Record<string, string> = {};
+    if (chainConfig.tokenNetworkAddress) {
+      tokenNetworks[chainKey] = chainConfig.tokenNetworkAddress;
+    }
+
+    settlementInfo = {
+      supportedChains: [chainKey],
       ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
       ...(Object.keys(tokenNetworks).length > 0 && { tokenNetworks }),
     };
