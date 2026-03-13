@@ -18,7 +18,7 @@
     "@crosstown/sdk": "workspace:*",
     "@crosstown/town": "workspace:*",
     "@hono/node-server": "^1.13.7",
-    "hono": "^4.0.0",
+    "hono": "^4.11.10",
     "nostr-tools": "^2.10.4",
     "ws": "^8.18.0"
   },

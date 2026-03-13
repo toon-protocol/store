@@ -5,34 +5,12 @@ vi.mock('nostr-tools/pure', () => ({
   getPublicKey: vi.fn(() => 'a'.repeat(64)),
 }));
 
-// Hoisted mock functions (must be hoisted for vi.mock factory)
-const {
-  mockDecodeEventFromToon,
-  mockEncodeEventToToon,
-} = vi.hoisted(() => ({
-  mockDecodeEventFromToon: vi.fn(),
-  mockEncodeEventToToon: vi.fn(),
-}));
-
-// Mock @crosstown/relay — keep real ILP_ERROR_CODES/PricingService, mock encode/decode
-vi.mock('@crosstown/relay', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    decodeEventFromToon: mockDecodeEventFromToon,
-    encodeEventToToon: mockEncodeEventToToon,
-  };
-});
-
 import {
   parseConfig,
   createConnectorAdminClient,
   createChannelClient,
   waitForConnector,
-  createBlsServer,
-  type Config,
-} from './entrypoint.js';
-import { PricingService } from '@crosstown/relay';
+} from './shared.js';
 
 describe('parseConfig', () => {
   const requiredEnv = {
@@ -624,77 +602,3 @@ describe('waitForConnector', () => {
   });
 });
 
-describe('createBlsServer /health peer/channel counts', () => {
-  const testConfig: Config = {
-    nodeId: 'test-node',
-    secretKey: Uint8Array.from(Buffer.from('a'.repeat(64), 'hex')),
-    pubkey: 'a'.repeat(64),
-    ilpAddress: 'g.test',
-    btpEndpoint: 'ws://test-node:3000',
-    blsPort: 3100,
-    wsPort: 7100,
-    connectorAdminUrl: 'http://test-node:8081',
-    ardriveEnabled: true,
-    additionalPeersJson: undefined,
-    relayUrls: ['ws://localhost:7100'],
-    assetCode: 'USD',
-    assetScale: 6,
-    basePricePerByte: 10n,
-    connectorUrl: undefined,
-    settlementInfo: undefined,
-    initialDeposit: undefined,
-    settlementTimeout: undefined,
-    bootstrapPeersJson: undefined,
-    forgejoUrl: undefined,
-    forgejoToken: undefined,
-    forgejoOwner: undefined,
-  };
-
-  it('returns peerCount and channelCount when bootstrap phase is ready', async () => {
-    const mockEventStore = { store: vi.fn() };
-    const pricingService = new PricingService({ basePricePerByte: 10n });
-
-    const app = createBlsServer(
-      testConfig,
-      mockEventStore as never,
-      pricingService,
-      () => 'ready',
-      undefined,
-      undefined,
-      undefined,
-      () => ({ peerCount: 3, channelCount: 2 })
-    );
-
-    const res = await app.request('/health');
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    expect(body.status).toBe('healthy');
-    expect(body.bootstrapPhase).toBe('ready');
-    expect(body.peerCount).toBe(3);
-    expect(body.channelCount).toBe(2);
-  });
-
-  it('omits peerCount and channelCount when bootstrap phase is not ready', async () => {
-    const mockEventStore = { store: vi.fn() };
-    const pricingService = new PricingService({ basePricePerByte: 10n });
-
-    const app = createBlsServer(
-      testConfig,
-      mockEventStore as never,
-      pricingService,
-      () => 'discovering',
-      undefined,
-      undefined,
-      undefined,
-      () => ({ peerCount: 1, channelCount: 0 })
-    );
-
-    const res = await app.request('/health');
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    expect(body.status).toBe('healthy');
-    expect(body.bootstrapPhase).toBe('discovering');
-    expect(body).not.toHaveProperty('peerCount');
-    expect(body).not.toHaveProperty('channelCount');
-  });
-});
