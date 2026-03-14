@@ -41,6 +41,10 @@ export interface Config {
   forgejoToken: string | undefined;
   forgejoOwner: string | undefined;
   x402Enabled: boolean;
+  discoveryMode: 'seed-list' | 'genesis';
+  seedRelays: string[];
+  publishSeedEntry: boolean;
+  externalRelayUrl: string | undefined;
 }
 
 /**
@@ -66,6 +70,7 @@ export function parseConfig(): Config {
     throw new Error('ILP_ADDRESS environment variable is required');
   }
 
+  // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- BTP default for internal Docker network (container-to-container)
   const btpEndpoint = env['BTP_ENDPOINT'] || `ws://${nodeId}:3000`;
 
   const blsPort = parseInt(env['BLS_PORT'] || '3100', 10);
@@ -190,6 +195,36 @@ export function parseConfig(): Config {
   // x402 publish endpoint (default: disabled)
   const x402Enabled = env['CROSSTOWN_X402_ENABLED'] === 'true';
 
+  // Seed relay discovery (default: genesis mode)
+  const discoveryRaw = env['CROSSTOWN_DISCOVERY'] ?? 'genesis';
+  if (discoveryRaw !== 'seed-list' && discoveryRaw !== 'genesis') {
+    throw new Error(
+      `CROSSTOWN_DISCOVERY must be "seed-list" or "genesis", got: "${discoveryRaw}"`
+    );
+  }
+  const discoveryMode: 'seed-list' | 'genesis' = discoveryRaw;
+  const seedRelaysStr = env['CROSSTOWN_SEED_RELAYS'];
+  const seedRelays = seedRelaysStr
+    ? seedRelaysStr
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
+  // Validate seed relay URLs have WebSocket scheme
+  for (const url of seedRelays) {
+    // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- validation check, not a connection
+    if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- error message text, not a connection
+      throw new Error(
+        'CROSSTOWN_SEED_RELAYS contains invalid URL -- must use WebSocket scheme (ws or wss)'
+      );
+    }
+  }
+  const publishSeedEntry =
+    env['CROSSTOWN_PUBLISH_SEED_ENTRY'] === 'true';
+  const externalRelayUrl = env['CROSSTOWN_EXTERNAL_RELAY_URL'] || undefined;
+
   return {
     nodeId,
     secretKey,
@@ -214,6 +249,10 @@ export function parseConfig(): Config {
     forgejoToken,
     forgejoOwner,
     x402Enabled,
+    discoveryMode,
+    seedRelays,
+    publishSeedEntry,
+    externalRelayUrl,
   };
 }
 
