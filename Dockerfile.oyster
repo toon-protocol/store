@@ -1,0 +1,133 @@
+# Crosstown Oyster CVM Container (Extended Multi-Stage Build)
+#
+# Extends the standard Crosstown Docker image with:
+#   - supervisord for multi-process orchestration
+#   - Attestation server sidecar process
+#   - Attestation port (1300) exposed
+#
+# Build from repo root:
+#   docker build -f docker/Dockerfile.oyster -t crosstown:oyster .
+#
+# This image is consumed by the Oyster CVM tooling:
+#   oyster-cvm build --docker-compose docker/docker-compose-oyster.yml
+#
+# Inside the Oyster CVM, supervisord manages two processes:
+#   1. crosstown (priority=10): BLS HTTP + Nostr Relay WS + Bootstrap
+#   2. attestation (priority=20): TEE attestation HTTP server
+#
+# The connector is external -- accessed via CONNECTOR_URL env var.
+# Marlin's vsock proxy handles all inbound/outbound networking transparently.
+
+# -- Stage 1: Builder (duplicated from docker/Dockerfile) ---------------
+# NOTE: This builder stage must be kept in sync with docker/Dockerfile.
+# Changes to the base Dockerfile builder stage must be replicated here.
+# Duplication is intentional for self-contained Oyster CVM enclave builds.
+FROM node:20-alpine AS builder
+
+# Install build dependencies for native modules
+RUN apk add --no-cache python3 py3-setuptools make g++
+
+# Install pnpm
+# Pin pnpm version for deterministic builds (required for Oyster CVM / Nix reproducibility).
+# Must match the version in CLAUDE.md and docker/Dockerfile.
+RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+
+WORKDIR /app
+
+# Copy dependency manifests for installation
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY packages/bls/package.json ./packages/bls/
+COPY packages/client/package.json ./packages/client/
+COPY packages/core/package.json ./packages/core/
+COPY packages/relay/package.json ./packages/relay/
+COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/town/package.json ./packages/town/
+COPY docker/package.json ./docker/
+
+# Install all dependencies (including devDependencies needed for build)
+RUN pnpm install --frozen-lockfile
+
+# Copy source code
+COPY tsconfig.json ./
+COPY packages/bls/ ./packages/bls/
+COPY packages/client/ ./packages/client/
+COPY packages/core/ ./packages/core/
+COPY packages/relay/ ./packages/relay/
+COPY packages/sdk/ ./packages/sdk/
+COPY packages/town/ ./packages/town/
+COPY docker/ ./docker/
+
+# Build all packages
+RUN pnpm -r build && cd docker && pnpm run build
+
+# Deploy production dependencies only (no devDeps, no symlinks)
+RUN pnpm --filter @crosstown/docker deploy --prod /prod
+
+# Copy package.json files and built artifacts to production deployment
+RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay /prod/packages/sdk /prod/packages/town && \
+    cp packages/bls/package.json /prod/packages/bls/ && \
+    cp packages/client/package.json /prod/packages/client/ && \
+    cp packages/core/package.json /prod/packages/core/ && \
+    cp packages/relay/package.json /prod/packages/relay/ && \
+    cp packages/sdk/package.json /prod/packages/sdk/ && \
+    cp packages/town/package.json /prod/packages/town/ && \
+    cp -r packages/bls/dist /prod/packages/bls/ && \
+    cp -r packages/client/dist /prod/packages/client/ && \
+    cp -r packages/core/dist /prod/packages/core/ && \
+    cp -r packages/relay/dist /prod/packages/relay/ && \
+    cp -r packages/sdk/dist /prod/packages/sdk/ && \
+    cp -r packages/town/dist /prod/packages/town/ && \
+    cp -r docker/dist /prod/docker/ && \
+    cp tsconfig.json /prod/
+
+# Clean up native module build artifacts to save space
+RUN find /prod/node_modules -type d -name 'deps' -prune -exec rm -rf {} + && \
+    find /prod/node_modules -type d -name 'src' -prune ! -path '*/simple-git/*' ! -path '*/debug/*' -exec rm -rf {} + && \
+    find /prod/node_modules -type f -name 'binding.gyp' -delete
+
+# -- Stage 2: Runtime (Oyster CVM variant) ------------------------------
+FROM node:20-alpine
+
+# Install runtime dependencies for native modules + supervisord
+# supervisor: Alpine package for multi-process orchestration inside
+# the single Oyster CVM container (not pip-installed Python supervisor)
+RUN apk add --no-cache libstdc++ supervisor
+
+WORKDIR /app
+
+# Copy production build from builder stage
+COPY --from=builder /prod ./
+
+# Copy supervisord configuration for Oyster CVM multi-process management
+COPY docker/supervisord.conf /etc/supervisord.conf
+
+# Environment variables (with defaults)
+ENV NODE_ENV=production
+ENV BLS_PORT=3100
+ENV WS_PORT=7100
+
+# Expose ports:
+#   3100 - BLS HTTP API (enriched /health, /handle-packet)
+#   7100 - Nostr Relay WebSocket
+#   1300 - Attestation HTTP server (/attestation/raw, /health)
+EXPOSE 3100 7100 1300
+
+# Create non-root user for security
+# supervisord runs as root (required to switch users via user= directive)
+# but individual programs execute as the 'crosstown' user
+RUN addgroup -g 1001 crosstown && \
+    adduser -D -u 1001 -G crosstown crosstown && \
+    mkdir -p /data && \
+    chown -R crosstown:crosstown /app /data
+
+# Volume for persistent data
+VOLUME /data
+
+# Health check targets BLS port (3100) -- same as standard Dockerfile
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
+
+# Run supervisord (manages crosstown + attestation processes)
+# supervisord must run as root to switch to the crosstown user via
+# the user= directive in supervisord.conf
+CMD ["supervisord", "-c", "/etc/supervisord.conf"]
