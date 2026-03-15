@@ -53,9 +53,7 @@ import type {
   HandlePacketAcceptResponse,
   HandlePacketRejectResponse,
 } from '@crosstown/sdk';
-import {
-  createEventStorageHandler,
-} from '@crosstown/town';
+import { createEventStorageHandler } from '@crosstown/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
@@ -263,7 +261,14 @@ async function main(): Promise<void> {
   let peerCount = 0;
   let channelCount = 0;
 
+  // TEE detection for health endpoint (enforcement guideline 12: omit entirely when not in TEE)
+  const teeEnabled = process.env['TEE_ENABLED'] === 'true';
+
   const app = new Hono();
+  // TODO: Migrate to createHealthResponse() from @crosstown/town (health.ts)
+  // to align response shape and prevent drift. Current inline construction
+  // predates the pure function and includes fields (nodeId, bootstrapPhase)
+  // not yet in HealthResponse. See Story 3.6 / Epic 4 action item.
   app.get('/health', (c: Context) => {
     const bootstrapPhase = bootstrapService.getPhase();
     return c.json({
@@ -275,6 +280,20 @@ async function main(): Promise<void> {
       sdk: true,
       ...(bootstrapPhase && { bootstrapPhase }),
       ...(bootstrapPhase === 'ready' && { peerCount, channelCount }),
+      // TEE attestation info -- only present when running inside TEE enclave.
+      // NOTE: This is a placeholder. Real attestation state should come from
+      // querying the local relay for the latest kind:10033 event published by
+      // the attestation server process (Story 4.3 will implement relay query).
+      // Using 'unattested' state until the attestation server confirms via relay.
+      ...(teeEnabled && {
+        tee: {
+          attested: false,
+          enclaveType: 'marlin-oyster',
+          lastAttestation: 0,
+          pcr0: '',
+          state: 'unattested' as const,
+        },
+      }),
     });
   });
 
@@ -301,7 +320,9 @@ async function main(): Promise<void> {
           if (decoded && decoded.kind === ILP_PEER_INFO_KIND) {
             discoveryTracker.processEvent(decoded);
           }
-        } catch { /* decode failed, ignore */ }
+        } catch {
+          /* decode failed, ignore */
+        }
       }
       return c.json(result, result.accept ? 200 : 400);
     } catch (error) {
@@ -335,9 +356,7 @@ async function main(): Promise<void> {
   // Bootstrap
   bootstrapService.setConnectorAdmin(adminClient);
 
-  let ilpClient:
-    | ReturnType<typeof createHttpIlpClient>
-    | undefined;
+  let ilpClient: ReturnType<typeof createHttpIlpClient> | undefined;
   if (config.connectorUrl) {
     ilpClient = createHttpIlpClient(config.connectorAdminUrl);
     bootstrapService.setIlpClient(ilpClient);
@@ -412,13 +431,7 @@ async function main(): Promise<void> {
     // and to the genesis relay via ILP. The pricing validator's self-write
     // bypass ensures this node's own events are stored without payment --
     // without this, the node would need to pay itself to advertise.
-    publishOwnIlpInfo(
-      config,
-      eventStore,
-      knownPeers,
-      results,
-      ilpClient
-    );
+    publishOwnIlpInfo(config, eventStore, knownPeers, results, ilpClient);
 
     // Mark bootstrap peers as excluded from discovery (already peered)
     if (discoveryTracker) {
