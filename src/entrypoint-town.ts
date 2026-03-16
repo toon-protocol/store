@@ -53,7 +53,8 @@ import type {
   HandlePacketAcceptResponse,
   HandlePacketRejectResponse,
 } from '@crosstown/sdk';
-import { createEventStorageHandler } from '@crosstown/town';
+import { createEventStorageHandler, createHealthResponse } from '@crosstown/town';
+import type { TeeHealthInfo } from '@crosstown/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
@@ -264,37 +265,40 @@ async function main(): Promise<void> {
   // TEE detection for health endpoint (enforcement guideline 12: omit entirely when not in TEE)
   const teeEnabled = process.env['TEE_ENABLED'] === 'true';
 
+  // Build TEE health info when running inside Oyster CVM enclave.
+  // NOTE: This is a placeholder. Real attestation state should come from
+  // querying the local relay for the latest kind:10033 event published by
+  // the attestation server process. Using 'unattested' state until the
+  // attestation server confirms via relay.
+  const teeHealthInfo: TeeHealthInfo | undefined = teeEnabled
+    ? {
+        attested: false,
+        enclaveType: 'marlin-oyster',
+        lastAttestation: 0,
+        pcr0: '',
+        state: 'unattested' as const,
+      }
+    : undefined;
+
   const app = new Hono();
-  // TODO: Migrate to createHealthResponse() from @crosstown/town (health.ts)
-  // to align response shape and prevent drift. Current inline construction
-  // predates the pure function and includes fields (nodeId, bootstrapPhase)
-  // not yet in HealthResponse. See Story 3.6 / Epic 4 action item.
+  // Uses createHealthResponse() from @crosstown/town for consistent response shape
+  // across all entrypoints (Docker, CLI, programmatic). Includes TEE info,
+  // x402 status, chain config, and pricing per Stories 3.6 and 4.2.
   app.get('/health', (c: Context) => {
-    const bootstrapPhase = bootstrapService.getPhase();
-    return c.json({
-      status: 'healthy',
-      nodeId: config.nodeId,
-      pubkey: config.pubkey,
-      ilpAddress: config.ilpAddress,
-      timestamp: Date.now(),
-      sdk: true,
-      ...(bootstrapPhase && { bootstrapPhase }),
-      ...(bootstrapPhase === 'ready' && { peerCount, channelCount }),
-      // TEE attestation info -- only present when running inside TEE enclave.
-      // NOTE: This is a placeholder. Real attestation state should come from
-      // querying the local relay for the latest kind:10033 event published by
-      // the attestation server process (Story 4.3 will implement relay query).
-      // Using 'unattested' state until the attestation server confirms via relay.
-      ...(teeEnabled && {
-        tee: {
-          attested: false,
-          enclaveType: 'marlin-oyster',
-          lastAttestation: 0,
-          pcr0: '',
-          state: 'unattested' as const,
-        },
-      }),
-    });
+    return c.json(
+      createHealthResponse({
+        phase: bootstrapService.getPhase(),
+        pubkey: config.pubkey,
+        ilpAddress: config.ilpAddress,
+        peerCount,
+        discoveredPeerCount: 0,
+        channelCount,
+        basePricePerByte: config.basePricePerByte,
+        x402Enabled: config.x402Enabled,
+        chain: process.env['CROSSTOWN_CHAIN'] || 'anvil',
+        ...(teeHealthInfo && { tee: teeHealthInfo }),
+      })
+    );
   });
 
   app.post('/handle-packet', async (c: Context) => {
