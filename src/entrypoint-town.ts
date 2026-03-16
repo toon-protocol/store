@@ -53,9 +53,8 @@ import type {
   HandlePacketAcceptResponse,
   HandlePacketRejectResponse,
 } from '@crosstown/sdk';
-import {
-  createEventStorageHandler,
-} from '@crosstown/town';
+import { createEventStorageHandler, createHealthResponse } from '@crosstown/town';
+import type { TeeHealthInfo } from '@crosstown/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
@@ -263,19 +262,43 @@ async function main(): Promise<void> {
   let peerCount = 0;
   let channelCount = 0;
 
+  // TEE detection for health endpoint (enforcement guideline 12: omit entirely when not in TEE)
+  const teeEnabled = process.env['TEE_ENABLED'] === 'true';
+
+  // Build TEE health info when running inside Oyster CVM enclave.
+  // NOTE: This is a placeholder. Real attestation state should come from
+  // querying the local relay for the latest kind:10033 event published by
+  // the attestation server process. Using 'unattested' state until the
+  // attestation server confirms via relay.
+  const teeHealthInfo: TeeHealthInfo | undefined = teeEnabled
+    ? {
+        attested: false,
+        enclaveType: 'marlin-oyster',
+        lastAttestation: 0,
+        pcr0: '',
+        state: 'unattested' as const,
+      }
+    : undefined;
+
   const app = new Hono();
+  // Uses createHealthResponse() from @crosstown/town for consistent response shape
+  // across all entrypoints (Docker, CLI, programmatic). Includes TEE info,
+  // x402 status, chain config, and pricing per Stories 3.6 and 4.2.
   app.get('/health', (c: Context) => {
-    const bootstrapPhase = bootstrapService.getPhase();
-    return c.json({
-      status: 'healthy',
-      nodeId: config.nodeId,
-      pubkey: config.pubkey,
-      ilpAddress: config.ilpAddress,
-      timestamp: Date.now(),
-      sdk: true,
-      ...(bootstrapPhase && { bootstrapPhase }),
-      ...(bootstrapPhase === 'ready' && { peerCount, channelCount }),
-    });
+    return c.json(
+      createHealthResponse({
+        phase: bootstrapService.getPhase(),
+        pubkey: config.pubkey,
+        ilpAddress: config.ilpAddress,
+        peerCount,
+        discoveredPeerCount: 0,
+        channelCount,
+        basePricePerByte: config.basePricePerByte,
+        x402Enabled: config.x402Enabled,
+        chain: process.env['CROSSTOWN_CHAIN'] || 'anvil',
+        ...(teeHealthInfo && { tee: teeHealthInfo }),
+      })
+    );
   });
 
   app.post('/handle-packet', async (c: Context) => {
@@ -301,7 +324,9 @@ async function main(): Promise<void> {
           if (decoded && decoded.kind === ILP_PEER_INFO_KIND) {
             discoveryTracker.processEvent(decoded);
           }
-        } catch { /* decode failed, ignore */ }
+        } catch {
+          /* decode failed, ignore */
+        }
       }
       return c.json(result, result.accept ? 200 : 400);
     } catch (error) {
@@ -335,9 +360,7 @@ async function main(): Promise<void> {
   // Bootstrap
   bootstrapService.setConnectorAdmin(adminClient);
 
-  let ilpClient:
-    | ReturnType<typeof createHttpIlpClient>
-    | undefined;
+  let ilpClient: ReturnType<typeof createHttpIlpClient> | undefined;
   if (config.connectorUrl) {
     ilpClient = createHttpIlpClient(config.connectorAdminUrl);
     bootstrapService.setIlpClient(ilpClient);
@@ -412,13 +435,7 @@ async function main(): Promise<void> {
     // and to the genesis relay via ILP. The pricing validator's self-write
     // bypass ensures this node's own events are stored without payment --
     // without this, the node would need to pay itself to advertise.
-    publishOwnIlpInfo(
-      config,
-      eventStore,
-      knownPeers,
-      results,
-      ilpClient
-    );
+    publishOwnIlpInfo(config, eventStore, knownPeers, results, ilpClient);
 
     // Mark bootstrap peers as excluded from discovery (already peered)
     if (discoveryTracker) {

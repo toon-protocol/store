@@ -2,10 +2,11 @@
  * Shared utilities for Docker entrypoints.
  *
  * Contains configuration parsing, admin client creation, and health check
- * utilities used by both the legacy entrypoint and the SDK-based entrypoint-town.
+ * utilities used by entrypoint-sdk and entrypoint-town.
  */
 
 import { getPublicKey } from 'nostr-tools/pure';
+import { resolveChainConfig } from '@crosstown/core';
 import type {
   ConnectorAdminClient,
   ConnectorChannelClient,
@@ -39,6 +40,11 @@ export interface Config {
   forgejoUrl: string | undefined;
   forgejoToken: string | undefined;
   forgejoOwner: string | undefined;
+  x402Enabled: boolean;
+  discoveryMode: 'seed-list' | 'genesis';
+  seedRelays: string[];
+  publishSeedEntry: boolean;
+  externalRelayUrl: string | undefined;
 }
 
 /**
@@ -64,6 +70,7 @@ export function parseConfig(): Config {
     throw new Error('ILP_ADDRESS environment variable is required');
   }
 
+  // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- BTP default for internal Docker network (container-to-container)
   const btpEndpoint = env['BTP_ENDPOINT'] || `ws://${nodeId}:3000`;
 
   const blsPort = parseInt(env['BLS_PORT'] || '3100', 10);
@@ -91,10 +98,12 @@ export function parseConfig(): Config {
     }
   }
 
-  // Settlement info (optional, only when SUPPORTED_CHAINS is set)
+  // Settlement info (optional)
+  // Priority: SUPPORTED_CHAINS (explicit) > CROSSTOWN_CHAIN (convenience preset)
   let settlementInfo: SettlementConfig | undefined;
   const supportedChainsStr = env['SUPPORTED_CHAINS'];
   if (supportedChainsStr) {
+    // Explicit env var pattern: SUPPORTED_CHAINS + per-chain env vars
     const supportedChains = supportedChainsStr
       .split(',')
       .map((s) => s.trim())
@@ -131,6 +140,26 @@ export function parseConfig(): Config {
       ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
       ...(Object.keys(tokenNetworks).length > 0 && { tokenNetworks }),
     };
+  } else if (env['CROSSTOWN_CHAIN']) {
+    // Convenience shorthand: derive settlement config from a chain preset.
+    // CROSSTOWN_RPC_URL and CROSSTOWN_TOKEN_NETWORK overrides are handled
+    // internally by resolveChainConfig().
+    const chainConfig = resolveChainConfig(env['CROSSTOWN_CHAIN']);
+    const chainKey = `evm:base:${chainConfig.chainId}`;
+
+    const preferredTokens: Record<string, string> = {
+      [chainKey]: chainConfig.usdcAddress,
+    };
+    const tokenNetworks: Record<string, string> = {};
+    if (chainConfig.tokenNetworkAddress) {
+      tokenNetworks[chainKey] = chainConfig.tokenNetworkAddress;
+    }
+
+    settlementInfo = {
+      supportedChains: [chainKey],
+      ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
+      ...(Object.keys(tokenNetworks).length > 0 && { tokenNetworks }),
+    };
   }
 
   // Initial deposit for payment channels (optional)
@@ -163,6 +192,39 @@ export function parseConfig(): Config {
   const forgejoToken = env['FORGEJO_TOKEN'];
   const forgejoOwner = env['FORGEJO_OWNER'];
 
+  // x402 publish endpoint (default: disabled)
+  const x402Enabled = env['CROSSTOWN_X402_ENABLED'] === 'true';
+
+  // Seed relay discovery (default: genesis mode)
+  const discoveryRaw = env['CROSSTOWN_DISCOVERY'] ?? 'genesis';
+  if (discoveryRaw !== 'seed-list' && discoveryRaw !== 'genesis') {
+    throw new Error(
+      `CROSSTOWN_DISCOVERY must be "seed-list" or "genesis", got: "${discoveryRaw}"`
+    );
+  }
+  const discoveryMode: 'seed-list' | 'genesis' = discoveryRaw;
+  const seedRelaysStr = env['CROSSTOWN_SEED_RELAYS'];
+  const seedRelays = seedRelaysStr
+    ? seedRelaysStr
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
+  // Validate seed relay URLs have WebSocket scheme
+  for (const url of seedRelays) {
+    // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- validation check, not a connection
+    if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- error message text, not a connection
+      throw new Error(
+        'CROSSTOWN_SEED_RELAYS contains invalid URL -- must use WebSocket scheme (ws or wss)'
+      );
+    }
+  }
+  const publishSeedEntry =
+    env['CROSSTOWN_PUBLISH_SEED_ENTRY'] === 'true';
+  const externalRelayUrl = env['CROSSTOWN_EXTERNAL_RELAY_URL'] || undefined;
+
   return {
     nodeId,
     secretKey,
@@ -186,6 +248,11 @@ export function parseConfig(): Config {
     forgejoUrl,
     forgejoToken,
     forgejoOwner,
+    x402Enabled,
+    discoveryMode,
+    seedRelays,
+    publishSeedEntry,
+    externalRelayUrl,
   };
 }
 

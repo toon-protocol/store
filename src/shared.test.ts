@@ -5,34 +5,12 @@ vi.mock('nostr-tools/pure', () => ({
   getPublicKey: vi.fn(() => 'a'.repeat(64)),
 }));
 
-// Hoisted mock functions (must be hoisted for vi.mock factory)
-const {
-  mockDecodeEventFromToon,
-  mockEncodeEventToToon,
-} = vi.hoisted(() => ({
-  mockDecodeEventFromToon: vi.fn(),
-  mockEncodeEventToToon: vi.fn(),
-}));
-
-// Mock @crosstown/relay — keep real ILP_ERROR_CODES/PricingService, mock encode/decode
-vi.mock('@crosstown/relay', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    decodeEventFromToon: mockDecodeEventFromToon,
-    encodeEventToToon: mockEncodeEventToToon,
-  };
-});
-
 import {
   parseConfig,
   createConnectorAdminClient,
   createChannelClient,
   waitForConnector,
-  createBlsServer,
-  type Config,
-} from './entrypoint.js';
-import { PricingService } from '@crosstown/relay';
+} from './shared.js';
 
 describe('parseConfig', () => {
   const requiredEnv = {
@@ -64,6 +42,9 @@ describe('parseConfig', () => {
     'SETTLEMENT_ADDRESS_XRP_MAINNET',
     'SETTLEMENT_TIMEOUT',
     'INITIAL_DEPOSIT',
+    'CROSSTOWN_CHAIN',
+    'CROSSTOWN_RPC_URL',
+    'CROSSTOWN_TOKEN_NETWORK',
   ];
 
   beforeEach(() => {
@@ -340,6 +321,123 @@ describe('parseConfig', () => {
 
     expect(config.settlementInfo?.tokenNetworks).toBeUndefined();
   });
+
+  // --------------------------------------------------------------------------
+  // AC #4: CROSSTOWN_CHAIN env var convenience shorthand (Story 3.2)
+  // --------------------------------------------------------------------------
+  describe('CROSSTOWN_CHAIN convenience shorthand (AC #4)', () => {
+    it('derives settlementInfo from anvil chain preset when CROSSTOWN_CHAIN=anvil', () => {
+      Object.assign(process.env, requiredEnv, {
+        CROSSTOWN_CHAIN: 'anvil',
+      });
+
+      const config = parseConfig();
+
+      expect(config.settlementInfo).toBeDefined();
+      expect(config.settlementInfo?.supportedChains).toEqual([
+        'evm:base:31337',
+      ]);
+      // Anvil preset has a non-empty tokenNetworkAddress
+      expect(config.settlementInfo?.tokenNetworks).toEqual({
+        'evm:base:31337': '0xCafac3dD18aC6c6e92c921884f9E4176737C052c',
+      });
+      expect(config.settlementInfo?.preferredTokens).toEqual({
+        'evm:base:31337': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+      });
+    });
+
+    it('derives settlementInfo from arbitrum-one chain preset when CROSSTOWN_CHAIN=arbitrum-one', () => {
+      Object.assign(process.env, requiredEnv, {
+        CROSSTOWN_CHAIN: 'arbitrum-one',
+      });
+
+      const config = parseConfig();
+
+      expect(config.settlementInfo).toBeDefined();
+      expect(config.settlementInfo?.supportedChains).toEqual([
+        'evm:base:42161',
+      ]);
+      expect(config.settlementInfo?.preferredTokens).toEqual({
+        'evm:base:42161': '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+      });
+      // arbitrum-one has empty tokenNetworkAddress, so tokenNetworks should be omitted
+      expect(config.settlementInfo?.tokenNetworks).toBeUndefined();
+    });
+
+    it('derives settlementInfo from arbitrum-sepolia chain preset when CROSSTOWN_CHAIN=arbitrum-sepolia', () => {
+      Object.assign(process.env, requiredEnv, {
+        CROSSTOWN_CHAIN: 'arbitrum-sepolia',
+      });
+
+      const config = parseConfig();
+
+      expect(config.settlementInfo).toBeDefined();
+      expect(config.settlementInfo?.supportedChains).toEqual([
+        'evm:base:421614',
+      ]);
+      expect(config.settlementInfo?.preferredTokens).toEqual({
+        'evm:base:421614': '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
+      });
+      // arbitrum-sepolia has empty tokenNetworkAddress
+      expect(config.settlementInfo?.tokenNetworks).toBeUndefined();
+    });
+
+    it('SUPPORTED_CHAINS takes precedence over CROSSTOWN_CHAIN when both are set', () => {
+      Object.assign(process.env, requiredEnv, {
+        SUPPORTED_CHAINS: 'evm:base:8453',
+        SETTLEMENT_ADDRESS_EVM_BASE_8453: '0xExplicitAddr',
+        CROSSTOWN_CHAIN: 'anvil', // should be ignored
+      });
+
+      const config = parseConfig();
+
+      // SUPPORTED_CHAINS wins: chain key is evm:base:8453, not evm:base:31337
+      expect(config.settlementInfo?.supportedChains).toEqual(['evm:base:8453']);
+      expect(config.settlementInfo?.settlementAddresses).toEqual({
+        'evm:base:8453': '0xExplicitAddr',
+      });
+    });
+
+    it('settlementInfo is undefined when neither SUPPORTED_CHAINS nor CROSSTOWN_CHAIN is set', () => {
+      Object.assign(process.env, requiredEnv);
+
+      const config = parseConfig();
+
+      expect(config.settlementInfo).toBeUndefined();
+    });
+
+    it('CROSSTOWN_RPC_URL override works through CROSSTOWN_CHAIN path', () => {
+      Object.assign(process.env, requiredEnv, {
+        CROSSTOWN_CHAIN: 'anvil',
+        CROSSTOWN_RPC_URL: 'https://custom-rpc.example.com',
+      });
+
+      const config = parseConfig();
+
+      // The config is derived from the chain preset -- the RPC override
+      // is handled internally by resolveChainConfig() and doesn't surface
+      // in settlementInfo, but the chain preset is still resolved correctly.
+      expect(config.settlementInfo).toBeDefined();
+      expect(config.settlementInfo?.supportedChains).toEqual([
+        'evm:base:31337',
+      ]);
+    });
+
+    it('CROSSTOWN_TOKEN_NETWORK override injects tokenNetwork via CROSSTOWN_CHAIN path', () => {
+      const customTN = '0x' + 'ab'.repeat(20);
+      Object.assign(process.env, requiredEnv, {
+        CROSSTOWN_CHAIN: 'arbitrum-one',
+        CROSSTOWN_TOKEN_NETWORK: customTN,
+      });
+
+      const config = parseConfig();
+
+      expect(config.settlementInfo).toBeDefined();
+      expect(config.settlementInfo?.tokenNetworks).toEqual({
+        'evm:base:42161': customTN,
+      });
+    });
+  });
 });
 
 describe('createConnectorAdminClient', () => {
@@ -455,7 +553,7 @@ describe('createChannelClient', () => {
     const params = {
       peerId: 'nostr-aabb11cc22dd33ee',
       chain: 'evm:base:8453',
-      token: '0xAGENT_TOKEN',
+      token: '0xUSDC_TOKEN',
       tokenNetwork: '0xTOKEN_NETWORK',
       peerAddress: '0xPEER_ADDRESS',
       initialDeposit: '1000000',
@@ -621,80 +719,5 @@ describe('waitForConnector', () => {
     ).rejects.toThrow(
       'Connector health check timed out after 50ms: http://localhost:3000'
     );
-  });
-});
-
-describe('createBlsServer /health peer/channel counts', () => {
-  const testConfig: Config = {
-    nodeId: 'test-node',
-    secretKey: Uint8Array.from(Buffer.from('a'.repeat(64), 'hex')),
-    pubkey: 'a'.repeat(64),
-    ilpAddress: 'g.test',
-    btpEndpoint: 'ws://test-node:3000',
-    blsPort: 3100,
-    wsPort: 7100,
-    connectorAdminUrl: 'http://test-node:8081',
-    ardriveEnabled: true,
-    additionalPeersJson: undefined,
-    relayUrls: ['ws://localhost:7100'],
-    assetCode: 'USD',
-    assetScale: 6,
-    basePricePerByte: 10n,
-    connectorUrl: undefined,
-    settlementInfo: undefined,
-    initialDeposit: undefined,
-    settlementTimeout: undefined,
-    bootstrapPeersJson: undefined,
-    forgejoUrl: undefined,
-    forgejoToken: undefined,
-    forgejoOwner: undefined,
-  };
-
-  it('returns peerCount and channelCount when bootstrap phase is ready', async () => {
-    const mockEventStore = { store: vi.fn() };
-    const pricingService = new PricingService({ basePricePerByte: 10n });
-
-    const app = createBlsServer(
-      testConfig,
-      mockEventStore as never,
-      pricingService,
-      () => 'ready',
-      undefined,
-      undefined,
-      undefined,
-      () => ({ peerCount: 3, channelCount: 2 })
-    );
-
-    const res = await app.request('/health');
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    expect(body.status).toBe('healthy');
-    expect(body.bootstrapPhase).toBe('ready');
-    expect(body.peerCount).toBe(3);
-    expect(body.channelCount).toBe(2);
-  });
-
-  it('omits peerCount and channelCount when bootstrap phase is not ready', async () => {
-    const mockEventStore = { store: vi.fn() };
-    const pricingService = new PricingService({ basePricePerByte: 10n });
-
-    const app = createBlsServer(
-      testConfig,
-      mockEventStore as never,
-      pricingService,
-      () => 'discovering',
-      undefined,
-      undefined,
-      undefined,
-      () => ({ peerCount: 1, channelCount: 0 })
-    );
-
-    const res = await app.request('/health');
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as any;
-    expect(body.status).toBe('healthy');
-    expect(body.bootstrapPhase).toBe('discovering');
-    expect(body).not.toHaveProperty('peerCount');
-    expect(body).not.toHaveProperty('channelCount');
   });
 });

@@ -6,5 +6,5 @@
     "noEmit": false
   },
   "include": ["src/**/*"],
-  "exclude": ["src/**/*.test.ts", "src/entrypoint.ts"]
+  "exclude": ["src/**/*.test.ts"]
 }

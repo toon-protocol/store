@@ -1,0 +1,123 @@
+# Crosstown Oyster CVM Deployment Manifest
+#
+# Deploys a Crosstown relay node inside a Marlin Oyster CVM (Confidential
+# Virtual Machine) with TEE attestation. This compose file is consumed by
+# the `oyster-cvm build --docker-compose` CLI tool.
+#
+# Architecture (Full-Stack Enclave -- Option A):
+#
+#   +--------------- Oyster CVM ---------------+
+#   |  crosstown (priority=10):                |
+#   |    Relay (WS:7100) + BLS (HTTP:3100)     |
+#   |    + Bootstrap Service                   |
+#   |  attestation-server (priority=20):       |
+#   |    HTTP (:1300) /attestation/raw         |
+#   +-------- vsock proxy --------------------+
+#            (inbound/outbound)
+#       Public Internet
+#
+# The connector is EXTERNAL -- it runs outside the Oyster CVM enclave.
+# The Crosstown node connects to it via CONNECTOR_URL and CONNECTOR_ADMIN_URL
+# environment variables, exactly as in the genesis Docker deployment.
+#
+# Marlin's dual-proxy architecture handles networking transparently:
+#   - Inbound proxy: Accepts external WebSocket/HTTP, forwards via vsock
+#   - Outbound proxy: Tunnels enclave connections (RPC, connector) to external
+#   - No application code changes needed
+#
+# Build enclave image:
+#   oyster-cvm build --docker-compose docker/docker-compose-oyster.yml
+#
+# Deploy to marketplace:
+#   oyster-cvm deploy --wallet-key $KEY --duration 1440 \
+#     --docker-compose docker/docker-compose-oyster.yml
+
+services:
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Crosstown Full Node - BLS + Nostr Relay + Bootstrap
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Single Node.js process running both the BLS HTTP server (port 3100)
+  # and the Nostr relay WebSocket server (port 7100) via entrypoint-town.js.
+  # The vsock inbound proxy forwards external connections to these ports.
+  crosstown:
+    image: crosstown:optimized
+    environment:
+      # Required -- operator must set these at deployment time.
+      # SECURITY NOTE: NOSTR_SECRET_KEY is a sensitive value. In production Oyster CVM
+      # deployments, prefer injecting via Docker secrets or the oyster-cvm deploy
+      # --env-file mechanism rather than plain environment variables. Environment
+      # variables may be visible to the orchestration layer outside the enclave.
+      NODE_ID: ${NODE_ID}
+      NOSTR_SECRET_KEY: ${NOSTR_SECRET_KEY}
+      ILP_ADDRESS: ${ILP_ADDRESS}
+
+      # External connector (runs outside the enclave)
+      # The outbound vsock proxy tunnels these connections to the internet
+      CONNECTOR_URL: ${CONNECTOR_URL}
+      CONNECTOR_ADMIN_URL: ${CONNECTOR_ADMIN_URL}
+      BTP_ENDPOINT: ${BTP_ENDPOINT}
+
+      # Service ports (must match EXPOSE and port mappings)
+      BLS_PORT: 3100
+      WS_PORT: 7100
+
+      # Pricing
+      BASE_PRICE_PER_BYTE: ${BASE_PRICE_PER_BYTE:-10}
+
+      # Asset
+      ASSET_CODE: ${ASSET_CODE:-USD}
+      ASSET_SCALE: ${ASSET_SCALE:-6}
+
+      # Settlement (optional -- operator configures for their chain)
+      CROSSTOWN_CHAIN: ${CROSSTOWN_CHAIN:-anvil}
+
+      # Discovery
+      CROSSTOWN_DISCOVERY: ${CROSSTOWN_DISCOVERY:-genesis}
+      CROSSTOWN_SEED_RELAYS: ${CROSSTOWN_SEED_RELAYS:-}
+      CROSSTOWN_PUBLISH_SEED_ENTRY: ${CROSSTOWN_PUBLISH_SEED_ENTRY:-false}
+      CROSSTOWN_EXTERNAL_RELAY_URL: ${CROSSTOWN_EXTERNAL_RELAY_URL:-}
+
+      # x402 (optional HTTP payment on-ramp)
+      CROSSTOWN_X402_ENABLED: ${CROSSTOWN_X402_ENABLED:-false}
+
+      # Storage
+      DATA_DIR: /data
+
+    ports:
+      - '3100:3100'  # BLS HTTP API (enriched /health, /handle-packet)
+      - '7100:7100'  # Nostr Relay WebSocket
+    healthcheck:
+      # Uses BLS_PORT env var (default 3100) for consistency with Dockerfile.oyster HEALTHCHECK
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:$${BLS_PORT:-3100}/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Attestation Server - TEE Attestation Sidecar
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Publishes /attestation/raw endpoint for TEE attestation verification.
+  # In Oyster CVM, the real attestation document is provided by the Nitro
+  # hypervisor. This placeholder serves the endpoint structure that the
+  # Marlin verification tooling expects (Story 4.2 adds real attestation).
+  #
+  # depends_on with service_healthy ensures the attestation server does
+  # NOT start until the Crosstown node BLS endpoint is healthy, matching
+  # the supervisord priority model (crosstown=10, attestation=20).
+  attestation-server:
+    image: crosstown:optimized
+    command: ["node", "/app/dist/attestation-server.js"]
+    depends_on:
+      crosstown:
+        condition: service_healthy
+    environment:
+      # Attestation server configuration
+      ATTESTATION_PORT: 1300
+      ATTESTATION_REFRESH_INTERVAL: ${ATTESTATION_REFRESH_INTERVAL:-300}
+
+      # TEE detection -- set automatically by Oyster CVM runtime
+      TEE_ENABLED: ${TEE_ENABLED:-false}
+
+    ports:
+      - '1300:1300'  # Attestation HTTP (/attestation/raw, /health)
