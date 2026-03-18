@@ -1,8 +1,8 @@
 /**
- * SDK Reference Implementation -- Crosstown Container Entrypoint (Town)
+ * SDK Reference Implementation -- TOON Container Entrypoint (Town)
  *
  * This file is the canonical reference implementation for building an ILP-gated
- * Nostr relay using @crosstown/sdk and @crosstown/town. Developers should study
+ * Nostr relay using @toon-protocol/sdk and @toon-protocol/town. Developers should study
  * this file to understand how SDK components compose into a production service.
  *
  * ## SDK Pattern: Identity -> Pipeline Components -> Handler Registration -> Lifecycle
@@ -48,13 +48,13 @@ import {
   createPricingValidator,
   createHandlerContext,
   fromSecretKey,
-} from '@crosstown/sdk';
+} from '@toon-protocol/sdk';
 import type {
   HandlePacketAcceptResponse,
   HandlePacketRejectResponse,
-} from '@crosstown/sdk';
-import { createEventStorageHandler, createHealthResponse } from '@crosstown/town';
-import type { TeeHealthInfo } from '@crosstown/town';
+} from '@toon-protocol/sdk';
+import { createEventStorageHandler, createHealthResponse } from '@toon-protocol/town';
+import type { TeeHealthInfo } from '@toon-protocol/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
@@ -62,20 +62,20 @@ import {
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   ILP_PEER_INFO_KIND,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 import type {
   BootstrapEvent,
   BootstrapResult,
   IlpPeerInfo,
   HandlePacketRequest,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 import {
   shallowParseToon,
   decodeEventFromToon,
   encodeEventToToon,
-} from '@crosstown/core/toon';
-import { SqliteEventStore, NostrRelayServer } from '@crosstown/relay';
-import type { EventStore } from '@crosstown/relay';
+} from '@toon-protocol/core/toon';
+import { SqliteEventStore, NostrRelayServer } from '@toon-protocol/relay';
+import type { EventStore } from '@toon-protocol/relay';
 import {
   parseConfig,
   createConnectorAdminClient,
@@ -203,7 +203,7 @@ function createPipelineHandler(
 // ---------- Main ----------
 async function main(): Promise<void> {
   console.log('\n' + '='.repeat(50));
-  console.log('Crosstown Container Starting (SDK/Town)');
+  console.log('TOON Container Starting (SDK/Town)');
   console.log('='.repeat(50) + '\n');
 
   const config = parseConfig();
@@ -281,7 +281,7 @@ async function main(): Promise<void> {
     : undefined;
 
   const app = new Hono();
-  // Uses createHealthResponse() from @crosstown/town for consistent response shape
+  // Uses createHealthResponse() from @toon-protocol/town for consistent response shape
   // across all entrypoints (Docker, CLI, programmatic). Includes TEE info,
   // x402 status, chain config, and pricing per Stories 3.6 and 4.2.
   app.get('/health', (c: Context) => {
@@ -295,7 +295,7 @@ async function main(): Promise<void> {
         channelCount,
         basePricePerByte: config.basePricePerByte,
         x402Enabled: config.x402Enabled,
-        chain: process.env['CROSSTOWN_CHAIN'] || 'anvil',
+        chain: process.env['TOON_CHAIN'] || 'anvil',
         ...(teeHealthInfo && { tee: teeHealthInfo }),
       })
     );
@@ -460,7 +460,7 @@ async function main(): Promise<void> {
   const socialSubscription = socialDiscovery.start();
 
   console.log('\n' + '='.repeat(50));
-  console.log('Crosstown Container Ready (SDK/Town)');
+  console.log('TOON Container Ready (SDK/Town)');
   console.log('='.repeat(50) + '\n');
 
   // --- Graceful shutdown ---

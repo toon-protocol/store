@@ -17,28 +17,28 @@
 
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
-import { createNode, type ServiceNode } from '@crosstown/sdk';
+import { createNode, type ServiceNode } from '@toon-protocol/sdk';
 import {
   createEventStorageHandler,
-} from '@crosstown/town';
+} from '@toon-protocol/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   ILP_PEER_INFO_KIND,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 import type {
   BootstrapEvent,
   IlpPeerInfo,
   EmbeddableConnectorLike,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 import {
   encodeEventToToon,
   decodeEventFromToon,
-} from '@crosstown/core/toon';
-import { SqliteEventStore, NostrRelayServer } from '@crosstown/relay';
-import { ConnectorNode, createLogger } from '@crosstown/connector';
+} from '@toon-protocol/core/toon';
+import { SqliteEventStore, NostrRelayServer } from '@toon-protocol/relay';
+import { ConnectorNode, createLogger } from '@toon-protocol/connector';
 import { parseConfig } from './shared.js';
 
 // ---------- Connector Config from Env ----------
@@ -95,7 +95,7 @@ function parseBootstrapPeers(config: ReturnType<typeof parseConfig>) {
 // ---------- Main ----------
 async function main(): Promise<void> {
   console.log('\n' + '='.repeat(50));
-  console.log('Crosstown Container Starting (SDK/Embedded)');
+  console.log('TOON Container Starting (SDK/Embedded)');
   console.log('='.repeat(50) + '\n');
 
   const config = parseConfig();
@@ -394,7 +394,7 @@ async function main(): Promise<void> {
   const socialSubscription = socialDiscovery.start();
 
   console.log('\n' + '='.repeat(50));
-  console.log('Crosstown Container Ready (SDK/Embedded)');
+  console.log('TOON Container Ready (SDK/Embedded)');
   console.log('='.repeat(50) + '\n');
 
   // --- Graceful shutdown ---

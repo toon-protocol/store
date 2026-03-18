@@ -1,18 +1,18 @@
-# Crosstown Oyster CVM Container (Extended Multi-Stage Build)
+# TOON Oyster CVM Container (Extended Multi-Stage Build)
 #
-# Extends the standard Crosstown Docker image with:
+# Extends the standard TOON Docker image with:
 #   - supervisord for multi-process orchestration
 #   - Attestation server sidecar process
 #   - Attestation port (1300) exposed
 #
 # Build from repo root:
-#   docker build -f docker/Dockerfile.oyster -t crosstown:oyster .
+#   docker build -f docker/Dockerfile.oyster -t toon:oyster .
 #
 # This image is consumed by the Oyster CVM tooling:
 #   oyster-cvm build --docker-compose docker/docker-compose-oyster.yml
 #
 # Inside the Oyster CVM, supervisord manages two processes:
-#   1. crosstown (priority=10): BLS HTTP + Nostr Relay WS + Bootstrap
+#   1. toon (priority=10): BLS HTTP + Nostr Relay WS + Bootstrap
 #   2. attestation (priority=20): TEE attestation HTTP server
 #
 # The connector is external -- accessed via CONNECTOR_URL env var.
@@ -61,7 +61,7 @@ COPY docker/ ./docker/
 RUN pnpm -r build && cd docker && pnpm run build
 
 # Deploy production dependencies only (no devDeps, no symlinks)
-RUN pnpm --filter @crosstown/docker deploy --prod /prod
+RUN pnpm --filter @toon-protocol/docker deploy --prod /prod
 
 # Copy package.json files and built artifacts to production deployment
 RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay /prod/packages/sdk /prod/packages/town && \
@@ -114,11 +114,11 @@ EXPOSE 3100 7100 1300
 
 # Create non-root user for security
 # supervisord runs as root (required to switch users via user= directive)
-# but individual programs execute as the 'crosstown' user
-RUN addgroup -g 1001 crosstown && \
-    adduser -D -u 1001 -G crosstown crosstown && \
+# but individual programs execute as the 'toon' user
+RUN addgroup -g 1001 toon && \
+    adduser -D -u 1001 -G toon toon && \
     mkdir -p /data && \
-    chown -R crosstown:crosstown /app /data
+    chown -R toon:toon /app /data
 
 # Volume for persistent data
 VOLUME /data
@@ -127,7 +127,7 @@ VOLUME /data
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 
-# Run supervisord (manages crosstown + attestation processes)
-# supervisord must run as root to switch to the crosstown user via
+# Run supervisord (manages toon + attestation processes)
+# supervisord must run as root to switch to the toon user via
 # the user= directive in supervisord.conf
 CMD ["supervisord", "-c", "/etc/supervisord.conf"]

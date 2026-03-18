@@ -1,13 +1,13 @@
-# Crosstown Oyster CVM Deployment Manifest
+# TOON Oyster CVM Deployment Manifest
 #
-# Deploys a Crosstown relay node inside a Marlin Oyster CVM (Confidential
+# Deploys a TOON relay node inside a Marlin Oyster CVM (Confidential
 # Virtual Machine) with TEE attestation. This compose file is consumed by
 # the `oyster-cvm build --docker-compose` CLI tool.
 #
 # Architecture (Full-Stack Enclave -- Option A):
 #
 #   +--------------- Oyster CVM ---------------+
-#   |  crosstown (priority=10):                |
+#   |  toon (priority=10):                |
 #   |    Relay (WS:7100) + BLS (HTTP:3100)     |
 #   |    + Bootstrap Service                   |
 #   |  attestation-server (priority=20):       |
@@ -17,7 +17,7 @@
 #       Public Internet
 #
 # The connector is EXTERNAL -- it runs outside the Oyster CVM enclave.
-# The Crosstown node connects to it via CONNECTOR_URL and CONNECTOR_ADMIN_URL
+# The TOON node connects to it via CONNECTOR_URL and CONNECTOR_ADMIN_URL
 # environment variables, exactly as in the genesis Docker deployment.
 #
 # Marlin's dual-proxy architecture handles networking transparently:
@@ -34,13 +34,13 @@
 
 services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # Crosstown Full Node - BLS + Nostr Relay + Bootstrap
+  # TOON Full Node - BLS + Nostr Relay + Bootstrap
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Single Node.js process running both the BLS HTTP server (port 3100)
   # and the Nostr relay WebSocket server (port 7100) via entrypoint-town.js.
   # The vsock inbound proxy forwards external connections to these ports.
-  crosstown:
-    image: crosstown:optimized
+  toon:
+    image: toon:optimized
     environment:
       # Required -- operator must set these at deployment time.
       # SECURITY NOTE: NOSTR_SECRET_KEY is a sensitive value. In production Oyster CVM
@@ -69,16 +69,16 @@ services:
       ASSET_SCALE: ${ASSET_SCALE:-6}
 
       # Settlement (optional -- operator configures for their chain)
-      CROSSTOWN_CHAIN: ${CROSSTOWN_CHAIN:-anvil}
+      TOON_CHAIN: ${TOON_CHAIN:-anvil}
 
       # Discovery
-      CROSSTOWN_DISCOVERY: ${CROSSTOWN_DISCOVERY:-genesis}
-      CROSSTOWN_SEED_RELAYS: ${CROSSTOWN_SEED_RELAYS:-}
-      CROSSTOWN_PUBLISH_SEED_ENTRY: ${CROSSTOWN_PUBLISH_SEED_ENTRY:-false}
-      CROSSTOWN_EXTERNAL_RELAY_URL: ${CROSSTOWN_EXTERNAL_RELAY_URL:-}
+      TOON_DISCOVERY: ${TOON_DISCOVERY:-genesis}
+      TOON_SEED_RELAYS: ${TOON_SEED_RELAYS:-}
+      TOON_PUBLISH_SEED_ENTRY: ${TOON_PUBLISH_SEED_ENTRY:-false}
+      TOON_EXTERNAL_RELAY_URL: ${TOON_EXTERNAL_RELAY_URL:-}
 
       # x402 (optional HTTP payment on-ramp)
-      CROSSTOWN_X402_ENABLED: ${CROSSTOWN_X402_ENABLED:-false}
+      TOON_X402_ENABLED: ${TOON_X402_ENABLED:-false}
 
       # Storage
       DATA_DIR: /data
@@ -103,13 +103,13 @@ services:
   # Marlin verification tooling expects (Story 4.2 adds real attestation).
   #
   # depends_on with service_healthy ensures the attestation server does
-  # NOT start until the Crosstown node BLS endpoint is healthy, matching
-  # the supervisord priority model (crosstown=10, attestation=20).
+  # NOT start until the TOON node BLS endpoint is healthy, matching
+  # the supervisord priority model (toon=10, attestation=20).
   attestation-server:
-    image: crosstown:optimized
+    image: toon:optimized
     command: ["node", "/app/dist/attestation-server.js"]
     depends_on:
-      crosstown:
+      toon:
         condition: service_healthy
     environment:
       # Attestation server configuration

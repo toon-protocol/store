@@ -1,4 +1,4 @@
-# Crosstown Oyster CVM -- Nix Reproducible Docker Image Expression
+# TOON Oyster CVM -- Nix Reproducible Docker Image Expression
 #
 # This is a Nix expression (NOT a traditional Dockerfile) that produces a
 # deterministic Docker image via `dockerTools.buildLayeredImage`. Every byte
@@ -21,7 +21,7 @@
 # The resulting image contains the same runtime components as Dockerfile.oyster:
 #   - Node.js 20 runtime
 #   - supervisord for multi-process orchestration
-#   - Non-root crosstown user (uid 1001, gid 1001)
+#   - Non-root toon user (uid 1001, gid 1001)
 #   - Ports: 3100 (BLS HTTP), 7100 (Nostr Relay WS), 1300 (Attestation HTTP)
 #   - CMD: supervisord -c /etc/supervisord.conf
 #
@@ -33,14 +33,14 @@
 
 let
   # Non-root user for security (matching Dockerfile.oyster uid/gid 1001)
-  crosstown-user = pkgs.runCommand "crosstown-user" { } ''
+  toon-user = pkgs.runCommand "toon-user" { } ''
     mkdir -p $out/etc
     echo "root:x:0:0:root:/root:/bin/sh" > $out/etc/passwd
-    echo "crosstown:x:1001:1001:crosstown:/app:/bin/sh" >> $out/etc/passwd
+    echo "toon:x:1001:1001:toon:/app:/bin/sh" >> $out/etc/passwd
     echo "root:x:0:" > $out/etc/group
-    echo "crosstown:x:1001:" >> $out/etc/group
+    echo "toon:x:1001:" >> $out/etc/group
     echo "root:x:!:1::::::" > $out/etc/shadow
-    echo "crosstown:x:!:1::::::" >> $out/etc/shadow
+    echo "toon:x:!:1::::::" >> $out/etc/shadow
   '';
 
   # Supervisord configuration (copied from docker/supervisord.conf)
@@ -51,10 +51,10 @@ let
     nodaemon=true
     user=root
 
-    [program:crosstown]
+    [program:toon]
     priority=10
     command=node /app/dist/entrypoint-town.js
-    user=crosstown
+    user=toon
     autorestart=true
     stopwaitsecs=15
     stdout_logfile=/dev/stdout
@@ -65,7 +65,7 @@ let
     [program:attestation]
     priority=20
     command=node /app/dist/attestation-server.js
-    user=crosstown
+    user=toon
     autorestart=true
     startsecs=5
     stopwaitsecs=10
@@ -77,7 +77,7 @@ let
   '';
 
   # Application directory structure
-  app-dir = pkgs.runCommand "crosstown-app" { } ''
+  app-dir = pkgs.runCommand "toon-app" { } ''
     mkdir -p $out/app
     cp -r ${productionDeps}/* $out/app/
     mkdir -p $out/data
@@ -85,7 +85,7 @@ let
 
 in
 pkgs.dockerTools.buildLayeredImage {
-  name = "crosstown";
+  name = "toon";
   tag = "nix";
 
   # Fixed creation timestamp for reproducibility -- epoch 0 ensures no
@@ -104,7 +104,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.bash
 
     # User definition and supervisord config
-    crosstown-user
+    toon-user
     supervisord-conf
 
     # Application code and production dependencies
@@ -136,7 +136,7 @@ pkgs.dockerTools.buildLayeredImage {
     WorkingDir = "/app";
 
     # Non-root user for container execution
-    User = "crosstown";
+    User = "toon";
 
     # Data volume for persistent storage
     Volumes = {

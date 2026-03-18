@@ -1,8 +1,8 @@
-# Crosstown Container (Optimized Multi-Stage Build)
+# TOON Container (Optimized Multi-Stage Build)
 # Runs BLS (Business Logic Server) + Nostr Relay + Bootstrap Service
 #
 # Build from repo root:
-#   docker build -f docker/Dockerfile -t crosstown .
+#   docker build -f docker/Dockerfile -t toon .
 #
 # Optimizations:
 #   - Alpine base (vs Debian Slim) = ~400 MB savings
@@ -49,7 +49,7 @@ RUN pnpm -r build && cd docker && pnpm run build
 
 # Deploy production dependencies only (no devDeps, no symlinks)
 # This creates a clean production deployment at /prod
-RUN pnpm --filter @crosstown/docker deploy --prod /prod
+RUN pnpm --filter @toon-protocol/docker deploy --prod /prod
 
 # Copy package.json files and built artifacts to production deployment
 RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay /prod/packages/sdk /prod/packages/town && \
@@ -97,16 +97,16 @@ ENV WS_PORT=7100
 EXPOSE 3100 7100
 
 # Create non-root user for security
-RUN addgroup -g 1001 crosstown && \
-    adduser -D -u 1001 -G crosstown crosstown && \
+RUN addgroup -g 1001 toon && \
+    adduser -D -u 1001 -G toon toon && \
     mkdir -p /data && \
-    chown -R crosstown:crosstown /app /data
+    chown -R toon:toon /app /data
 
 # Volume for persistent data
 VOLUME /data
 
 # Switch to non-root user
-USER crosstown
+USER toon
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

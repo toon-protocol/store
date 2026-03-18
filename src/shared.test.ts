@@ -42,9 +42,9 @@ describe('parseConfig', () => {
     'SETTLEMENT_ADDRESS_XRP_MAINNET',
     'SETTLEMENT_TIMEOUT',
     'INITIAL_DEPOSIT',
-    'CROSSTOWN_CHAIN',
-    'CROSSTOWN_RPC_URL',
-    'CROSSTOWN_TOKEN_NETWORK',
+    'TOON_CHAIN',
+    'TOON_RPC_URL',
+    'TOON_TOKEN_NETWORK',
   ];
 
   beforeEach(() => {
@@ -323,12 +323,12 @@ describe('parseConfig', () => {
   });
 
   // --------------------------------------------------------------------------
-  // AC #4: CROSSTOWN_CHAIN env var convenience shorthand (Story 3.2)
+  // AC #4: TOON_CHAIN env var convenience shorthand (Story 3.2)
   // --------------------------------------------------------------------------
-  describe('CROSSTOWN_CHAIN convenience shorthand (AC #4)', () => {
-    it('derives settlementInfo from anvil chain preset when CROSSTOWN_CHAIN=anvil', () => {
+  describe('TOON_CHAIN convenience shorthand (AC #4)', () => {
+    it('derives settlementInfo from anvil chain preset when TOON_CHAIN=anvil', () => {
       Object.assign(process.env, requiredEnv, {
-        CROSSTOWN_CHAIN: 'anvil',
+        TOON_CHAIN: 'anvil',
       });
 
       const config = parseConfig();
@@ -346,9 +346,9 @@ describe('parseConfig', () => {
       });
     });
 
-    it('derives settlementInfo from arbitrum-one chain preset when CROSSTOWN_CHAIN=arbitrum-one', () => {
+    it('derives settlementInfo from arbitrum-one chain preset when TOON_CHAIN=arbitrum-one', () => {
       Object.assign(process.env, requiredEnv, {
-        CROSSTOWN_CHAIN: 'arbitrum-one',
+        TOON_CHAIN: 'arbitrum-one',
       });
 
       const config = parseConfig();
@@ -364,9 +364,9 @@ describe('parseConfig', () => {
       expect(config.settlementInfo?.tokenNetworks).toBeUndefined();
     });
 
-    it('derives settlementInfo from arbitrum-sepolia chain preset when CROSSTOWN_CHAIN=arbitrum-sepolia', () => {
+    it('derives settlementInfo from arbitrum-sepolia chain preset when TOON_CHAIN=arbitrum-sepolia', () => {
       Object.assign(process.env, requiredEnv, {
-        CROSSTOWN_CHAIN: 'arbitrum-sepolia',
+        TOON_CHAIN: 'arbitrum-sepolia',
       });
 
       const config = parseConfig();
@@ -382,11 +382,11 @@ describe('parseConfig', () => {
       expect(config.settlementInfo?.tokenNetworks).toBeUndefined();
     });
 
-    it('SUPPORTED_CHAINS takes precedence over CROSSTOWN_CHAIN when both are set', () => {
+    it('SUPPORTED_CHAINS takes precedence over TOON_CHAIN when both are set', () => {
       Object.assign(process.env, requiredEnv, {
         SUPPORTED_CHAINS: 'evm:base:8453',
         SETTLEMENT_ADDRESS_EVM_BASE_8453: '0xExplicitAddr',
-        CROSSTOWN_CHAIN: 'anvil', // should be ignored
+        TOON_CHAIN: 'anvil', // should be ignored
       });
 
       const config = parseConfig();
@@ -398,7 +398,7 @@ describe('parseConfig', () => {
       });
     });
 
-    it('settlementInfo is undefined when neither SUPPORTED_CHAINS nor CROSSTOWN_CHAIN is set', () => {
+    it('settlementInfo is undefined when neither SUPPORTED_CHAINS nor TOON_CHAIN is set', () => {
       Object.assign(process.env, requiredEnv);
 
       const config = parseConfig();
@@ -406,10 +406,10 @@ describe('parseConfig', () => {
       expect(config.settlementInfo).toBeUndefined();
     });
 
-    it('CROSSTOWN_RPC_URL override works through CROSSTOWN_CHAIN path', () => {
+    it('TOON_RPC_URL override works through TOON_CHAIN path', () => {
       Object.assign(process.env, requiredEnv, {
-        CROSSTOWN_CHAIN: 'anvil',
-        CROSSTOWN_RPC_URL: 'https://custom-rpc.example.com',
+        TOON_CHAIN: 'anvil',
+        TOON_RPC_URL: 'https://custom-rpc.example.com',
       });
 
       const config = parseConfig();
@@ -423,11 +423,11 @@ describe('parseConfig', () => {
       ]);
     });
 
-    it('CROSSTOWN_TOKEN_NETWORK override injects tokenNetwork via CROSSTOWN_CHAIN path', () => {
+    it('TOON_TOKEN_NETWORK override injects tokenNetwork via TOON_CHAIN path', () => {
       const customTN = '0x' + 'ab'.repeat(20);
       Object.assign(process.env, requiredEnv, {
-        CROSSTOWN_CHAIN: 'arbitrum-one',
-        CROSSTOWN_TOKEN_NETWORK: customTN,
+        TOON_CHAIN: 'arbitrum-one',
+        TOON_TOKEN_NETWORK: customTN,
       });
 
       const config = parseConfig();
