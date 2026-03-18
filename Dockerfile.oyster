@@ -1,4 +1,4 @@
-# TOON Oyster CVM Container (Extended Multi-Stage Build)
+# TOON Oyster CVM Container (esbuild-bundled Multi-Stage Build)
 #
 # Extends the standard TOON Docker image with:
 #   - supervisord for multi-process orchestration
@@ -12,16 +12,18 @@
 #   oyster-cvm build --docker-compose docker/docker-compose-oyster.yml
 #
 # Inside the Oyster CVM, supervisord manages two processes:
-#   1. toon (priority=10): BLS HTTP + Nostr Relay WS + Bootstrap
+#   1. toon (priority=10): Embedded ConnectorNode + BLS HTTP + Nostr Relay WS + Bootstrap
 #   2. attestation (priority=20): TEE attestation HTTP server
 #
-# The connector is external -- accessed via CONNECTOR_URL env var.
+# The connector is EMBEDDED — ConnectorNode runs in-process via entrypoint-sdk.js.
+# The enclave is fully self-contained; no external connector container is needed.
 # Marlin's vsock proxy handles all inbound/outbound networking transparently.
+#
+# esbuild bundles all JS into self-contained files. Only native modules
+# (better-sqlite3) and dynamically-required packages (ethers, express) are
+# copied as separate node_modules. Target image: ~75-85MB (down from 740MB).
 
-# -- Stage 1: Builder (duplicated from docker/Dockerfile) ---------------
-# NOTE: This builder stage must be kept in sync with docker/Dockerfile.
-# Changes to the base Dockerfile builder stage must be replicated here.
-# Duplication is intentional for self-contained Oyster CVM enclave builds.
+# -- Stage 1: Builder --------------------------------------------------------
 FROM node:20-alpine AS builder
 
 # Install build dependencies for native modules
@@ -57,35 +59,45 @@ COPY packages/sdk/ ./packages/sdk/
 COPY packages/town/ ./packages/town/
 COPY docker/ ./docker/
 
-# Build all packages
+# Build all workspace packages (esbuild needs their dist/ exports)
+# Then run esbuild to produce self-contained bundles
 RUN pnpm -r build && cd docker && pnpm run build
 
-# Deploy production dependencies only (no devDeps, no symlinks)
-RUN pnpm --filter @toon-protocol/docker deploy --prod /prod
+# -- Assemble minimal runtime directory --------------------------------------
+# Only bundles + native modules + dynamically-required packages
+RUN mkdir -p /runtime/node_modules
 
-# Copy package.json files and built artifacts to production deployment
-RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay /prod/packages/sdk /prod/packages/town && \
-    cp packages/bls/package.json /prod/packages/bls/ && \
-    cp packages/client/package.json /prod/packages/client/ && \
-    cp packages/core/package.json /prod/packages/core/ && \
-    cp packages/relay/package.json /prod/packages/relay/ && \
-    cp packages/sdk/package.json /prod/packages/sdk/ && \
-    cp packages/town/package.json /prod/packages/town/ && \
-    cp -r packages/bls/dist /prod/packages/bls/ && \
-    cp -r packages/client/dist /prod/packages/client/ && \
-    cp -r packages/core/dist /prod/packages/core/ && \
-    cp -r packages/relay/dist /prod/packages/relay/ && \
-    cp -r packages/sdk/dist /prod/packages/sdk/ && \
-    cp -r packages/town/dist /prod/packages/town/ && \
-    cp -r docker/dist /prod/docker/ && \
-    cp tsconfig.json /prod/
+# Copy esbuild bundles
+RUN cp docker/dist/entrypoint-sdk.js /runtime/ && \
+    cp docker/dist/attestation-server.js /runtime/
 
-# Clean up native module build artifacts to save space
-RUN find /prod/node_modules -type d -name 'deps' -prune -exec rm -rf {} + && \
-    find /prod/node_modules -type d -name 'src' -prune ! -path '*/simple-git/*' ! -path '*/debug/*' -exec rm -rf {} + && \
-    find /prod/node_modules -type f -name 'binding.gyp' -delete
+# ESM package.json (bundles use import.meta.url via banner)
+RUN echo '{"type":"module"}' > /runtime/package.json
 
-# -- Stage 2: Runtime (Oyster CVM variant) ------------------------------
+# Cherry-pick better-sqlite3 (native module) + its runtime deps (bindings, file-uri-to-path)
+# Each package resolved from pnpm store individually (version-agnostic globs)
+RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3) && \
+    BINDINGS_DIR=$(ls -d node_modules/.pnpm/bindings@*/node_modules/bindings) && \
+    FUTP_DIR=$(ls -d node_modules/.pnpm/file-uri-to-path@*/node_modules/file-uri-to-path) && \
+    mkdir -p /runtime/node_modules/better-sqlite3/build/Release && \
+    cp -r "$SQLITE_DIR/lib" /runtime/node_modules/better-sqlite3/ && \
+    cp "$SQLITE_DIR/build/Release/better_sqlite3.node" \
+       /runtime/node_modules/better-sqlite3/build/Release/ && \
+    cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/ && \
+    cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
+    cp -r "$FUTP_DIR" /runtime/node_modules/
+
+# Install ethers + express (dynamically required by connector) with all transitive deps
+# Copy entire npm flat node_modules — more robust than cherry-picking individual packages
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 && \
+    cp -r /tmp/node_modules/* /runtime/node_modules/ && \
+    find /runtime/node_modules -name '*.d.ts' -delete && \
+    find /runtime/node_modules -name '*.d.ts.map' -delete && \
+    find /runtime/node_modules -name '*.js.map' -delete && \
+    find /runtime/node_modules -name '*.d.mts' -delete && \
+    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+
+# -- Stage 2: Runtime (Oyster CVM variant) -----------------------------------
 FROM node:20-alpine
 
 # Install runtime dependencies for native modules + supervisord
@@ -95,8 +107,16 @@ RUN apk add --no-cache libstdc++ supervisor
 
 WORKDIR /app
 
-# Copy production build from builder stage
-COPY --from=builder /prod ./
+# Create non-root user for security BEFORE copying files
+# supervisord runs as root (required to switch users via user= directive)
+# but individual programs execute as the 'toon' user
+RUN addgroup -g 1001 toon && \
+    adduser -D -u 1001 -G toon toon && \
+    mkdir -p /data && \
+    chown toon:toon /data
+
+# Copy minimal runtime from builder stage (--chown avoids duplicate layer)
+COPY --from=builder --chown=toon:toon /runtime ./
 
 # Copy supervisord configuration for Oyster CVM multi-process management
 COPY docker/supervisord.conf /etc/supervisord.conf
@@ -107,18 +127,11 @@ ENV BLS_PORT=3100
 ENV WS_PORT=7100
 
 # Expose ports:
+#   3000 - BTP (embedded ConnectorNode, peer connections)
 #   3100 - BLS HTTP API (enriched /health, /handle-packet)
 #   7100 - Nostr Relay WebSocket
 #   1300 - Attestation HTTP server (/attestation/raw, /health)
-EXPOSE 3100 7100 1300
-
-# Create non-root user for security
-# supervisord runs as root (required to switch users via user= directive)
-# but individual programs execute as the 'toon' user
-RUN addgroup -g 1001 toon && \
-    adduser -D -u 1001 -G toon toon && \
-    mkdir -p /data && \
-    chown -R toon:toon /app /data
+EXPOSE 3000 3100 7100 1300
 
 # Volume for persistent data
 VOLUME /data

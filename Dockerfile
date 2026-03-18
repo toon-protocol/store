@@ -1,16 +1,16 @@
-# TOON Container (Optimized Multi-Stage Build)
+# TOON Container (esbuild-bundled Multi-Stage Build)
 # Runs BLS (Business Logic Server) + Nostr Relay + Bootstrap Service
 #
 # Build from repo root:
 #   docker build -f docker/Dockerfile -t toon .
 #
-# Optimizations:
-#   - Alpine base (vs Debian Slim) = ~400 MB savings
-#   - Multi-stage build = ~600 MB savings (excludes devDeps)
-#   - Native module cleanup = ~50 MB savings
-#   - Expected total: ~450 MB (vs 1.53 GB)
+# esbuild bundles all JS into a self-contained file. Only the native module
+# better-sqlite3 (used by SqliteEventStore) is copied separately.
+# entrypoint-town.ts talks to an external connector via HTTP, so ethers/express
+# are NOT needed (those are only required by the embedded ConnectorNode in
+# Dockerfile.oyster). Target image: ~70MB (down from ~450MB).
 
-# ── Stage 1: Builder ─────────────────────────────────────────
+# -- Stage 1: Builder --------------------------------------------------------
 FROM node:20-alpine AS builder
 
 # Install build dependencies for native modules
@@ -44,38 +44,34 @@ COPY packages/sdk/ ./packages/sdk/
 COPY packages/town/ ./packages/town/
 COPY docker/ ./docker/
 
-# Build all packages
+# Build all workspace packages (esbuild needs their dist/ exports)
+# Then run esbuild to produce self-contained bundles
 RUN pnpm -r build && cd docker && pnpm run build
 
-# Deploy production dependencies only (no devDeps, no symlinks)
-# This creates a clean production deployment at /prod
-RUN pnpm --filter @toon-protocol/docker deploy --prod /prod
+# -- Assemble minimal runtime directory --------------------------------------
+RUN mkdir -p /runtime/node_modules
 
-# Copy package.json files and built artifacts to production deployment
-RUN mkdir -p /prod/packages/bls /prod/packages/client /prod/packages/core /prod/packages/relay /prod/packages/sdk /prod/packages/town && \
-    cp packages/bls/package.json /prod/packages/bls/ && \
-    cp packages/client/package.json /prod/packages/client/ && \
-    cp packages/core/package.json /prod/packages/core/ && \
-    cp packages/relay/package.json /prod/packages/relay/ && \
-    cp packages/sdk/package.json /prod/packages/sdk/ && \
-    cp packages/town/package.json /prod/packages/town/ && \
-    cp -r packages/bls/dist /prod/packages/bls/ && \
-    cp -r packages/client/dist /prod/packages/client/ && \
-    cp -r packages/core/dist /prod/packages/core/ && \
-    cp -r packages/relay/dist /prod/packages/relay/ && \
-    cp -r packages/sdk/dist /prod/packages/sdk/ && \
-    cp -r packages/town/dist /prod/packages/town/ && \
-    cp -r docker/dist /prod/docker/ && \
-    cp tsconfig.json /prod/
+# Copy esbuild bundle (town entrypoint for standard Docker)
+RUN cp docker/dist/entrypoint-town.js /runtime/
 
-# Clean up native module build artifacts to save space
-# Note: Keep build/ directories as they contain compiled .node files needed at runtime
-# Note: Keep simple-git dependencies intact (it uses src/ directories)
-RUN find /prod/node_modules -type d -name 'deps' -prune -exec rm -rf {} + && \
-    find /prod/node_modules -type d -name 'src' -prune ! -path '*/simple-git/*' ! -path '*/debug/*' -exec rm -rf {} + && \
-    find /prod/node_modules -type f -name 'binding.gyp' -delete
+# ESM package.json (bundles use import.meta.url via banner)
+RUN echo '{"type":"module"}' > /runtime/package.json
 
-# ── Stage 2: Runtime ─────────────────────────────────────────
+# Cherry-pick better-sqlite3 (native module) + its runtime deps (bindings, file-uri-to-path)
+# Each package resolved from pnpm store individually (version-agnostic globs)
+RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3) && \
+    BINDINGS_DIR=$(ls -d node_modules/.pnpm/bindings@*/node_modules/bindings) && \
+    FUTP_DIR=$(ls -d node_modules/.pnpm/file-uri-to-path@*/node_modules/file-uri-to-path) && \
+    mkdir -p /runtime/node_modules/better-sqlite3/build/Release && \
+    cp -r "$SQLITE_DIR/lib" /runtime/node_modules/better-sqlite3/ && \
+    cp "$SQLITE_DIR/build/Release/better_sqlite3.node" \
+       /runtime/node_modules/better-sqlite3/build/Release/ && \
+    cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/ && \
+    cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
+    cp -r "$FUTP_DIR" /runtime/node_modules/
+
+
+# -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
 
 # Install runtime dependencies for native modules
@@ -83,8 +79,8 @@ RUN apk add --no-cache libstdc++
 
 WORKDIR /app
 
-# Copy production build from builder stage
-COPY --from=builder /prod ./
+# Copy minimal runtime from builder stage
+COPY --from=builder /runtime ./
 
 # Environment variables (with defaults)
 ENV NODE_ENV=production
@@ -113,4 +109,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 
 # Run the SDK-based docker entrypoint (Town)
-CMD ["node", "/app/dist/entrypoint-town.js"]
+CMD ["node", "/app/entrypoint-town.js"]
