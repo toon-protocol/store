@@ -82,7 +82,7 @@ describe('parseConfig', () => {
     expect(config.relayUrls).toEqual(['ws://localhost:7100']);
     expect(config.assetCode).toBe('USD');
     expect(config.assetScale).toBe(6);
-    expect(config.basePricePerByte).toBe(10n);
+    expect(config.basePricePerByte).toBe(1n);
   });
 
   it('parses ARDRIVE_ENABLED=false correctly', () => {
