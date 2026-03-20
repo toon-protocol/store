@@ -6,7 +6,7 @@
  */
 
 import { getPublicKey } from 'nostr-tools/pure';
-import { resolveChainConfig } from '@crosstown/core';
+import { resolveChainConfig } from '@toon-protocol/core';
 import type {
   ConnectorAdminClient,
   ConnectorChannelClient,
@@ -14,7 +14,7 @@ import type {
   OpenChannelResult,
   ChannelState,
   SettlementConfig,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 
 // Environment configuration
 export interface Config {
@@ -99,7 +99,7 @@ export function parseConfig(): Config {
   }
 
   // Settlement info (optional)
-  // Priority: SUPPORTED_CHAINS (explicit) > CROSSTOWN_CHAIN (convenience preset)
+  // Priority: SUPPORTED_CHAINS (explicit) > TOON_CHAIN (convenience preset)
   let settlementInfo: SettlementConfig | undefined;
   const supportedChainsStr = env['SUPPORTED_CHAINS'];
   if (supportedChainsStr) {
@@ -140,11 +140,11 @@ export function parseConfig(): Config {
       ...(Object.keys(preferredTokens).length > 0 && { preferredTokens }),
       ...(Object.keys(tokenNetworks).length > 0 && { tokenNetworks }),
     };
-  } else if (env['CROSSTOWN_CHAIN']) {
+  } else if (env['TOON_CHAIN']) {
     // Convenience shorthand: derive settlement config from a chain preset.
-    // CROSSTOWN_RPC_URL and CROSSTOWN_TOKEN_NETWORK overrides are handled
+    // TOON_RPC_URL and TOON_TOKEN_NETWORK overrides are handled
     // internally by resolveChainConfig().
-    const chainConfig = resolveChainConfig(env['CROSSTOWN_CHAIN']);
+    const chainConfig = resolveChainConfig(env['TOON_CHAIN']);
     const chainKey = `evm:base:${chainConfig.chainId}`;
 
     const preferredTokens: Record<string, string> = {
@@ -193,17 +193,17 @@ export function parseConfig(): Config {
   const forgejoOwner = env['FORGEJO_OWNER'];
 
   // x402 publish endpoint (default: disabled)
-  const x402Enabled = env['CROSSTOWN_X402_ENABLED'] === 'true';
+  const x402Enabled = env['TOON_X402_ENABLED'] === 'true';
 
   // Seed relay discovery (default: genesis mode)
-  const discoveryRaw = env['CROSSTOWN_DISCOVERY'] ?? 'genesis';
+  const discoveryRaw = env['TOON_DISCOVERY'] ?? 'genesis';
   if (discoveryRaw !== 'seed-list' && discoveryRaw !== 'genesis') {
     throw new Error(
-      `CROSSTOWN_DISCOVERY must be "seed-list" or "genesis", got: "${discoveryRaw}"`
+      `TOON_DISCOVERY must be "seed-list" or "genesis", got: "${discoveryRaw}"`
     );
   }
   const discoveryMode: 'seed-list' | 'genesis' = discoveryRaw;
-  const seedRelaysStr = env['CROSSTOWN_SEED_RELAYS'];
+  const seedRelaysStr = env['TOON_SEED_RELAYS'];
   const seedRelays = seedRelaysStr
     ? seedRelaysStr
         .split(',')
@@ -217,13 +217,13 @@ export function parseConfig(): Config {
     if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
       // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- error message text, not a connection
       throw new Error(
-        'CROSSTOWN_SEED_RELAYS contains invalid URL -- must use WebSocket scheme (ws or wss)'
+        'TOON_SEED_RELAYS contains invalid URL -- must use WebSocket scheme (ws or wss)'
       );
     }
   }
   const publishSeedEntry =
-    env['CROSSTOWN_PUBLISH_SEED_ENTRY'] === 'true';
-  const externalRelayUrl = env['CROSSTOWN_EXTERNAL_RELAY_URL'] || undefined;
+    env['TOON_PUBLISH_SEED_ENTRY'] === 'true';
+  const externalRelayUrl = env['TOON_EXTERNAL_RELAY_URL'] || undefined;
 
   return {
     nodeId,

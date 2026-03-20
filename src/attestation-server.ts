@@ -19,11 +19,11 @@
  *   TEE_ENABLED                  -- Set by Oyster CVM runtime when in enclave
  *   NOSTR_SECRET_KEY             -- 64-char hex secret key for event signing
  *   WS_PORT                      -- WebSocket relay port (default: 7100)
- *   CROSSTOWN_CHAIN              -- Chain preset name (default: 'anvil')
+ *   TOON_CHAIN              -- Chain preset name (default: 'anvil')
  *   EXTERNAL_RELAY_URL           -- External relay URL for attestation tags
  *
  * This server runs as a separate supervisord-managed process (priority=20),
- * starting after the Crosstown node process (priority=10) to ensure the
+ * starting after the TOON node process (priority=10) to ensure the
  * relay is accepting connections before attestation is published.
  */
 
@@ -31,7 +31,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import WebSocket from 'ws';
 import { getPublicKey } from 'nostr-tools/pure';
-import { buildAttestationEvent, type TeeAttestation } from '@crosstown/core';
+import { buildAttestationEvent, type TeeAttestation } from '@toon-protocol/core';
 
 const app = new Hono();
 
@@ -65,7 +65,7 @@ if (isNaN(wsPort) || wsPort < 1 || wsPort > 65535) {
 }
 
 // Chain ID for attestation event tags
-const chainId = process.env['CROSSTOWN_CHAIN'] || '31337';
+const chainId = process.env['TOON_CHAIN'] || '31337';
 
 // External relay URL for attestation event tags
 // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- default for internal Docker network

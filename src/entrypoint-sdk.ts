@@ -17,28 +17,28 @@
 
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
-import { createNode, type ServiceNode } from '@crosstown/sdk';
+import { createNode, type ServiceNode } from '@toon-protocol/sdk';
 import {
   createEventStorageHandler,
-} from '@crosstown/town';
+} from '@toon-protocol/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   ILP_PEER_INFO_KIND,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 import type {
   BootstrapEvent,
   IlpPeerInfo,
   EmbeddableConnectorLike,
-} from '@crosstown/core';
+} from '@toon-protocol/core';
 import {
   encodeEventToToon,
   decodeEventFromToon,
-} from '@crosstown/core/toon';
-import { SqliteEventStore, NostrRelayServer } from '@crosstown/relay';
-import { ConnectorNode, createLogger } from '@crosstown/connector';
+} from '@toon-protocol/core/toon';
+import { SqliteEventStore, NostrRelayServer } from '@toon-protocol/relay';
+import { ConnectorNode, createLogger } from '@toon-protocol/connector';
 import { parseConfig } from './shared.js';
 
 // ---------- Connector Config from Env ----------
@@ -48,6 +48,7 @@ interface ConnectorEnv {
   settlementPrivateKey: string | undefined;
   settlementRegistryAddress: string | undefined;
   settlementTokenAddress: string | undefined;
+  settlementThreshold: string | undefined;
 }
 
 function parseConnectorEnv(): ConnectorEnv {
@@ -58,6 +59,7 @@ function parseConnectorEnv(): ConnectorEnv {
     settlementPrivateKey: env['SETTLEMENT_PRIVATE_KEY'] || undefined,
     settlementRegistryAddress: env['SETTLEMENT_REGISTRY_ADDRESS'] || undefined,
     settlementTokenAddress: env['SETTLEMENT_TOKEN_ADDRESS'] || undefined,
+    settlementThreshold: env['SETTLEMENT_THRESHOLD'] || undefined,
   };
 }
 
@@ -95,7 +97,7 @@ function parseBootstrapPeers(config: ReturnType<typeof parseConfig>) {
 // ---------- Main ----------
 async function main(): Promise<void> {
   console.log('\n' + '='.repeat(50));
-  console.log('Crosstown Container Starting (SDK/Embedded)');
+  console.log('TOON Container Starting (SDK/Embedded)');
   console.log('='.repeat(50) + '\n');
 
   const config = parseConfig();
@@ -130,6 +132,9 @@ async function main(): Promise<void> {
           registryAddress: connectorEnv.settlementRegistryAddress,
           tokenAddress: connectorEnv.settlementTokenAddress,
           privateKey: connectorEnv.settlementPrivateKey,
+          ...(connectorEnv.settlementThreshold && {
+            threshold: connectorEnv.settlementThreshold,
+          }),
         },
       }),
     },
@@ -273,6 +278,7 @@ async function main(): Promise<void> {
       pubkey: config.pubkey,
       ilpAddress: config.ilpAddress,
       timestamp: Date.now(),
+      version: 3,
       sdk: true,
       embedded: true,
       ...(bootstrapPhase && { bootstrapPhase }),
@@ -394,7 +400,7 @@ async function main(): Promise<void> {
   const socialSubscription = socialDiscovery.start();
 
   console.log('\n' + '='.repeat(50));
-  console.log('Crosstown Container Ready (SDK/Embedded)');
+  console.log('TOON Container Ready (SDK/Embedded)');
   console.log('='.repeat(50) + '\n');
 
   // --- Graceful shutdown ---

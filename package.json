@@ -1,23 +1,24 @@
 {
-  "name": "@crosstown/docker",
-  "version": "0.1.1",
+  "name": "@toon-protocol/docker",
+  "version": "0.2.0",
   "private": true,
-  "description": "Docker entrypoint for crosstown containers",
+  "description": "Docker entrypoint for toon containers",
   "type": "module",
   "main": "dist/entrypoint-town.js",
   "scripts": {
-    "build": "tsc",
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
     "start": "node dist/entrypoint-town.js",
     "test": "vitest run"
   },
   "dependencies": {
-    "@crosstown/bls": "workspace:*",
-    "@crosstown/connector": "^1.7.1",
-    "@crosstown/core": "workspace:*",
-    "@crosstown/relay": "workspace:*",
-    "@crosstown/sdk": "workspace:*",
-    "@crosstown/town": "workspace:*",
     "@hono/node-server": "^1.13.7",
+    "@toon-protocol/bls": "workspace:*",
+    "@toon-protocol/connector": "^1.8.1",
+    "@toon-protocol/core": "workspace:*",
+    "@toon-protocol/relay": "workspace:*",
+    "@toon-protocol/sdk": "workspace:*",
+    "@toon-protocol/town": "workspace:*",
     "hono": "^4.11.10",
     "nostr-tools": "^2.10.4",
     "ws": "^8.18.0"
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/ws": "^8.5.10",
+    "esbuild": "^0.24.0",
     "typescript": "^5.3.0",
     "vitest": "^1.0.0"
   },
