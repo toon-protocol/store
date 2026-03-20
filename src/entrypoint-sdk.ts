@@ -48,6 +48,7 @@ interface ConnectorEnv {
   settlementPrivateKey: string | undefined;
   settlementRegistryAddress: string | undefined;
   settlementTokenAddress: string | undefined;
+  settlementThreshold: string | undefined;
 }
 
 function parseConnectorEnv(): ConnectorEnv {
@@ -58,6 +59,7 @@ function parseConnectorEnv(): ConnectorEnv {
     settlementPrivateKey: env['SETTLEMENT_PRIVATE_KEY'] || undefined,
     settlementRegistryAddress: env['SETTLEMENT_REGISTRY_ADDRESS'] || undefined,
     settlementTokenAddress: env['SETTLEMENT_TOKEN_ADDRESS'] || undefined,
+    settlementThreshold: env['SETTLEMENT_THRESHOLD'] || undefined,
   };
 }
 
@@ -130,6 +132,9 @@ async function main(): Promise<void> {
           registryAddress: connectorEnv.settlementRegistryAddress,
           tokenAddress: connectorEnv.settlementTokenAddress,
           privateKey: connectorEnv.settlementPrivateKey,
+          ...(connectorEnv.settlementThreshold && {
+            threshold: connectorEnv.settlementThreshold,
+          }),
         },
       }),
     },
@@ -273,6 +278,7 @@ async function main(): Promise<void> {
       pubkey: config.pubkey,
       ilpAddress: config.ilpAddress,
       timestamp: Date.now(),
+      version: 3,
       sdk: true,
       embedded: true,
       ...(bootstrapPhase && { bootstrapPhase }),

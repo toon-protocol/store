@@ -378,8 +378,10 @@ describe('parseConfig', () => {
       expect(config.settlementInfo?.preferredTokens).toEqual({
         'evm:base:421614': '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
       });
-      // arbitrum-sepolia has empty tokenNetworkAddress
-      expect(config.settlementInfo?.tokenNetworks).toBeUndefined();
+      // arbitrum-sepolia has deployed TokenNetwork
+      expect(config.settlementInfo?.tokenNetworks).toEqual({
+        'evm:base:421614': '0x91d62b1F7C5d1129A64EE3915c480DBF288B1cBa',
+      });
     });
 
     it('SUPPORTED_CHAINS takes precedence over TOON_CHAIN when both are set', () => {

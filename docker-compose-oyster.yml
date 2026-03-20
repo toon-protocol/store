@@ -47,6 +47,7 @@ services:
     init: true
     network_mode: host
     restart: unless-stopped
+    env_file: .env
     environment:
       # Required — operator must set these at deployment time.
       # SECURITY NOTE: NOSTR_SECRET_KEY is a sensitive value. In production Oyster CVM
@@ -69,11 +70,12 @@ services:
 
       # Settlement info (published in kind:10032)
       SUPPORTED_CHAINS: ${SUPPORTED_CHAINS:-}
-      # Per-chain env vars follow the pattern:
-      #   SETTLEMENT_ADDRESS_<CHAIN_KEY>=<address>
-      #   PREFERRED_TOKEN_<CHAIN_KEY>=<address>
-      #   TOKEN_NETWORK_<CHAIN_KEY>=<address>
-      # where CHAIN_KEY is e.g. EVM_BASE_42161 (from "evm:base:42161")
+      # Per-chain env vars (Arbitrum Sepolia: evm:base:421614)
+      # Note: These MUST be explicit — env_file vars are not reliably
+      # forwarded inside Oyster CVM Docker-in-enclave environments.
+      SETTLEMENT_ADDRESS_EVM_BASE_421614: ${SETTLEMENT_ADDRESS_EVM_BASE_421614:-}
+      PREFERRED_TOKEN_EVM_BASE_421614: ${PREFERRED_TOKEN_EVM_BASE_421614:-}
+      TOKEN_NETWORK_EVM_BASE_421614: ${TOKEN_NETWORK_EVM_BASE_421614:-}
 
       # Service ports (must match EXPOSE and port mappings)
       BLS_PORT: 3100

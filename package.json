@@ -1,6 +1,6 @@
 {
   "name": "@toon-protocol/docker",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Docker entrypoint for toon containers",
   "type": "module",
@@ -12,13 +12,13 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@hono/node-server": "^1.13.7",
     "@toon-protocol/bls": "workspace:*",
-    "@toon-protocol/connector": "^1.7.1",
+    "@toon-protocol/connector": "^1.8.1",
     "@toon-protocol/core": "workspace:*",
     "@toon-protocol/relay": "workspace:*",
     "@toon-protocol/sdk": "workspace:*",
     "@toon-protocol/town": "workspace:*",
-    "@hono/node-server": "^1.13.7",
     "hono": "^4.11.10",
     "nostr-tools": "^2.10.4",
     "ws": "^8.18.0"
