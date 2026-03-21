@@ -31,7 +31,11 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import WebSocket from 'ws';
 import { getPublicKey } from 'nostr-tools/pure';
-import { buildAttestationEvent, type TeeAttestation } from '@toon-protocol/core';
+import {
+  buildAttestationEvent,
+  deriveFromKmsSeed,
+  type TeeAttestation,
+} from '@toon-protocol/core';
 
 const app = new Hono();
 
@@ -288,17 +292,33 @@ if (process.env['VITEST'] === undefined) {
 
   // Start kind:10033 publishing lifecycle if TEE is enabled
   if (teeEnabled) {
-    const secretKeyHex = process.env['NOSTR_SECRET_KEY'];
-    if (secretKeyHex && /^[0-9a-f]{64}$/.test(secretKeyHex)) {
-      // nosemgrep: ajinabraham.njsscan.generic.hardcoded_secrets.node_secret -- secret is read from env var, not hardcoded
-      const secretKey = Uint8Array.from(Buffer.from(secretKeyHex, 'hex'));
+    // Identity derivation: NOSTR_MNEMONIC (KMS pipeline) takes precedence over NOSTR_SECRET_KEY
+    let secretKey: Uint8Array | undefined;
+    const mnemonic = process.env['NOSTR_MNEMONIC'];
+    if (mnemonic && mnemonic.trim().length > 0) {
+      const keypair = deriveFromKmsSeed(new Uint8Array(32), {
+        mnemonic: mnemonic.trim(),
+      });
+      secretKey = keypair.secretKey;
+      console.log(
+        `[Attestation] Identity derived from NOSTR_MNEMONIC via NIP-06 (pubkey: ${keypair.pubkey.slice(0, 16)}...)`
+      );
+    } else {
+      const secretKeyHex = process.env['NOSTR_SECRET_KEY'];
+      if (secretKeyHex && /^[0-9a-f]{64}$/.test(secretKeyHex)) {
+        // nosemgrep: ajinabraham.njsscan.generic.hardcoded_secrets.node_secret -- secret is read from env var, not hardcoded
+        secretKey = Uint8Array.from(Buffer.from(secretKeyHex, 'hex'));
+      }
+    }
+
+    if (secretKey) {
       console.log(`[Attestation] Refresh interval: ${refreshIntervalSeconds}s`);
       startAttestationLifecycle(secretKey).catch((err) => {
         console.error('[Attestation] Lifecycle startup failed:', err);
       });
     } else {
       console.warn(
-        '[Attestation] NOSTR_SECRET_KEY not set or invalid -- skipping kind:10033 publishing'
+        '[Attestation] NOSTR_MNEMONIC and NOSTR_SECRET_KEY not set or invalid -- skipping kind:10033 publishing'
       );
     }
   }

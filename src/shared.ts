@@ -6,7 +6,7 @@
  */
 
 import { getPublicKey } from 'nostr-tools/pure';
-import { resolveChainConfig } from '@toon-protocol/core';
+import { resolveChainConfig, deriveFromKmsSeed } from '@toon-protocol/core';
 import type {
   ConnectorAdminClient,
   ConnectorChannelClient,
@@ -58,12 +58,32 @@ export function parseConfig(): Config {
     throw new Error('NODE_ID environment variable is required');
   }
 
-  const secretKeyHex = env['NOSTR_SECRET_KEY'];
-  if (!secretKeyHex || secretKeyHex.length !== 64) {
-    throw new Error('NOSTR_SECRET_KEY must be a 64-character hex string');
+  // Identity derivation: NOSTR_MNEMONIC (KMS pipeline) takes precedence over NOSTR_SECRET_KEY
+  let secretKey: Uint8Array;
+  let pubkey: string;
+  const mnemonic = env['NOSTR_MNEMONIC'];
+  if (mnemonic && mnemonic.trim().length > 0) {
+    const keypair = deriveFromKmsSeed(new Uint8Array(32), {
+      mnemonic: mnemonic.trim(),
+    });
+    secretKey = keypair.secretKey;
+    pubkey = keypair.pubkey;
+    console.log(
+      `[Config] Identity derived from NOSTR_MNEMONIC via NIP-06 (pubkey: ${pubkey.slice(0, 16)}...)`
+    );
+  } else {
+    const secretKeyHex = env['NOSTR_SECRET_KEY'];
+    if (!secretKeyHex || secretKeyHex.length !== 64) {
+      throw new Error(
+        'NOSTR_MNEMONIC or NOSTR_SECRET_KEY must be set (NOSTR_SECRET_KEY must be a 64-character hex string)'
+      );
+    }
+    secretKey = Uint8Array.from(Buffer.from(secretKeyHex, 'hex'));
+    pubkey = getPublicKey(secretKey);
+    console.log(
+      `[Config] Identity from NOSTR_SECRET_KEY (pubkey: ${pubkey.slice(0, 16)}...)`
+    );
   }
-  const secretKey = Uint8Array.from(Buffer.from(secretKeyHex, 'hex'));
-  const pubkey = getPublicKey(secretKey);
 
   const ilpAddress = env['ILP_ADDRESS'];
   if (!ilpAddress) {
@@ -86,7 +106,7 @@ export function parseConfig(): Config {
 
   const assetCode = env['ASSET_CODE'] || 'USD';
   const assetScale = parseInt(env['ASSET_SCALE'] || '6', 10);
-  const basePricePerByte = BigInt(env['BASE_PRICE_PER_BYTE'] || '10');
+  const basePricePerByte = BigInt(env['BASE_PRICE_PER_BYTE'] || '1');
 
   // ILP-first flow: connector URL (optional)
   const connectorUrl = env['CONNECTOR_URL'] || undefined;
@@ -221,8 +241,7 @@ export function parseConfig(): Config {
       );
     }
   }
-  const publishSeedEntry =
-    env['TOON_PUBLISH_SEED_ENTRY'] === 'true';
+  const publishSeedEntry = env['TOON_PUBLISH_SEED_ENTRY'] === 'true';
   const externalRelayUrl = env['TOON_EXTERNAL_RELAY_URL'] || undefined;
 
   return {

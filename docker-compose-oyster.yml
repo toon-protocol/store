@@ -55,7 +55,8 @@ services:
       # --env-file mechanism rather than plain environment variables. Environment
       # variables may be visible to the orchestration layer outside the enclave.
       NODE_ID: ${NODE_ID}
-      NOSTR_SECRET_KEY: ${NOSTR_SECRET_KEY}
+      NOSTR_MNEMONIC: ${NOSTR_MNEMONIC:-}
+      NOSTR_SECRET_KEY: ${NOSTR_SECRET_KEY:-}
       ILP_ADDRESS: ${ILP_ADDRESS}
 
       # Embedded connector — BTP listen port for peer connections
@@ -108,7 +109,11 @@ services:
     #   3100 - BLS HTTP API (enriched /health, /handle-packet)
     #   7100 - Nostr Relay WebSocket
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:$${BLS_PORT:-3100}/health']
+      test:
+        [
+          'CMD-SHELL',
+          'wget -q --spider http://localhost:$${BLS_PORT:-3100}/health',
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -127,7 +132,7 @@ services:
   # the supervisord priority model (toon=10, attestation=20).
   attestation-server:
     image: ghcr.io/allidoizcode/toon:oyster
-    command: ["node", "/app/attestation-server.js"]
+    command: ['node', '/app/attestation-server.js']
     init: true
     network_mode: host
     restart: unless-stopped
@@ -141,6 +146,17 @@ services:
 
       # TEE detection — set automatically by Oyster CVM runtime
       TEE_ENABLED: ${TEE_ENABLED:-false}
+
+      # Identity — needed for signing kind:10033 attestation events
+      NOSTR_MNEMONIC: ${NOSTR_MNEMONIC:-}
+      NOSTR_SECRET_KEY: ${NOSTR_SECRET_KEY:-}
+
+      # Relay port — attestation server publishes kind:10033 to local relay
+      WS_PORT: 7100
+
+      # Chain and relay URL for attestation event tags
+      TOON_CHAIN: ${TOON_CHAIN:-31337}
+      EXTERNAL_RELAY_URL: ${TOON_EXTERNAL_RELAY_URL:-}
 
     # Port 1300 exposed via Oyster vsock inbound proxy (no explicit mapping needed):
     #   1300 - Attestation HTTP (/attestation/raw, /health)

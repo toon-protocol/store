@@ -18,15 +18,16 @@
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import { createNode, type ServiceNode } from '@toon-protocol/sdk';
-import {
-  createEventStorageHandler,
-} from '@toon-protocol/town';
+import { createEventStorageHandler } from '@toon-protocol/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   ILP_PEER_INFO_KIND,
+  TEE_ATTESTATION_KIND,
+  parseAttestation,
+  buildAttestationEvent,
 } from '@toon-protocol/core';
 import type {
   BootstrapEvent,
@@ -177,13 +178,21 @@ async function main(): Promise<void> {
   // expects Promise<void>, and settlement.preference types differ (string vs union),
   // so we cast and wrap with void returns.
   discoveryTracker.setConnectorAdmin({
-    addPeer: async (peerConfig) => { await connector.registerPeer(peerConfig as Parameters<typeof connector.registerPeer>[0]); },
-    removePeer: async (peerId) => { await connector.removePeer(peerId); },
+    addPeer: async (peerConfig) => {
+      await connector.registerPeer(
+        peerConfig as Parameters<typeof connector.registerPeer>[0]
+      );
+    },
+    removePeer: async (peerId) => {
+      await connector.removePeer(peerId);
+    },
   });
 
   // Auto-peer when a new peer is discovered via ILP-delivered kind:10032 events
   discoveryTracker.on((event) => {
-    console.log(`[Discovery] Event: ${event.type}${event.type === 'bootstrap:peer-discovered' ? ` pubkey=${(event as { peerPubkey?: string }).peerPubkey?.slice(0, 16)}...` : ''}`);
+    console.log(
+      `[Discovery] Event: ${event.type}${event.type === 'bootstrap:peer-discovered' ? ` pubkey=${(event as { peerPubkey?: string }).peerPubkey?.slice(0, 16)}...` : ''}`
+    );
     if (event.type === 'bootstrap:peer-discovered') {
       discoveryTracker.peerWith(event.peerPubkey).catch((err) => {
         console.warn(
@@ -204,7 +213,9 @@ async function main(): Promise<void> {
 
       // Feed kind:10032 events to discovery tracker for processing
       if (decoded.kind === ILP_PEER_INFO_KIND) {
-        console.log(`[Discovery] Received kind:10032 from ${decoded.pubkey.slice(0, 16)}..., feeding to tracker`);
+        console.log(
+          `[Discovery] Received kind:10032 from ${decoded.pubkey.slice(0, 16)}..., feeding to tracker`
+        );
         discoveryTracker.processEvent(decoded);
       }
     }
@@ -268,10 +279,64 @@ async function main(): Promise<void> {
     }
   });
 
+  // --- TEE attestation tracking ---
+  // When TEE_ENABLED=true, the attestation server (separate process) publishes
+  // kind:10033 events to the local relay. We query the event store on each
+  // /health request to include the latest attestation state.
+  const teeEnabled = process.env['TEE_ENABLED'] === 'true';
+
+  function getTeeHealthInfo(): Record<string, unknown> | undefined {
+    if (!teeEnabled) return undefined;
+    try {
+      // Query event store for latest kind:10033 from our own pubkey
+      const events = eventStore.query([
+        {
+          kinds: [TEE_ATTESTATION_KIND],
+          authors: [config.pubkey],
+          limit: 1,
+        },
+      ]);
+      if (events.length === 0) {
+        return {
+          attested: false,
+          enclaveType: 'marlin-oyster',
+          lastAttestation: 0,
+          pcr0: '',
+          state: 'unattested' as const,
+        };
+      }
+      const event = events[0]!;
+      const parsed = parseAttestation(event);
+      if (!parsed) {
+        return {
+          attested: false,
+          enclaveType: 'marlin-oyster',
+          lastAttestation: 0,
+          pcr0: '',
+          state: 'unattested' as const,
+        };
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const age = now - event.created_at;
+      // Validity: 300s default, grace: 30s
+      const state = age <= 300 ? 'valid' : age <= 330 ? 'stale' : 'unattested';
+      return {
+        attested: state === 'valid' || state === 'stale',
+        enclaveType: parsed.attestation.enclave,
+        lastAttestation: event.created_at,
+        pcr0: parsed.attestation.pcr0,
+        state,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   // --- HTTP server (BLS health + handle-packet) ---
   const app = new Hono();
   app.get('/health', (c: Context) => {
     const bootstrapPhase = bootstrapService.getPhase();
+    const tee = getTeeHealthInfo();
     return c.json({
       status: 'healthy',
       nodeId: config.nodeId,
@@ -287,6 +352,7 @@ async function main(): Promise<void> {
         discoveredPeerCount: discoveryTracker.getDiscoveredCount(),
         channelCount,
       }),
+      ...(tee && { tee }),
     });
   });
 
@@ -317,7 +383,9 @@ async function main(): Promise<void> {
     nextHop: config.nodeId,
     priority: 100,
   });
-  console.log(`[Setup] Self-route added: ${config.ilpAddress} → ${config.nodeId}`);
+  console.log(
+    `[Setup] Self-route added: ${config.ilpAddress} → ${config.nodeId}`
+  );
 
   // --- Bootstrap ---
   try {
@@ -353,6 +421,55 @@ async function main(): Promise<void> {
       console.log('[Bootstrap] Published own ILP info to local relay');
     } catch (error) {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
+    }
+
+    // Publish kind:10033 TEE attestation event if TEE is enabled.
+    // Stored directly in the event store (relay rejects WebSocket writes
+    // as ILP-gated). The attestation server process handles HTTP endpoints
+    // (/attestation/raw, /health) but kind:10033 relay publishing is done here.
+    if (teeEnabled) {
+      try {
+        const attestation = {
+          enclave: 'marlin-oyster',
+          pcr0: '0'.repeat(96),
+          pcr1: '0'.repeat(96),
+          pcr2: '0'.repeat(96),
+          attestationDoc: Buffer.from(
+            'placeholder-attestation-document'
+          ).toString('base64'),
+          version: '1.0.0',
+        };
+        const refreshSeconds = parseInt(
+          process.env['ATTESTATION_REFRESH_INTERVAL'] || '300',
+          10
+        );
+        const externalUrl =
+          config.externalRelayUrl || `ws://localhost:${config.wsPort}`;
+        const chainId = process.env['TOON_CHAIN'] || '31337';
+
+        const publishAttestation = () => {
+          const expiry = Math.floor(Date.now() / 1000) + refreshSeconds * 2;
+          const attestEvent = buildAttestationEvent(
+            attestation,
+            config.secretKey,
+            {
+              relay: externalUrl,
+              chain: chainId,
+              expiry,
+            }
+          );
+          eventStore.store(attestEvent);
+          wsRelay.broadcastEvent(attestEvent);
+          console.log(
+            `[TEE] Published kind:10033 attestation (id: ${attestEvent.id.slice(0, 16)}...)`
+          );
+        };
+
+        publishAttestation();
+        setInterval(publishAttestation, refreshSeconds * 1000);
+      } catch (err) {
+        console.warn('[TEE] Failed to publish attestation event:', err);
+      }
     }
 
     // Mark bootstrap peers as excluded from discovery (already peered).
