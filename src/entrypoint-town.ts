@@ -559,7 +559,6 @@ function publishOwnIlpInfo(
         .then(
           (ilpResult: {
             accepted: boolean;
-            fulfillment?: string;
             code?: string;
             message?: string;
           }) => {
