@@ -40,6 +40,11 @@ import {
 } from '@toon-protocol/core/toon';
 import { SqliteEventStore, NostrRelayServer } from '@toon-protocol/relay';
 import { ConnectorNode, createLogger } from '@toon-protocol/connector';
+import {
+  createArweaveDvmHandler,
+  TurboUploadAdapter,
+  ChunkManager,
+} from '@toon-protocol/sdk';
 import { parseConfig } from './shared.js';
 
 // ---------- Connector Config from Env ----------
@@ -222,6 +227,18 @@ async function main(): Promise<void> {
     return result;
   });
   console.log('[Setup] ServiceNode created with embedded connector');
+
+  // --- Arweave DVM handler (kind:5094) ---
+  if (config.ardriveEnabled) {
+    const chunkManager = new ChunkManager();
+    const turboAdapter = new TurboUploadAdapter();
+    const arweaveHandler = createArweaveDvmHandler({
+      turboAdapter,
+      chunkManager,
+    });
+    node.on(5094, arweaveHandler);
+    console.log('[Setup] Arweave DVM handler registered for kind:5094');
+  }
 
   // --- Bootstrap lifecycle ---
   const bootstrapService = new BootstrapService(

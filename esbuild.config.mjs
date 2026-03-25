@@ -30,7 +30,7 @@ const result = await esbuild.build({
   // - better-sqlite3: native .node binary (used by relay SqliteEventStore + connector claims)
   // - ethers: dynamic require(packageName) in connector's requireOptional()
   // - express: dynamic require(packageName) in connector's AdminServer/HealthServer
-  external: ['better-sqlite3', 'ethers', 'express'],
+  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk'],
 
   // The connector (@crosstown/connector) is CJS and its requireOptional() uses
   // require(packageName). When esbuild bundles CJS into ESM output, these
