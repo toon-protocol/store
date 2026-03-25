@@ -38,6 +38,7 @@ WORKDIR /app
 
 # Copy dependency manifests for installation
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY patches/ ./patches/
 COPY packages/bls/package.json ./packages/bls/
 COPY packages/client/package.json ./packages/client/
 COPY packages/core/package.json ./packages/core/
