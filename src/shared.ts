@@ -2,7 +2,7 @@
  * Shared utilities for Docker entrypoints.
  *
  * Contains configuration parsing, admin client creation, and health check
- * utilities used by entrypoint-sdk and entrypoint-town.
+ * utilities used by entrypoint-sdk.
  */
 
 import { getPublicKey } from 'nostr-tools/pure';

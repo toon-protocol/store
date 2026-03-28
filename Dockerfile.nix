@@ -53,7 +53,7 @@ let
 
     [program:toon]
     priority=10
-    command=node /app/dist/entrypoint-town.js
+    command=node /app/dist/entrypoint-sdk.js
     user=toon
     autorestart=true
     stopwaitsecs=15

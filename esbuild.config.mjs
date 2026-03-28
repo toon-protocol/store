@@ -15,7 +15,6 @@ const result = await esbuild.build({
   entryPoints: [
     'src/entrypoint-sdk.ts',
     'src/attestation-server.ts',
-    'src/entrypoint-town.ts',
   ],
   bundle: true,
   format: 'esm',
