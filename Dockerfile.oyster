@@ -38,6 +38,7 @@ WORKDIR /app
 
 # Copy dependency manifests for installation
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY patches/ ./patches/
 COPY packages/bls/package.json ./packages/bls/
 COPY packages/client/package.json ./packages/client/
 COPY packages/core/package.json ./packages/core/
@@ -87,9 +88,10 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
     cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
     cp -r "$FUTP_DIR" /runtime/node_modules/
 
-# Install ethers + express (dynamically required by connector) with all transitive deps
+# Install ethers + express (dynamically required by connector) and @ardrive/turbo-sdk
+# (lazy-imported by Arweave DVM handler) with all transitive deps.
 # Copy entire npm flat node_modules — more robust than cherry-picking individual packages
-RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 && \
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive/turbo-sdk && \
     cp -r /tmp/node_modules/* /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \

@@ -4,11 +4,11 @@
   "private": true,
   "description": "Docker entrypoint for toon containers",
   "type": "module",
-  "main": "dist/entrypoint-town.js",
+  "main": "dist/entrypoint-sdk.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/entrypoint-town.js",
+    "start": "node dist/entrypoint-sdk.js",
     "test": "vitest run"
   },
   "dependencies": {
