@@ -55,6 +55,15 @@ interface ConnectorEnv {
   settlementRegistryAddress: string | undefined;
   settlementTokenAddress: string | undefined;
   settlementThreshold: string | undefined;
+  // Multi-chain env vars
+  solanaRpcUrl: string | undefined;
+  solanaProgramId: string | undefined;
+  solanaKeyId: string | undefined;
+  minaGraphqlUrl: string | undefined;
+  minaZkAppAddress: string | undefined;
+  minaKeyId: string | undefined;
+  // NIP-59 env vars
+  nip59Enabled: boolean;
 }
 
 function parseConnectorEnv(): ConnectorEnv {
@@ -66,7 +75,61 @@ function parseConnectorEnv(): ConnectorEnv {
     settlementRegistryAddress: env['SETTLEMENT_REGISTRY_ADDRESS'] || undefined,
     settlementTokenAddress: env['SETTLEMENT_TOKEN_ADDRESS'] || undefined,
     settlementThreshold: env['SETTLEMENT_THRESHOLD'] || undefined,
+    // Multi-chain
+    solanaRpcUrl: env['SOLANA_RPC_URL'] || undefined,
+    solanaProgramId: env['SOLANA_PROGRAM_ID'] || undefined,
+    solanaKeyId: env['SOLANA_KEY_ID'] || undefined,
+    minaGraphqlUrl: env['MINA_GRAPHQL_URL'] || undefined,
+    minaZkAppAddress: env['MINA_ZKAPP_ADDRESS'] || undefined,
+    minaKeyId: env['MINA_KEY_ID'] || undefined,
+    // NIP-59
+    nip59Enabled: env['NIP59_ENABLED'] === 'true',
   };
+}
+
+/**
+ * Build chainProviders array from multi-chain env vars.
+ * Returns undefined if no multi-chain env vars are set.
+ */
+function buildChainProviders(
+  connectorEnv: ConnectorEnv
+): Record<string, unknown>[] | undefined {
+  const providers: Record<string, unknown>[] = [];
+
+  // EVM provider from existing settlement env vars
+  if (connectorEnv.settlementRpcUrl && connectorEnv.settlementRegistryAddress) {
+    providers.push({
+      chainType: 'evm' as const,
+      chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
+      rpcUrl: connectorEnv.settlementRpcUrl,
+      registryAddress: connectorEnv.settlementRegistryAddress,
+      keyId: 'evm-settlement',
+    });
+  }
+
+  // Solana provider
+  if (connectorEnv.solanaRpcUrl && connectorEnv.solanaProgramId) {
+    providers.push({
+      chainType: 'solana' as const,
+      chainId: `solana:${process.env['SOLANA_CLUSTER'] || 'devnet'}`,
+      rpcUrl: connectorEnv.solanaRpcUrl,
+      programId: connectorEnv.solanaProgramId,
+      keyId: connectorEnv.solanaKeyId || 'solana-settlement',
+    });
+  }
+
+  // Mina provider
+  if (connectorEnv.minaGraphqlUrl && connectorEnv.minaZkAppAddress) {
+    providers.push({
+      chainType: 'mina' as const,
+      chainId: `mina:${process.env['MINA_NETWORK'] || 'devnet'}`,
+      graphqlUrl: connectorEnv.minaGraphqlUrl,
+      zkAppAddress: connectorEnv.minaZkAppAddress,
+      ...(connectorEnv.minaKeyId && { keyId: connectorEnv.minaKeyId }),
+    });
+  }
+
+  return providers.length > 0 ? providers : undefined;
 }
 
 // ---------- Bootstrap Peers Parser ----------
@@ -122,6 +185,11 @@ async function main(): Promise<void> {
 
   // --- ConnectorNode (embedded) ---
   const connectorLogger = createLogger(config.nodeId, 'info');
+
+  // Build multi-chain providers from env vars (returns undefined if none set)
+  const chainProviders = buildChainProviders(connectorEnv);
+  const hasChainProviders = chainProviders !== undefined && chainProviders.length > 0;
+
   const connector = new ConnectorNode(
     {
       nodeId: config.nodeId,
@@ -131,22 +199,34 @@ async function main(): Promise<void> {
       peers: [],
       routes: [],
       localDelivery: { enabled: false },
-      ...(connectorEnv.settlementRpcUrl && {
-        settlementInfra: {
-          enabled: true,
-          rpcUrl: connectorEnv.settlementRpcUrl,
-          registryAddress: connectorEnv.settlementRegistryAddress,
-          tokenAddress: connectorEnv.settlementTokenAddress,
-          privateKey: connectorEnv.settlementPrivateKey,
-          ...(connectorEnv.settlementThreshold && {
-            threshold: connectorEnv.settlementThreshold,
-          }),
-        },
-      }),
+      // Multi-chain: use chainProviders when available
+      ...(hasChainProviders && { chainProviders }),
+      // Legacy: fall back to settlementInfra when chainProviders absent
+      ...(!hasChainProviders &&
+        connectorEnv.settlementRpcUrl && {
+          settlementInfra: {
+            enabled: true,
+            rpcUrl: connectorEnv.settlementRpcUrl,
+            registryAddress: connectorEnv.settlementRegistryAddress,
+            tokenAddress: connectorEnv.settlementTokenAddress,
+            privateKey: connectorEnv.settlementPrivateKey,
+            ...(connectorEnv.settlementThreshold && {
+              threshold: connectorEnv.settlementThreshold,
+            }),
+          },
+        }),
+      // NIP-59 transport privacy
+      ...(connectorEnv.nip59Enabled && { nip59: { enabled: true } }),
     },
     connectorLogger
   );
   console.log('[Setup] Created embedded ConnectorNode');
+  if (hasChainProviders) {
+    console.log(`[Setup] Multi-chain providers configured: ${chainProviders.map((p) => (p as { chainType: string }).chainType).join(', ')}`);
+  }
+  if (connectorEnv.nip59Enabled) {
+    console.log('[Setup] NIP-59 transport privacy enabled');
+  }
 
   // --- Known peers for bootstrap ---
   const knownPeers = parseBootstrapPeers(config);
