@@ -24,6 +24,8 @@ import {
   createDiscoveryTracker,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
+  buildServiceDiscoveryEvent,
+  BLOB_STORAGE_REQUEST_KIND,
   ILP_PEER_INFO_KIND,
   TEE_ATTESTATION_KIND,
   parseAttestation,
@@ -518,6 +520,55 @@ async function main(): Promise<void> {
       console.log('[Bootstrap] Published own ILP info to local relay');
     } catch (error) {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
+    }
+
+    // Publish kind:10035 service discovery event to local relay.
+    // Advertises pricing, supported kinds, and DVM capabilities (e.g., Arweave blob storage).
+    try {
+      const supportedKinds = [1, ILP_PEER_INFO_KIND, 10035, 10036];
+      const capabilities: string[] = ['relay'];
+
+      // If Arweave DVM is enabled, advertise kind:5094 and DVM capability
+      if (config.ardriveEnabled) {
+        supportedKinds.push(BLOB_STORAGE_REQUEST_KIND);
+        capabilities.push('dvm', 'arweave-storage');
+      }
+
+      const serviceDiscoveryContent: Record<string, unknown> = {
+        serviceType: 'relay',
+        ilpAddress: config.ilpAddress,
+        pricing: {
+          basePricePerByte: Number(config.basePricePerByte),
+          currency: 'USDC',
+        },
+        supportedKinds,
+        capabilities,
+        chain: config.settlementInfo?.supportedChains?.[0] ?? 'anvil',
+        version: '3.0.0',
+      };
+
+      // Add DVM skill descriptor when Arweave is enabled
+      if (config.ardriveEnabled) {
+        serviceDiscoveryContent.skill = {
+          name: 'arweave-storage',
+          version: '1.0',
+          kinds: [BLOB_STORAGE_REQUEST_KIND],
+          features: ['blob-storage', 'chunked-upload'],
+          inputSchema: {},
+          pricing: {
+            [String(BLOB_STORAGE_REQUEST_KIND)]: String(config.basePricePerByte),
+          },
+        };
+      }
+
+      const serviceDiscoveryEvent = buildServiceDiscoveryEvent(
+        serviceDiscoveryContent as Parameters<typeof buildServiceDiscoveryEvent>[0],
+        config.secretKey,
+      );
+      eventStore.store(serviceDiscoveryEvent);
+      console.log('[Bootstrap] Published kind:10035 service discovery to local relay');
+    } catch (error) {
+      console.warn('[Bootstrap] Failed to publish service discovery:', error);
     }
 
     // Publish kind:10033 TEE attestation event if TEE is enabled.

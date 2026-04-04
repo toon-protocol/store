@@ -60,9 +60,9 @@ COPY packages/sdk/ ./packages/sdk/
 COPY packages/town/ ./packages/town/
 COPY docker/ ./docker/
 
-# Build all workspace packages (esbuild needs their dist/ exports)
+# Build workspace packages needed for Docker (skip client — browser-only, not used at runtime)
 # Then run esbuild to produce self-contained bundles
-RUN pnpm -r build && cd docker && pnpm run build
+RUN pnpm -r --filter '!@toon-protocol/client' build && cd docker && pnpm run build
 
 # -- Assemble minimal runtime directory --------------------------------------
 # Only bundles + native modules + dynamically-required packages
