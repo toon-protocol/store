@@ -582,7 +582,7 @@ async function main(): Promise<void> {
 
       // Add DVM skill descriptor when Arweave is enabled
       if (config.ardriveEnabled) {
-        serviceDiscoveryContent.skill = {
+        serviceDiscoveryContent['skill'] = {
           name: 'arweave-storage',
           version: '1.0',
           kinds: [BLOB_STORAGE_REQUEST_KIND],
@@ -596,7 +596,7 @@ async function main(): Promise<void> {
 
       // Add Pet DVM skill descriptor (separate field for backward compatibility)
       if (config.petDvmEnabled) {
-        serviceDiscoveryContent.petSkill = {
+        serviceDiscoveryContent['petSkill'] = {
           name: 'pet-dvm',
           version: '0.1',
           kinds: [PET_INTERACTION_REQUEST_KIND],

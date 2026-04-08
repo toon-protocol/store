@@ -178,7 +178,7 @@ describe('entrypoint-sdk.ts service discovery Pet DVM (Story 11-6, AC-3)', () =>
     const source = entrypoint();
 
     // Then: petSkill block should contain the required descriptor structure
-    expect(source).toMatch(/petSkill\s*=\s*\{/);
+    expect(source).toMatch(/['"]petSkill['"]\s*[\]=]*\s*=\s*\{/);
     expect(source).toMatch(/name:\s*['"]pet-dvm['"]/);
     expect(source).toMatch(/version:\s*['"]0\.1['"]/);
     expect(source).toMatch(/features:\s*\[.*'pet-interaction'.*'proof-queue'.*\]/s);

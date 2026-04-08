@@ -81,6 +81,7 @@ export function parseConfig(): Config {
         'NOSTR_MNEMONIC or NOSTR_SECRET_KEY must be set (NOSTR_SECRET_KEY must be a 64-character hex string)'
       );
     }
+    // nosemgrep: ajinabraham.njsscan.generic.hardcoded_secrets.node_secret -- secretKeyHex is read from NOSTR_SECRET_KEY env var, not hardcoded
     secretKey = Uint8Array.from(Buffer.from(secretKeyHex, 'hex'));
     pubkey = getPublicKey(secretKey);
     console.log(
