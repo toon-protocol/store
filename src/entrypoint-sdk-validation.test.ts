@@ -119,6 +119,19 @@ describe('docker-compose-sdk-e2e.yml Pet DVM env vars (Story 11-6, AC-9)', () =>
     // Then: peer1 should have PET_PROOF_BATCH_SIZE
     expect(peer1Section).toContain('PET_PROOF_BATCH_SIZE');
   });
+
+  it('explicitly disables PET_DVM on peer2 (AC-5)', () => {
+    // Given: the docker-compose file
+    const source = compose();
+
+    // Then: peer2 section should have PET_DVM_ENABLED: 'false' for explicit opt-out
+    // Use the service definition pattern (indented at service level) to find peer2 section
+    const peer2Match = source.match(/^\s{2}peer2:\s*$/m);
+    expect(peer2Match).not.toBeNull();
+    const peer2Start = peer2Match!.index!;
+    const peer2Section = source.slice(peer2Start);
+    expect(peer2Section).toMatch(/PET_DVM_ENABLED:\s*['"]?false['"]?/);
+  });
 });
 
 describe('docker/package.json Pet DVM dependency (Story 11-6, AC-9)', () => {
@@ -159,15 +172,93 @@ describe('entrypoint-sdk.ts service discovery Pet DVM (Story 11-6, AC-3)', () =>
     // Then: serviceDiscoveryContent should have petSkill field
     expect(source).toContain('petSkill');
   });
+
+  it('petSkill descriptor includes required fields: name, version, kinds, features (AC-3)', () => {
+    // Given: the entrypoint source
+    const source = entrypoint();
+
+    // Then: petSkill block should contain the required descriptor structure
+    expect(source).toMatch(/petSkill\s*=\s*\{/);
+    expect(source).toMatch(/name:\s*['"]pet-dvm['"]/);
+    expect(source).toMatch(/version:\s*['"]0\.1['"]/);
+    expect(source).toMatch(/features:\s*\[.*'pet-interaction'.*'proof-queue'.*\]/s);
+  });
+
+  it('petSkill descriptor includes PET_INTERACTION_REQUEST_KIND in kinds array (AC-3)', () => {
+    // Given: the entrypoint source
+    const source = entrypoint();
+
+    // Then: petSkill kinds array should reference the pet interaction kind
+    expect(source).toMatch(/petSkill[\s\S]*kinds:\s*\[.*PET_INTERACTION_REQUEST_KIND.*\]/);
+  });
 });
 
 describe('entrypoint-sdk.ts health endpoint Pet DVM (Story 11-6, AC-7)', () => {
+  const entrypoint = () => readSource('docker/src/entrypoint-sdk.ts');
+
   it('includes petDvm in health response when enabled', () => {
     // Given: the entrypoint source
-    const source = readSource('docker/src/entrypoint-sdk.ts');
+    const source = entrypoint();
 
     // Then: health endpoint should conditionally include petDvm status
     expect(source).toContain('petDvm');
     expect(source).toMatch(/petDvmEnabled/);
+  });
+
+  it('health petDvm block includes brainStoragePath field (AC-7)', () => {
+    // Given: the entrypoint source
+    const source = entrypoint();
+
+    // Then: petDvm health block should expose brainStoragePath
+    expect(source).toMatch(/petDvm[\s\S]*brainStoragePath/);
+  });
+
+  it('health petDvm block includes proofBatchSize field (AC-7)', () => {
+    // Given: the entrypoint source
+    const source = entrypoint();
+
+    // Then: petDvm health block should expose proofBatchSize
+    expect(source).toMatch(/petDvm[\s\S]*proofBatchSize/);
+  });
+
+  it('health petDvm uses conditional spread pattern like tee (AC-7)', () => {
+    // Given: the entrypoint source
+    const source = entrypoint();
+
+    // Then: should use the conditional spread pattern: ...(config.petDvmEnabled && { petDvm: ... })
+    expect(source).toMatch(/\.\.\.\(\s*config\.petDvmEnabled\s*&&/);
+  });
+});
+
+describe('entrypoint-sdk.ts brain storage directory creation (Story 11-6, AC-6)', () => {
+  it('creates brain storage directory with recursive: true (AC-6)', () => {
+    // Given: the entrypoint source
+    const source = readSource('docker/src/entrypoint-sdk.ts');
+
+    // Then: mkdirSync should be called with { recursive: true } for the brain storage path
+    expect(source).toMatch(/mkdirSync\s*\(\s*config\.petBrainStoragePath\s*,\s*\{\s*recursive:\s*true\s*\}/);
+  });
+
+  it('imports mkdirSync from node:fs (AC-6)', () => {
+    // Given: the entrypoint source
+    const source = readSource('docker/src/entrypoint-sdk.ts');
+
+    // Then: mkdirSync should be imported from node:fs
+    expect(source).toMatch(/import\s*\{[^}]*mkdirSync[^}]*\}\s*from\s*['"]node:fs['"]/);
+  });
+});
+
+describe('entrypoint-sdk.ts publishEvent callback (Story 11-6, AC-2)', () => {
+  it('publishEvent stores in eventStore AND broadcasts to wsRelay (AC-2)', () => {
+    // Given: the entrypoint source
+    const source = readSource('docker/src/entrypoint-sdk.ts');
+
+    // Then: the publishEvent callback should call both eventStore.store and wsRelay.broadcastEvent
+    // Extract the pet DVM handler block
+    const petDvmBlock = source.match(/if\s*\(\s*config\.petDvmEnabled\s*\)[\s\S]*?(?=\n\s*\/\/ ---|$)/);
+    expect(petDvmBlock).not.toBeNull();
+    const block = petDvmBlock![0];
+    expect(block).toContain('eventStore.store');
+    expect(block).toContain('wsRelay.broadcastEvent');
   });
 });

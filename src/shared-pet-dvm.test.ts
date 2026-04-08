@@ -89,6 +89,20 @@ describe('parseConfig — Pet DVM configuration (Story 11-6, AC-1, AC-8)', () =>
     expect(config.petDvmEnabled).toBe(false);
   });
 
+  it('sets petDvmEnabled to false for non-standard truthy values (strict === "true" pattern)', () => {
+    // Given: environment with PET_DVM_ENABLED set to non-standard values
+    // The x402Enabled pattern uses strict === 'true', so 'TRUE', '1', 'yes' should all be false
+    for (const value of ['TRUE', '1', 'yes', 'True', 'on']) {
+      Object.assign(process.env, requiredEnv, { PET_DVM_ENABLED: value });
+
+      // When: parsing config
+      const config = parseConfig();
+
+      // Then: petDvmEnabled should be false (strict equality with lowercase 'true')
+      expect(config.petDvmEnabled).toBe(false);
+    }
+  });
+
   // --- AC-8: PET_BRAIN_STORAGE_PATH ---
 
   it('parses custom PET_BRAIN_STORAGE_PATH correctly', () => {
