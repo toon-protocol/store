@@ -41,6 +41,9 @@ export interface Config {
   forgejoToken: string | undefined;
   forgejoOwner: string | undefined;
   x402Enabled: boolean;
+  petDvmEnabled: boolean;
+  petBrainStoragePath: string;
+  petProofBatchSize: number;
   discoveryMode: 'seed-list' | 'genesis';
   seedRelays: string[];
   publishSeedEntry: boolean;
@@ -78,6 +81,7 @@ export function parseConfig(): Config {
         'NOSTR_MNEMONIC or NOSTR_SECRET_KEY must be set (NOSTR_SECRET_KEY must be a 64-character hex string)'
       );
     }
+    // nosemgrep: ajinabraham.njsscan.generic.hardcoded_secrets.node_secret -- secretKeyHex is read from NOSTR_SECRET_KEY env var, not hardcoded
     secretKey = Uint8Array.from(Buffer.from(secretKeyHex, 'hex'));
     pubkey = getPublicKey(secretKey);
     console.log(
@@ -215,6 +219,16 @@ export function parseConfig(): Config {
   // x402 publish endpoint (default: disabled)
   const x402Enabled = env['TOON_X402_ENABLED'] === 'true';
 
+  // Pet DVM (default: disabled)
+  const petDvmEnabled = env['PET_DVM_ENABLED'] === 'true';
+  const petBrainStoragePath = env['PET_BRAIN_STORAGE_PATH'] || '/data/pet-brains';
+  const petProofBatchSize = parseInt(env['PET_PROOF_BATCH_SIZE'] || '10', 10);
+  if (isNaN(petProofBatchSize) || petProofBatchSize <= 0) {
+    throw new Error(
+      `PET_PROOF_BATCH_SIZE must be a positive integer: ${env['PET_PROOF_BATCH_SIZE']}`
+    );
+  }
+
   // Seed relay discovery (default: genesis mode)
   const discoveryRaw = env['TOON_DISCOVERY'] ?? 'genesis';
   if (discoveryRaw !== 'seed-list' && discoveryRaw !== 'genesis') {
@@ -268,6 +282,9 @@ export function parseConfig(): Config {
     forgejoToken,
     forgejoOwner,
     x402Enabled,
+    petDvmEnabled,
+    petBrainStoragePath,
+    petProofBatchSize,
     discoveryMode,
     seedRelays,
     publishSeedEntry,

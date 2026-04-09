@@ -24,7 +24,10 @@ import {
   createDiscoveryTracker,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
+  buildServiceDiscoveryEvent,
+  BLOB_STORAGE_REQUEST_KIND,
   ILP_PEER_INFO_KIND,
+  PET_INTERACTION_REQUEST_KIND,
   TEE_ATTESTATION_KIND,
   parseAttestation,
   buildAttestationEvent,
@@ -45,6 +48,8 @@ import {
   TurboUploadAdapter,
   ChunkManager,
 } from '@toon-protocol/sdk';
+import { createPetDvmHandler } from '@toon-protocol/pet-dvm';
+import { mkdirSync } from 'node:fs';
 import { parseConfig } from './shared.js';
 
 // ---------- Connector Config from Env ----------
@@ -55,6 +60,15 @@ interface ConnectorEnv {
   settlementRegistryAddress: string | undefined;
   settlementTokenAddress: string | undefined;
   settlementThreshold: string | undefined;
+  // Multi-chain env vars
+  solanaRpcUrl: string | undefined;
+  solanaProgramId: string | undefined;
+  solanaKeyId: string | undefined;
+  minaGraphqlUrl: string | undefined;
+  minaZkAppAddress: string | undefined;
+  minaKeyId: string | undefined;
+  // NIP-59 env vars
+  nip59Enabled: boolean;
 }
 
 function parseConnectorEnv(): ConnectorEnv {
@@ -66,7 +80,61 @@ function parseConnectorEnv(): ConnectorEnv {
     settlementRegistryAddress: env['SETTLEMENT_REGISTRY_ADDRESS'] || undefined,
     settlementTokenAddress: env['SETTLEMENT_TOKEN_ADDRESS'] || undefined,
     settlementThreshold: env['SETTLEMENT_THRESHOLD'] || undefined,
+    // Multi-chain
+    solanaRpcUrl: env['SOLANA_RPC_URL'] || undefined,
+    solanaProgramId: env['SOLANA_PROGRAM_ID'] || undefined,
+    solanaKeyId: env['SOLANA_KEY_ID'] || undefined,
+    minaGraphqlUrl: env['MINA_GRAPHQL_URL'] || undefined,
+    minaZkAppAddress: env['MINA_ZKAPP_ADDRESS'] || undefined,
+    minaKeyId: env['MINA_KEY_ID'] || undefined,
+    // NIP-59
+    nip59Enabled: env['NIP59_ENABLED'] === 'true',
   };
+}
+
+/**
+ * Build chainProviders array from multi-chain env vars.
+ * Returns undefined if no multi-chain env vars are set.
+ */
+function buildChainProviders(
+  connectorEnv: ConnectorEnv
+): Record<string, unknown>[] | undefined {
+  const providers: Record<string, unknown>[] = [];
+
+  // EVM provider from existing settlement env vars
+  if (connectorEnv.settlementRpcUrl && connectorEnv.settlementRegistryAddress) {
+    providers.push({
+      chainType: 'evm' as const,
+      chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
+      rpcUrl: connectorEnv.settlementRpcUrl,
+      registryAddress: connectorEnv.settlementRegistryAddress,
+      keyId: 'evm-settlement',
+    });
+  }
+
+  // Solana provider
+  if (connectorEnv.solanaRpcUrl && connectorEnv.solanaProgramId) {
+    providers.push({
+      chainType: 'solana' as const,
+      chainId: `solana:${process.env['SOLANA_CLUSTER'] || 'devnet'}`,
+      rpcUrl: connectorEnv.solanaRpcUrl,
+      programId: connectorEnv.solanaProgramId,
+      keyId: connectorEnv.solanaKeyId || 'solana-settlement',
+    });
+  }
+
+  // Mina provider
+  if (connectorEnv.minaGraphqlUrl && connectorEnv.minaZkAppAddress) {
+    providers.push({
+      chainType: 'mina' as const,
+      chainId: `mina:${process.env['MINA_NETWORK'] || 'devnet'}`,
+      graphqlUrl: connectorEnv.minaGraphqlUrl,
+      zkAppAddress: connectorEnv.minaZkAppAddress,
+      ...(connectorEnv.minaKeyId && { keyId: connectorEnv.minaKeyId }),
+    });
+  }
+
+  return providers.length > 0 ? providers : undefined;
 }
 
 // ---------- Bootstrap Peers Parser ----------
@@ -122,6 +190,11 @@ async function main(): Promise<void> {
 
   // --- ConnectorNode (embedded) ---
   const connectorLogger = createLogger(config.nodeId, 'info');
+
+  // Build multi-chain providers from env vars (returns undefined if none set)
+  const chainProviders = buildChainProviders(connectorEnv);
+  const hasChainProviders = chainProviders !== undefined && chainProviders.length > 0;
+
   const connector = new ConnectorNode(
     {
       nodeId: config.nodeId,
@@ -131,22 +204,34 @@ async function main(): Promise<void> {
       peers: [],
       routes: [],
       localDelivery: { enabled: false },
-      ...(connectorEnv.settlementRpcUrl && {
-        settlementInfra: {
-          enabled: true,
-          rpcUrl: connectorEnv.settlementRpcUrl,
-          registryAddress: connectorEnv.settlementRegistryAddress,
-          tokenAddress: connectorEnv.settlementTokenAddress,
-          privateKey: connectorEnv.settlementPrivateKey,
-          ...(connectorEnv.settlementThreshold && {
-            threshold: connectorEnv.settlementThreshold,
-          }),
-        },
-      }),
+      // Multi-chain: use chainProviders when available
+      ...(hasChainProviders && { chainProviders }),
+      // Legacy: fall back to settlementInfra when chainProviders absent
+      ...(!hasChainProviders &&
+        connectorEnv.settlementRpcUrl && {
+          settlementInfra: {
+            enabled: true,
+            rpcUrl: connectorEnv.settlementRpcUrl,
+            registryAddress: connectorEnv.settlementRegistryAddress,
+            tokenAddress: connectorEnv.settlementTokenAddress,
+            privateKey: connectorEnv.settlementPrivateKey,
+            ...(connectorEnv.settlementThreshold && {
+              threshold: connectorEnv.settlementThreshold,
+            }),
+          },
+        }),
+      // NIP-59 transport privacy
+      ...(connectorEnv.nip59Enabled && { nip59: { enabled: true } }),
     },
     connectorLogger
   );
   console.log('[Setup] Created embedded ConnectorNode');
+  if (hasChainProviders) {
+    console.log(`[Setup] Multi-chain providers configured: ${chainProviders.map((p) => (p as { chainType: string }).chainType).join(', ')}`);
+  }
+  if (connectorEnv.nip59Enabled) {
+    console.log('[Setup] NIP-59 transport privacy enabled');
+  }
 
   // --- Known peers for bootstrap ---
   const knownPeers = parseBootstrapPeers(config);
@@ -238,6 +323,23 @@ async function main(): Promise<void> {
     });
     node.on(5094, arweaveHandler);
     console.log('[Setup] Arweave DVM handler registered for kind:5094');
+  }
+
+  // --- Pet DVM handler (kind:5900) ---
+  if (config.petDvmEnabled) {
+    mkdirSync(config.petBrainStoragePath, { recursive: true });
+    const petDvmHandler = createPetDvmHandler({
+      brainStoragePath: config.petBrainStoragePath,
+      proofBatchSize: config.petProofBatchSize,
+      publishEvent: async (event) => {
+        // Store optimistic Kind 14919 events in relay + broadcast to WS subscribers
+        eventStore.store(event as any);
+        wsRelay.broadcastEvent(event as any);
+      },
+    });
+    node.on(PET_INTERACTION_REQUEST_KIND, petDvmHandler as any);
+    console.log('[Setup] Pet DVM handler registered for kind:5900');
+    console.log(`[Setup] Pet brain storage: ${config.petBrainStoragePath}`);
   }
 
   // --- Bootstrap lifecycle ---
@@ -370,6 +472,13 @@ async function main(): Promise<void> {
         channelCount,
       }),
       ...(tee && { tee }),
+      ...(config.petDvmEnabled && {
+        petDvm: {
+          enabled: true,
+          brainStoragePath: config.petBrainStoragePath,
+          proofBatchSize: config.petProofBatchSize,
+        },
+      }),
     });
   });
 
@@ -438,6 +547,75 @@ async function main(): Promise<void> {
       console.log('[Bootstrap] Published own ILP info to local relay');
     } catch (error) {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
+    }
+
+    // Publish kind:10035 service discovery event to local relay.
+    // Advertises pricing, supported kinds, and DVM capabilities (e.g., Arweave blob storage).
+    try {
+      const supportedKinds = [1, ILP_PEER_INFO_KIND, 10035, 10036];
+      const capabilities: string[] = ['relay'];
+
+      // If Arweave DVM is enabled, advertise kind:5094 and DVM capability
+      if (config.ardriveEnabled) {
+        supportedKinds.push(BLOB_STORAGE_REQUEST_KIND);
+        capabilities.push('dvm', 'arweave-storage');
+      }
+
+      // If Pet DVM is enabled, advertise kind:5900 and pet-dvm capability
+      if (config.petDvmEnabled) {
+        supportedKinds.push(PET_INTERACTION_REQUEST_KIND);
+        capabilities.push('pet-dvm');
+      }
+
+      const serviceDiscoveryContent: Record<string, unknown> = {
+        serviceType: 'relay',
+        ilpAddress: config.ilpAddress,
+        pricing: {
+          basePricePerByte: Number(config.basePricePerByte),
+          currency: 'USDC',
+        },
+        supportedKinds,
+        capabilities,
+        chain: config.settlementInfo?.supportedChains?.[0] ?? 'anvil',
+        version: '3.0.0',
+      };
+
+      // Add DVM skill descriptor when Arweave is enabled
+      if (config.ardriveEnabled) {
+        serviceDiscoveryContent['skill'] = {
+          name: 'arweave-storage',
+          version: '1.0',
+          kinds: [BLOB_STORAGE_REQUEST_KIND],
+          features: ['blob-storage', 'chunked-upload'],
+          inputSchema: {},
+          pricing: {
+            [String(BLOB_STORAGE_REQUEST_KIND)]: String(config.basePricePerByte),
+          },
+        };
+      }
+
+      // Add Pet DVM skill descriptor (separate field for backward compatibility)
+      if (config.petDvmEnabled) {
+        serviceDiscoveryContent['petSkill'] = {
+          name: 'pet-dvm',
+          version: '0.1',
+          kinds: [PET_INTERACTION_REQUEST_KIND],
+          features: ['pet-interaction', 'proof-queue'],
+          inputSchema: {},
+          pricing: {
+            [String(PET_INTERACTION_REQUEST_KIND)]: String(config.basePricePerByte),
+          },
+        };
+      }
+
+      const serviceDiscoveryEvent = buildServiceDiscoveryEvent(
+        serviceDiscoveryContent as Parameters<typeof buildServiceDiscoveryEvent>[0],
+        config.secretKey,
+      );
+      eventStore.store(serviceDiscoveryEvent);
+      console.log('[Bootstrap] Published kind:10035 service discovery to local relay');
+    } catch (error) {
+      console.warn('[Bootstrap] Failed to publish service discovery:', error);
     }
 
     // Publish kind:10033 TEE attestation event if TEE is enabled.

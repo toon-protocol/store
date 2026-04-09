@@ -45,6 +45,9 @@ describe('parseConfig', () => {
     'TOON_CHAIN',
     'TOON_RPC_URL',
     'TOON_TOKEN_NETWORK',
+    'PET_DVM_ENABLED',
+    'PET_BRAIN_STORAGE_PATH',
+    'PET_PROOF_BATCH_SIZE',
   ];
 
   beforeEach(() => {
@@ -73,6 +76,7 @@ describe('parseConfig', () => {
 
     expect(config.nodeId).toBe('test-node');
     expect(config.ilpAddress).toBe('g.test');
+    // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- test fixture, Docker-internal BTP endpoint
     expect(config.btpEndpoint).toBe('ws://test-node:3000');
     expect(config.blsPort).toBe(3100);
     expect(config.wsPort).toBe(7100);
@@ -115,6 +119,7 @@ describe('parseConfig', () => {
         pubkey: 'b'.repeat(64),
         relayUrl: 'wss://relay.example.com',
         ilpAddress: 'g.peer1',
+        // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- test fixture, Docker-internal BTP endpoint
         btpEndpoint: 'ws://peer1:3000',
       },
     ]);
@@ -145,6 +150,7 @@ describe('parseConfig', () => {
   it('throws when NOSTR_SECRET_KEY is invalid', () => {
     process.env['NODE_ID'] = 'test-node';
     process.env['ILP_ADDRESS'] = 'g.test';
+    // nosemgrep: ajinabraham.njsscan.generic.hardcoded_secrets.node_secret -- intentionally invalid test fixture to verify parser rejection
     process.env['NOSTR_SECRET_KEY'] = 'too-short';
 
     expect(() => parseConfig()).toThrow(
@@ -469,6 +475,7 @@ describe('createConnectorAdminClient', () => {
     const client = createConnectorAdminClient(adminUrl);
     const peerConfig = {
       id: 'nostr-aabb11cc22dd33ee',
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- test fixture, Docker-internal BTP endpoint
       url: 'ws://peer1:3000',
       authToken: 'token123',
       routes: [{ prefix: 'g.peer1', priority: 100 }],
@@ -497,6 +504,7 @@ describe('createConnectorAdminClient', () => {
     const client = createConnectorAdminClient(adminUrl);
 
     await expect(
+      // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket -- test fixture, mock BTP endpoint
       client.addPeer({ id: 'test', url: 'ws://x', authToken: 'tok' })
     ).rejects.toThrow('Failed to add peer: 500 Internal Server Error');
   });
