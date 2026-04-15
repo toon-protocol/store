@@ -188,7 +188,7 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
 # Install ethers + express (dynamically required by connector) and @ardrive/turbo-sdk
 # (lazy-imported by Arweave DVM handler) with all transitive deps.
 # Copy entire npm flat node_modules — more robust than cherry-picking individual packages.
-RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive/turbo-sdk && \
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive/turbo-sdk o1js@2 rot-js@2 && \
     cp -r /tmp/node_modules/* /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
@@ -216,13 +216,9 @@ RUN mkdir -p /runtime/node_modules/@toon-protocol/memvid-node \
     cp -r packages/pet-dvm/dist packages/pet-dvm/package.json \
           /runtime/node_modules/@toon-protocol/pet-dvm/
 
-# Transitive runtime deps of the @toon-protocol/* packages (resolved from pnpm store):
-#   rot-js — required by pet-dvm
-#   o1js   — required by pet-circuit
-RUN ROT_DIR=$(ls -d node_modules/.pnpm/rot-js@*/node_modules/rot-js) && \
-    O1JS_DIR=$(ls -d node_modules/.pnpm/o1js@*/node_modules/o1js) && \
-    cp -rL "$ROT_DIR" /runtime/node_modules/ && \
-    cp -rL "$O1JS_DIR" /runtime/node_modules/
+# NOTE: o1js + rot-js are installed flat above via npm in /tmp so that
+# their transitive deps (e.g., o1js → cachedir) are also resolved.
+# Cherry-picking from the pnpm store would miss those transitives.
 
 # -- Stage 2: Runtime (SDK E2E variant — no supervisord, no attestation) -----
 FROM node:20-alpine
