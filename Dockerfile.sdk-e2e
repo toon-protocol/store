@@ -34,7 +34,35 @@
 # so the runtime surface consumed by packages/sdk/tests/e2e/docker-*.test.ts
 # is unchanged.
 
-# -- Stage 1: Builder --------------------------------------------------------
+# -- Stage 1a: Rust builder (memvid-node napi addon) -------------------------
+# Builds `packages/memvid-node` into a Linux musl .node file so pet-dvm's
+# static `import { PetBrain } from '@toon-protocol/memvid-node'` resolves
+# at runtime. Requires the `memvid` sibling repo via BuildKit named build
+# context (`--build-context memvid=../memvid`).
+FROM rust:1.88-alpine AS rust-builder
+
+RUN apk add --no-cache musl-dev nodejs npm git
+
+WORKDIR /build
+
+# Sibling Rust crate (path dep: `memvid-core = { path = "../../../memvid" }`)
+# Resolution: /build/packages/memvid-node/Cargo.toml → ../../../memvid = /memvid
+COPY --from=memvid . /memvid
+
+# napi-rs CLI
+RUN npm install -g @napi-rs/cli@2
+
+# Workspace manifests + memvid-node source
+COPY packages/memvid-node /build/packages/memvid-node
+
+WORKDIR /build/packages/memvid-node
+
+# napi build: produces memvid-node.linux-<arch>-musl.node + index.cjs/esm
+RUN napi build --platform --release && \
+    mv index.js index.cjs && \
+    cp index.esm.js index.js
+
+# -- Stage 1b: Builder -------------------------------------------------------
 FROM node:20-alpine AS builder
 
 # Install build dependencies for native modules
@@ -90,6 +118,11 @@ COPY packages/town/ ./packages/town/
 COPY packages/pet-dvm/ ./packages/pet-dvm/
 COPY packages/pet-circuit/ ./packages/pet-circuit/
 COPY packages/memvid-node/ ./packages/memvid-node/
+# Overlay the Linux musl .node artifact + generated index.{js,cjs} from
+# rust-builder, so `import '@toon-protocol/memvid-node'` resolves at runtime.
+COPY --from=rust-builder /build/packages/memvid-node/memvid-node.linux-arm64-musl.node ./packages/memvid-node/
+COPY --from=rust-builder /build/packages/memvid-node/index.js ./packages/memvid-node/
+COPY --from=rust-builder /build/packages/memvid-node/index.cjs ./packages/memvid-node/
 COPY docker/ ./docker/
 
 # Build workspace packages (skip client — browser-only, not used at runtime;
@@ -105,8 +138,6 @@ COPY docker/ ./docker/
 RUN pnpm -r \
       --filter '!@toon-protocol/client' \
       --filter '!@toon-protocol/memvid-node' \
-      --filter '!@toon-protocol/pet-dvm' \
-      --filter '!@toon-protocol/pet-circuit' \
       build && \
     cd docker && \
     pnpm exec esbuild src/entrypoint-sdk.ts \
@@ -164,6 +195,34 @@ RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive
     find /runtime/node_modules -name '*.js.map' -delete && \
     find /runtime/node_modules -name '*.d.mts' -delete && \
     rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+
+# Stage @toon-protocol workspace packages imported by entrypoint-sdk at runtime:
+#   memvid-node (native addon, built in rust-builder stage)
+#   pet-circuit (tsc-built, depends on o1js)
+#   pet-dvm (tsc-built, depends on memvid-node + pet-circuit + rot-js)
+# The esbuild step keeps these --external, so Node must resolve them from
+# /app/node_modules/@toon-protocol/* at runtime.
+RUN mkdir -p /runtime/node_modules/@toon-protocol/memvid-node \
+             /runtime/node_modules/@toon-protocol/pet-circuit \
+             /runtime/node_modules/@toon-protocol/pet-dvm && \
+    cp packages/memvid-node/package.json \
+       packages/memvid-node/index.js \
+       packages/memvid-node/index.cjs \
+       packages/memvid-node/index.d.ts \
+       packages/memvid-node/memvid-node.linux-arm64-musl.node \
+       /runtime/node_modules/@toon-protocol/memvid-node/ && \
+    cp -r packages/pet-circuit/dist packages/pet-circuit/package.json \
+          /runtime/node_modules/@toon-protocol/pet-circuit/ && \
+    cp -r packages/pet-dvm/dist packages/pet-dvm/package.json \
+          /runtime/node_modules/@toon-protocol/pet-dvm/
+
+# Transitive runtime deps of the @toon-protocol/* packages (resolved from pnpm store):
+#   rot-js — required by pet-dvm
+#   o1js   — required by pet-circuit
+RUN ROT_DIR=$(ls -d node_modules/.pnpm/rot-js@*/node_modules/rot-js) && \
+    O1JS_DIR=$(ls -d node_modules/.pnpm/o1js@*/node_modules/o1js) && \
+    cp -rL "$ROT_DIR" /runtime/node_modules/ && \
+    cp -rL "$O1JS_DIR" /runtime/node_modules/
 
 # -- Stage 2: Runtime (SDK E2E variant — no supervisord, no attestation) -----
 FROM node:20-alpine
