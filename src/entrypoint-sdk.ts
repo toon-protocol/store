@@ -17,7 +17,12 @@
 
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
-import { createNode, type ServiceNode } from '@toon-protocol/sdk';
+import {
+  createNode,
+  createSwapHandler,
+  base58Encode,
+  type ServiceNode,
+} from '@toon-protocol/sdk';
 import { createEventStorageHandler } from '@toon-protocol/town';
 import {
   BootstrapService,
@@ -36,6 +41,8 @@ import type {
   BootstrapEvent,
   IlpPeerInfo,
   EmbeddableConnectorLike,
+  SwapPair,
+  ChainProviderConfigEntry,
 } from '@toon-protocol/core';
 import {
   encodeEventToToon,
@@ -49,6 +56,19 @@ import {
   ChunkManager,
 } from '@toon-protocol/sdk';
 import { createPetDvmHandler } from '@toon-protocol/pet-dvm';
+import {
+  deriveMillKeys,
+  MillInventory,
+  MillChannelState,
+  MultiChainClaimIssuer,
+  EvmPaymentChannelSigner,
+  SolanaPaymentChannelSigner,
+  MinaPaymentChannelSigner,
+} from '@toon-protocol/mill';
+import type {
+  PaymentChannelSigner,
+  MillChainKind,
+} from '@toon-protocol/mill';
 import { mkdirSync } from 'node:fs';
 import { parseConfig } from './shared.js';
 
@@ -69,6 +89,9 @@ interface ConnectorEnv {
   minaKeyId: string | undefined;
   // NIP-59 env vars
   nip59Enabled: boolean;
+  // Mill swap handler env vars
+  millEnabled: boolean;
+  millMnemonic: string | undefined;
 }
 
 function parseConnectorEnv(): ConnectorEnv {
@@ -89,6 +112,9 @@ function parseConnectorEnv(): ConnectorEnv {
     minaKeyId: env['MINA_KEY_ID'] || undefined,
     // NIP-59
     nip59Enabled: env['NIP59_ENABLED'] === 'true',
+    // Mill swap handler
+    millEnabled: env['MILL_ENABLED'] === 'true',
+    millMnemonic: env['MILL_MNEMONIC'] || undefined,
   };
 }
 
@@ -98,8 +124,8 @@ function parseConnectorEnv(): ConnectorEnv {
  */
 function buildChainProviders(
   connectorEnv: ConnectorEnv
-): Record<string, unknown>[] | undefined {
-  const providers: Record<string, unknown>[] = [];
+): ChainProviderConfigEntry[] | undefined {
+  const providers: ChainProviderConfigEntry[] = [];
 
   // EVM provider from existing settlement env vars
   if (connectorEnv.settlementRpcUrl && connectorEnv.settlementRegistryAddress) {
@@ -108,6 +134,8 @@ function buildChainProviders(
       chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
       rpcUrl: connectorEnv.settlementRpcUrl,
       registryAddress: connectorEnv.settlementRegistryAddress,
+      tokenAddress: connectorEnv.settlementTokenAddress ?? '',
+      privateKey: connectorEnv.settlementPrivateKey,
       keyId: 'evm-settlement',
     });
   }
@@ -204,22 +232,25 @@ async function main(): Promise<void> {
       peers: [],
       routes: [],
       localDelivery: { enabled: false },
-      // Multi-chain: use chainProviders when available
-      ...(hasChainProviders && { chainProviders }),
-      // Legacy: fall back to settlementInfra when chainProviders absent
-      ...(!hasChainProviders &&
-        connectorEnv.settlementRpcUrl && {
-          settlementInfra: {
-            enabled: true,
-            rpcUrl: connectorEnv.settlementRpcUrl,
-            registryAddress: connectorEnv.settlementRegistryAddress,
-            tokenAddress: connectorEnv.settlementTokenAddress,
-            privateKey: connectorEnv.settlementPrivateKey,
-            ...(connectorEnv.settlementThreshold && {
-              threshold: connectorEnv.settlementThreshold,
-            }),
-          },
-        }),
+      // Multi-chain: chainProviders carry per-chain settlement config (v2.3.0+).
+      // When env vars are set but no explicit chainProviders, build from env.
+      ...(hasChainProviders
+        ? { chainProviders }
+        : connectorEnv.settlementRpcUrl && connectorEnv.settlementRegistryAddress
+          ? {
+              chainProviders: [
+                {
+                  chainType: 'evm' as const,
+                  chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
+                  rpcUrl: connectorEnv.settlementRpcUrl,
+                  registryAddress: connectorEnv.settlementRegistryAddress,
+                  tokenAddress: connectorEnv.settlementTokenAddress ?? '',
+                  privateKey: connectorEnv.settlementPrivateKey,
+                  keyId: 'evm-settlement',
+                },
+              ],
+            }
+          : {}),
       // NIP-59 transport privacy
       ...(connectorEnv.nip59Enabled && { nip59: { enabled: true } }),
     },
@@ -340,6 +371,132 @@ async function main(): Promise<void> {
     node.on(PET_INTERACTION_REQUEST_KIND, petDvmHandler as any);
     console.log('[Setup] Pet DVM handler registered for kind:5900');
     console.log(`[Setup] Pet brain storage: ${config.petBrainStoragePath}`);
+  }
+
+  // --- Mill swap handler (kind:1059 gift-wrapped swap packets) ---
+  // Story 12.10: Wire swap handler support when MILL_ENABLED=true and
+  // MILL_MNEMONIC is set. This enables Docker peers to act as Mills,
+  // processing NIP-59 gift-wrapped swap requests and issuing signed
+  // payment-channel claims. References packages/mill/src/mill.ts
+  // startMill() for the wiring pattern.
+  let millSwapPairs: SwapPair[] | undefined;
+  if (connectorEnv.millEnabled && connectorEnv.millMnemonic) {
+    try {
+      // 1. Parse supported chains from settlement info
+      const supportedChains = config.settlementInfo?.supportedChains ?? [];
+      if (supportedChains.length === 0) {
+        console.warn('[Mill] MILL_ENABLED=true but no SUPPORTED_CHAINS configured; skipping swap handler');
+      } else {
+        // 2. Determine chain families needed for key derivation
+        const chainFamilies = new Set<MillChainKind>();
+        for (const chain of supportedChains) {
+          if (chain.startsWith('evm:')) chainFamilies.add('evm');
+          else if (chain.startsWith('solana:')) chainFamilies.add('solana');
+          else if (chain.startsWith('mina:')) chainFamilies.add('mina');
+        }
+
+        // 3. Derive Mill keys via BIP-44 (same pattern as startMill())
+        const millKeys = await deriveMillKeys({
+          mnemonic: connectorEnv.millMnemonic,
+          chains: [...chainFamilies],
+        });
+        console.log(`[Mill] Derived keys for chain families: ${[...chainFamilies].join(', ')}`);
+
+        // 4. Build swap pairs — all permutations of supported chains (1:1 rate)
+        millSwapPairs = [];
+        for (const fromChain of supportedChains) {
+          for (const toChain of supportedChains) {
+            millSwapPairs.push({
+              from: { assetCode: config.assetCode, assetScale: config.assetScale, chain: fromChain },
+              to: { assetCode: config.assetCode, assetScale: config.assetScale, chain: toChain },
+              rate: '1',
+            });
+          }
+        }
+
+        // 5. Build payment-channel signers per chain family (shared across chains
+        //    of the same family, per startMill() AC-4 phase 4 pattern)
+        const signers: Record<string, PaymentChannelSigner> = {};
+        const signerAddresses: Record<string, string> = {};
+        let sharedEvmSigner: EvmPaymentChannelSigner | undefined;
+        let sharedSolanaSigner: SolanaPaymentChannelSigner | undefined;
+        let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
+
+        for (const chain of supportedChains) {
+          if (chain.startsWith('evm:') && millKeys.evm) {
+            sharedEvmSigner ??= new EvmPaymentChannelSigner({
+              chain,
+              privateKey: millKeys.evm.privateKey,
+            });
+            signers[chain] = sharedEvmSigner;
+            signerAddresses[chain] = millKeys.evm.address.toLowerCase();
+          } else if (chain.startsWith('solana:') && millKeys.solana) {
+            sharedSolanaSigner ??= new SolanaPaymentChannelSigner({
+              chain,
+              privateKey: millKeys.solana.privateKey,
+            });
+            signers[chain] = sharedSolanaSigner;
+            signerAddresses[chain] = base58Encode(millKeys.solana.publicKey);
+          } else if (chain.startsWith('mina:') && millKeys.mina) {
+            sharedMinaSigner ??= new MinaPaymentChannelSigner({
+              chain,
+              privateKey: millKeys.mina.privateKey,
+              publicKey: millKeys.mina.publicKey,
+            });
+            signers[chain] = sharedMinaSigner;
+            signerAddresses[chain] = millKeys.mina.publicKey;
+          }
+        }
+
+        // 6. Initialize inventory (bootstrap with zero balance — E2E tests
+        //    fund channels explicitly)
+        const inventoryInit: Record<string, { available: bigint; total: bigint }> = {};
+        for (const pair of millSwapPairs) {
+          const key = `${pair.to.assetCode}:${pair.to.chain}`;
+          if (!inventoryInit[key]) {
+            inventoryInit[key] = { available: 1_000_000_000n, total: 1_000_000_000n };
+          }
+        }
+        const inventory = new MillInventory({ balances: inventoryInit });
+
+        // 7. Initialize channel state (empty — channels are established dynamically)
+        const channelState = new MillChannelState({
+          channels: {},
+          logger: { warn: console.warn },
+        });
+
+        // 8. Create MultiChainClaimIssuer
+        const claimIssuer = new MultiChainClaimIssuer({
+          inventory,
+          signers,
+          channelState,
+          signerAddresses,
+          logger: {
+            debug: console.debug,
+            info: console.info,
+            warn: console.warn,
+            error: console.error,
+          },
+        });
+
+        // 9. Create swap handler and register on kind:1059 (NIP-59 gift-wrap)
+        const swapHandler = createSwapHandler({
+          recipientSecretKey: config.secretKey,
+          swapPairs: millSwapPairs,
+          claimIssuer,
+          logger: {
+            debug: console.debug,
+            info: console.info,
+            warn: console.warn,
+            error: console.error,
+          },
+        });
+        node.on(1059, swapHandler);
+        console.log(`[Mill] Swap handler registered for kind:1059 (${millSwapPairs.length} swap pairs across ${supportedChains.length} chains)`);
+      }
+    } catch (error) {
+      console.error('[Mill] Failed to initialize swap handler:', error);
+    }
   }
 
   // --- Bootstrap lifecycle ---
@@ -538,6 +695,10 @@ async function main(): Promise<void> {
       ...(config.settlementInfo?.tokenNetworks && {
         tokenNetworks: config.settlementInfo.tokenNetworks,
       }),
+      // Story 12.10: include swap pairs in kind:10032 announcement when Mill is enabled
+      ...(millSwapPairs && millSwapPairs.length > 0 && {
+        swapPairs: millSwapPairs,
+      }),
     };
 
     // Publish own ILP info to local relay
@@ -545,6 +706,9 @@ async function main(): Promise<void> {
       const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
       eventStore.store(ilpInfoEvent);
       console.log('[Bootstrap] Published own ILP info to local relay');
+      if (millSwapPairs && millSwapPairs.length > 0) {
+        console.log(`[Bootstrap] kind:10032 includes ${millSwapPairs.length} swap pairs`);
+      }
     } catch (error) {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
     }
@@ -609,7 +773,7 @@ async function main(): Promise<void> {
       }
 
       const serviceDiscoveryEvent = buildServiceDiscoveryEvent(
-        serviceDiscoveryContent as Parameters<typeof buildServiceDiscoveryEvent>[0],
+        serviceDiscoveryContent as unknown as Parameters<typeof buildServiceDiscoveryEvent>[0],
         config.secretKey,
       );
       eventStore.store(serviceDiscoveryEvent);
