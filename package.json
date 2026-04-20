@@ -16,6 +16,7 @@
     "@toon-protocol/bls": "workspace:*",
     "@toon-protocol/connector": "^2.3.0",
     "@toon-protocol/core": "workspace:*",
+    "@toon-protocol/mill": "workspace:*",
     "@toon-protocol/pet-dvm": "workspace:*",
     "@toon-protocol/relay": "workspace:*",
     "@toon-protocol/sdk": "workspace:*",
