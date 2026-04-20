@@ -204,22 +204,24 @@ async function main(): Promise<void> {
       peers: [],
       routes: [],
       localDelivery: { enabled: false },
-      // Multi-chain: use chainProviders when available
-      ...(hasChainProviders && { chainProviders }),
-      // Legacy: fall back to settlementInfra when chainProviders absent
-      ...(!hasChainProviders &&
-        connectorEnv.settlementRpcUrl && {
-          settlementInfra: {
-            enabled: true,
-            rpcUrl: connectorEnv.settlementRpcUrl,
-            registryAddress: connectorEnv.settlementRegistryAddress,
-            tokenAddress: connectorEnv.settlementTokenAddress,
-            privateKey: connectorEnv.settlementPrivateKey,
-            ...(connectorEnv.settlementThreshold && {
-              threshold: connectorEnv.settlementThreshold,
-            }),
-          },
-        }),
+      // Multi-chain: chainProviders carry per-chain settlement config (v2.3.0+).
+      // When env vars are set but no explicit chainProviders, build from env.
+      ...(hasChainProviders
+        ? { chainProviders }
+        : connectorEnv.settlementRpcUrl
+          ? {
+              chainProviders: [
+                {
+                  chainType: 'evm' as const,
+                  chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
+                  rpcUrl: connectorEnv.settlementRpcUrl,
+                  registryAddress: connectorEnv.settlementRegistryAddress,
+                  tokenAddress: connectorEnv.settlementTokenAddress,
+                  privateKey: connectorEnv.settlementPrivateKey,
+                },
+              ],
+            }
+          : {}),
       // NIP-59 transport privacy
       ...(connectorEnv.nip59Enabled && { nip59: { enabled: true } }),
     },

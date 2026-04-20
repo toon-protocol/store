@@ -39,7 +39,7 @@
 # static `import { PetBrain } from '@toon-protocol/memvid-node'` resolves
 # at runtime. Requires the `memvid` sibling repo via BuildKit named build
 # context (`--build-context memvid=../memvid`).
-FROM rust:1.88-alpine AS rust-builder
+FROM rust:alpine AS rust-builder
 
 RUN apk add --no-cache musl-dev nodejs npm git
 
