@@ -108,6 +108,8 @@ function buildChainProviders(
       chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
       rpcUrl: connectorEnv.settlementRpcUrl,
       registryAddress: connectorEnv.settlementRegistryAddress,
+      tokenAddress: connectorEnv.settlementTokenAddress,
+      privateKey: connectorEnv.settlementPrivateKey,
       keyId: 'evm-settlement',
     });
   }
