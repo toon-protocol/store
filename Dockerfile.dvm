@@ -1,0 +1,147 @@
+# TOON DVM Node Container (esbuild-bundled Multi-Stage Build)
+#
+# Purpose:
+#   Production-grade DVM compute-node container for Townhouse orchestration.
+#   Runs Arweave blob storage DVM (kind:5094) and Dungeon run DVM (kind:5250).
+#
+# Consumers:
+#   - `docker-compose-townhouse.yml` — dvm service references `image: toon:dvm`
+#   - `packages/townhouse` DockerOrchestrator — builds and runs this image
+#
+# Build from repo root:
+#   docker build -f docker/Dockerfile.dvm -t toon:dvm .
+#
+# Pattern follows docker/Dockerfile.mill (multi-stage, esbuild, native modules, non-root).
+# Key differences: standalone HTTP mode on port 3300 (vs embedded BTP on 3000).
+
+# Metadata
+LABEL maintainer="toon-protocol"
+LABEL version="1.0.0"
+LABEL description="TOON DVM Node - Compute-for-hire (Arweave storage + Dungeon runs)"
+
+# -- Stage 1: Builder -------------------------------------------------------
+FROM node:20-alpine AS builder
+
+# Install build dependencies for native modules
+RUN apk add --no-cache python3 py3-setuptools make g++
+
+# Install pnpm (pinned for deterministic builds)
+RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+
+WORKDIR /app
+
+# Copy dependency manifests for installation
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY patches/ ./patches/
+COPY packages/bls/package.json ./packages/bls/
+COPY packages/core/package.json ./packages/core/
+COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/arweave/package.json ./packages/arweave/
+COPY packages/pet-dvm/package.json ./packages/pet-dvm/
+COPY packages/memvid-node/package.json ./packages/memvid-node/
+COPY packages/pet-circuit/package.json ./packages/pet-circuit/
+COPY docker/package.json ./docker/
+
+# Install all dependencies (including devDependencies needed for build)
+RUN pnpm install --frozen-lockfile
+
+# Copy source code (only packages needed for DVM)
+COPY tsconfig.json ./
+COPY packages/bls/ ./packages/bls/
+COPY packages/core/ ./packages/core/
+COPY packages/sdk/ ./packages/sdk/
+COPY packages/arweave/ ./packages/arweave/
+COPY packages/pet-dvm/ ./packages/pet-dvm/
+COPY packages/memvid-node/ ./packages/memvid-node/
+COPY packages/pet-circuit/ ./packages/pet-circuit/
+COPY docker/ ./docker/
+
+# Build workspace packages needed by DVM, then bundle the entrypoint.
+# Dependency chain: core -> sdk -> bls -> arweave -> pet-dvm -> memvid-node -> pet-circuit
+# Invokes esbuild directly with entrypoint-dvm.ts as the single entry point.
+RUN pnpm -r \
+      --filter '@toon-protocol/core' \
+      --filter '@toon-protocol/sdk' \
+      --filter '@toon-protocol/bls' \
+      --filter '@toon-protocol/arweave' \
+      --filter '@toon-protocol/pet-dvm' \
+      --filter '@toon-protocol/memvid-node' \
+      --filter '@toon-protocol/pet-circuit' \
+      build && \
+    cd docker && \
+    pnpm exec esbuild src/entrypoint-dvm.ts \
+      --bundle \
+      --platform=node \
+      --target=node20 \
+      --format=esm \
+      --minify \
+      --outfile=dist/entrypoint-dvm.js \
+      --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
+      --external:better-sqlite3 \
+      --external:ethers \
+      --external:express \
+      --external:mina-signer \
+      --external:o1js \
+      --external:@solana/kit \
+      --external:@solana-program/token \
+      --external:@toon-protocol/mina-zkapp \
+      --external:@ardrive/turbo-sdk
+
+# -- Assemble minimal runtime directory --------------------------------------
+RUN mkdir -p /runtime/node_modules
+
+# Copy esbuild bundle
+RUN cp docker/dist/entrypoint-dvm.js /runtime/
+
+# ESM package.json (bundle uses import.meta.url via banner)
+RUN echo '{"type":"module"}' > /runtime/package.json
+
+# Cherry-pick better-sqlite3 (native module) + its runtime deps (bindings, file-uri-to-path)
+RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3) && \
+    BINDINGS_DIR=$(ls -d node_modules/.pnpm/bindings@*/node_modules/bindings) && \
+    FUTP_DIR=$(ls -d node_modules/.pnpm/file-uri-to-path@*/node_modules/file-uri-to-path) && \
+    mkdir -p /runtime/node_modules/better-sqlite3/build/Release && \
+    cp -r "$SQLITE_DIR/lib" /runtime/node_modules/better-sqlite3/ && \
+    cp "$SQLITE_DIR/build/Release/better_sqlite3.node" \
+       /runtime/node_modules/better-sqlite3/build/Release/ || { echo 'ERROR: better-sqlite3.node not found'; exit 1; } && \
+    cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/ && \
+    cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
+    cp -r "$FUTP_DIR" /runtime/node_modules/ || { echo 'ERROR: Failed to copy native module deps'; exit 1; }
+
+# -- Stage 2: Runtime --------------------------------------------------------
+FROM node:20-alpine
+
+# Install runtime deps for native modules ONLY.
+RUN apk add --no-cache libstdc++
+
+WORKDIR /app
+
+# Create non-root user for security BEFORE copying files.
+RUN addgroup -g 1001 toon && \
+    adduser -D -u 1001 -G toon toon && \
+    mkdir -p /data && \
+    chown toon:toon /data
+
+# Copy minimal runtime from builder stage
+COPY --from=builder --chown=toon:toon /runtime ./
+
+# Environment variables (with defaults)
+ENV NODE_ENV=production
+ENV BLS_PORT=3400
+ENV HANDLER_PORT=3300
+
+# Expose ports:
+#   3300 - HTTP ILP handler (standalone mode: connector sends HTTP POST)
+#   3400 - BLS HTTP API (health endpoint)
+EXPOSE 3300 3400
+
+# Volume for persistent data (pet state SQLite database)
+VOLUME /data
+
+# Health check targets BLS port (3400)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
+
+# Run as non-root user
+USER toon
+CMD ["node", "/app/entrypoint-dvm.js"]
