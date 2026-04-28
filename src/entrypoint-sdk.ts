@@ -15,6 +15,7 @@
  * - SETTLEMENT_TOKEN_ADDRESS: ERC-20 token contract address
  */
 
+import { createHash } from 'node:crypto';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import {
@@ -27,6 +28,8 @@ import { createEventStorageHandler } from '@toon-protocol/town';
 import {
   BootstrapService,
   createDiscoveryTracker,
+  createDirectIlpClient,
+  createDirectConnectorAdmin,
   SocialPeerDiscovery,
   buildIlpPeerInfoEvent,
   buildServiceDiscoveryEvent,
@@ -49,6 +52,7 @@ import {
 } from '@toon-protocol/core/toon';
 import { SqliteEventStore, NostrRelayServer } from '@toon-protocol/relay';
 import { ConnectorNode, createLogger } from '@toon-protocol/connector';
+import type { ConnectorConfig } from '@toon-protocol/connector';
 import {
   createArweaveDvmHandler,
   TurboUploadAdapter,
@@ -67,7 +71,6 @@ import type {
   PaymentChannelSigner,
   MillChainKind,
 } from '@toon-protocol/mill';
-import { mkdirSync } from 'node:fs';
 import { parseConfig } from './shared.js';
 
 // ---------- Connector Config from Env ----------
@@ -230,9 +233,9 @@ function parseBtpPeers() {
               id: peer['id'] as string,
               url: peer['url'] as string,
               authToken: (peer['authToken'] as string) ?? '',
-              ...(peer['evmAddress'] && { evmAddress: peer['evmAddress'] as string }),
-              ...(peer['chain'] && { chain: peer['chain'] as string }),
-              ...(peer['nip59PublicKey'] && { nip59PublicKey: peer['nip59PublicKey'] as string }),
+              ...(peer['evmAddress'] ? { evmAddress: peer['evmAddress'] as string } : {}),
+              ...(peer['chain'] ? { chain: peer['chain'] as string } : {}),
+              ...(peer['nip59PublicKey'] ? { nip59PublicKey: peer['nip59PublicKey'] as string } : {}),
             });
           }
         }
@@ -322,6 +325,12 @@ async function main(): Promise<void> {
       peers: btpPeers,
       routes: btpRoutes,
       localDelivery: { enabled: false },
+      // E2E: disable connector forwarding fee so the full payment amount
+      // reaches the destination relay. Prevents F99 Insufficient Payment
+      // rejections caused by intermediary connector fee deduction.
+      settlement: { connectorFeePercentage: 0 } as unknown as NonNullable<
+        ConnectorConfig['settlement']
+      >,
       // Multi-chain: chainProviders carry per-chain settlement config (v2.3.0+).
       // When env vars are set but no explicit chainProviders, build from env.
       ...(hasChainProviders
@@ -373,9 +382,12 @@ async function main(): Promise<void> {
     basePricePerByte: config.basePricePerByte,
     toonEncoder: encodeEventToToon,
     toonDecoder: decodeEventFromToon,
-    knownPeers,
     settlementInfo: config.settlementInfo,
     ardriveEnabled: config.ardriveEnabled,
+    // Omit knownPeers — the external BootstrapService handles bootstrap after
+    // node.start() with a wrapped admin client that reuses constructor peerIds.
+    // This prevents createToonNode's internal BootstrapService from overwriting
+    // constructor-configured peer routes with nostr-... generated IDs.
   });
 
   // Create a shared discovery tracker for auto-registration of kind:10032 peers
@@ -384,18 +396,85 @@ async function main(): Promise<void> {
     settlementInfo: config.settlementInfo,
   });
 
+  // Track discovered peerId -> constructor peerId mappings so that removePeer
+  // can resolve back to the constructor peerId if we reused one.
+  const discoveredToConstructorPeerId = new Map<string, string>();
+
+  /**
+   * Check if a discovered peer matches a constructor-configured peer by URL
+   * (BTP endpoint) or route prefix. If so, return the constructor peerId
+   * so the connector reuses the existing peer registration and payment channel.
+   */
+  function resolveConstructorPeerId(
+    peerConfig: {
+      id: string;
+      url: string;
+      routes?: { prefix: string }[];
+      evmAddress?: string;
+    }
+  ): string | undefined {
+    // Match by URL (BTP endpoint)
+    const urlMatch = btpPeers.find((p) => p.url === peerConfig.url);
+    if (urlMatch) {
+      return urlMatch.id;
+    }
+
+    // Match by EVM address
+    if (peerConfig.evmAddress) {
+      const evmMatch = btpPeers.find(
+        (p) =>
+          p.evmAddress &&
+          p.evmAddress.toLowerCase() === peerConfig.evmAddress!.toLowerCase()
+      );
+      if (evmMatch) {
+        return evmMatch.id;
+      }
+    }
+
+    // Match by route prefix: if a discovered route prefix matches a
+    // constructor route, use the constructor route's nextHop as peerId.
+    if (peerConfig.routes) {
+      for (const route of peerConfig.routes) {
+        const routeMatch = btpRoutes.find((r) => r.prefix === route.prefix);
+        if (routeMatch) {
+          return routeMatch.nextHop;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
   // Wire connector as admin for the discovery tracker (auto-peering on discovery)
   // ConnectorNode.registerPeer() returns Promise<PeerInfo> but ConnectorAdminClient
   // expects Promise<void>, and settlement.preference types differ (string vs union),
   // so we cast and wrap with void returns.
   discoveryTracker.setConnectorAdmin({
     addPeer: async (peerConfig) => {
+      const constructorPeerId = resolveConstructorPeerId(
+        peerConfig as {
+          id: string;
+          url: string;
+          routes?: { prefix: string }[];
+          evmAddress?: string;
+        }
+      );
+      if (constructorPeerId) {
+        discoveredToConstructorPeerId.set(peerConfig.id, constructorPeerId);
+        console.log(
+          `[Discovery] Reusing constructor peerId '${constructorPeerId}' for discovered peer (was '${peerConfig.id}')`
+        );
+      }
       await connector.registerPeer(
-        peerConfig as Parameters<typeof connector.registerPeer>[0]
+        (constructorPeerId
+          ? { ...peerConfig, id: constructorPeerId }
+          : peerConfig) as Parameters<typeof connector.registerPeer>[0]
       );
     },
     removePeer: async (peerId) => {
-      await connector.removePeer(peerId);
+      const resolvedPeerId =
+        discoveredToConstructorPeerId.get(peerId) ?? peerId;
+      await connector.removePeer(resolvedPeerId);
     },
   });
 
@@ -566,6 +645,123 @@ async function main(): Promise<void> {
         });
         node.on(1059, swapHandler);
         console.log(`[Mill] Swap handler registered for kind:1059 (${millSwapPairs.length} swap pairs across ${supportedChains.length} chains)`);
+
+        // Story 12.10 — sync the connector's payment channels into the Mill's
+        // channel state so the swap handler can issue claims on dynamically
+        // established channels (sender opens channel via BTP claim handshake;
+        // Mill must learn about it before it can `reserve()`).
+        //
+        // We poll the connector's channelManager every 250ms during the test
+        // window — packets arrive within ~30ms of channel registration so
+        // longer intervals miss the initial PREPAREs. Sync is idempotent —
+        // `provisionChannel` no-ops if `(assetCode, chain, channelId)` is
+        // already tracked, so concurrent reserve()/poll() is safe.
+        //
+        // Chain-id mapping: the connector identifies EVM chains as
+        // `evm:${chainId}` (e.g. `evm:31337`) while swap pairs use the more
+        // specific `evm:${family}:${chainId}` (e.g. `evm:base:31337`). We
+        // register each connector channel under EVERY swap-pair chain string
+        // whose `evm:`-suffix matches — that way the swap handler's
+        // `(asset, chain, sender)` lookup hits regardless of which precise
+        // chain alias the streamSwap pair declared.
+        const swapPairChains = new Set<string>(supportedChains);
+        function mapConnectorChainToSwapChains(connectorChain: string): string[] {
+          if (swapPairChains.has(connectorChain)) return [connectorChain];
+          const matches: string[] = [];
+          for (const c of swapPairChains) {
+            // Match by trailing chain-id segment (e.g., 31337) and family
+            // prefix (e.g., 'evm:'). 'evm:31337' should match 'evm:base:31337'.
+            if (
+              connectorChain &&
+              c.split(':')[0] === connectorChain.split(':')[0] &&
+              c.endsWith(`:${connectorChain.split(':').pop()}`)
+            ) {
+              matches.push(c);
+            }
+          }
+          return matches;
+        }
+
+        const channelSyncInterval = setInterval(() => {
+          try {
+            const cm = (
+              connector as unknown as {
+                channelManager: { getAllChannels(): Array<{
+                  channelId: string;
+                  chain: string;
+                  status: string;
+                }> } | null;
+              }
+            ).channelManager;
+            if (!cm) return;
+            for (const meta of cm.getAllChannels()) {
+              if (meta.status !== 'open') continue;
+              const targetChains = mapConnectorChainToSwapChains(meta.chain);
+              for (const chain of targetChains) {
+                channelState.provisionChannel({
+                  assetCode: config.assetCode,
+                  chain,
+                  channelId: meta.channelId,
+                });
+              }
+            }
+          } catch (err) {
+            console.warn('[Mill] channel-sync error:', err instanceof Error ? err.message : err);
+          }
+        }, 250);
+        // Best-effort: do not block shutdown on the interval; node will exit
+        // when the BLS server closes regardless.
+        channelSyncInterval.unref?.();
+
+        // Story 12.10 AC-7 — seed synthetic outbound Solana channels into
+        // Mill's channel state. Unlike EVM (where the connector's
+        // channelManager tracks channels established via BTP claim handshake),
+        // outbound Solana channels are not auto-discovered by the connector
+        // in the SDK E2E topology — there's no real cross-chain settlement
+        // path between peer1 and an arbitrary Solana recipient. Without a
+        // provisioned channel, the swap handler hits MillChannelState.reserve()
+        // for `solana:devnet` and throws UNSUPPORTED_CHAIN.
+        //
+        // The synthetic channelId is the Mill's Solana public key encoded as
+        // base58 — it decodes to exactly 32 bytes, which buildSettlementTx()
+        // requires (`Solana channelId must decode to 32 bytes`). Real Solana
+        // channels would derive a PDA via [b"channel", min, max, mint], but
+        // the E2E settlement-bundle test runs with `verifySignatures: false`
+        // so the synthetic ID flows through without on-chain validation.
+        //
+        // Mina is intentionally skipped: `buildMinaSettlementTx()` is still
+        // a stub that throws UNSUPPORTED_CHAIN unconditionally (Story 12.6
+        // AC-9 deferral), so seeding a Mina channel here would only let the
+        // swap-handler get further before hitting the same stub. Re-enable
+        // when the Mina settlement path lands.
+        // Seed a POOL of unbound channels. Each test run uses a new mill
+        // instance with a unique sender pubkey, and MillChannelState binds a
+        // sender stickily on first use. With one seeded channel and N test
+        // senders against a long-running peer (full mill e2e suite has ≥6),
+        // sender 2..N starve. Pool size 20 is generous headroom for
+        // pair-matrix + standalone tests in one container lifetime.
+        const SYNTHETIC_SOLANA_POOL_SIZE = 20;
+        for (const chain of supportedChains) {
+          if (!chain.startsWith('solana:')) continue;
+          if (!millKeys.solana) continue;
+          for (let i = 0; i < SYNTHETIC_SOLANA_POOL_SIZE; i++) {
+            const indexBuf = Buffer.alloc(4);
+            indexBuf.writeUInt32BE(i, 0);
+            const channelIdBytes = createHash('sha256')
+              .update(millKeys.solana.publicKey)
+              .update(indexBuf)
+              .digest();
+            const channelId = base58Encode(channelIdBytes);
+            channelState.provisionChannel({
+              assetCode: config.assetCode,
+              chain,
+              channelId,
+            });
+          }
+          console.log(
+            `[Mill] Seeded ${SYNTHETIC_SOLANA_POOL_SIZE} synthetic outbound Solana channels for ${chain}`
+          );
+        }
       }
     } catch (error) {
       console.error('[Mill] Failed to initialize swap handler:', error);
@@ -739,6 +935,49 @@ async function main(): Promise<void> {
 
   // --- Bootstrap ---
   try {
+    // Wire external bootstrapService with connector clients.
+    // Use wrapped admin client that reuses constructor peer IDs to prevent
+    // route/channel mismatch (same resolver pattern as DiscoveryTracker).
+    const directIlpClient = createDirectIlpClient(
+      node.connector as unknown as Parameters<typeof createDirectIlpClient>[0],
+      { toonDecoder: decodeEventFromToon }
+    );
+    bootstrapService.setIlpClient(directIlpClient);
+
+    const bootstrapAdminClient = createDirectConnectorAdmin({
+      registerPeer: async (params) => {
+        const constructorPeerId = resolveConstructorPeerId(
+          params as {
+            id: string;
+            url: string;
+            routes?: { prefix: string }[];
+            evmAddress?: string;
+          }
+        );
+        if (constructorPeerId) {
+          discoveredToConstructorPeerId.set(params.id, constructorPeerId);
+          console.log(
+            `[Bootstrap] Reusing constructor peerId '${constructorPeerId}' for bootstrap peer (was '${params.id}')`
+          );
+        }
+        await connector.registerPeer(
+          (constructorPeerId
+            ? { ...params, id: constructorPeerId }
+            : params) as Parameters<typeof connector.registerPeer>[0]
+        );
+      },
+      removePeer: async (peerId) => {
+        const resolvedPeerId =
+          discoveredToConstructorPeerId.get(peerId) ?? peerId;
+        await connector.removePeer(resolvedPeerId);
+      },
+    });
+    bootstrapService.setConnectorAdmin(bootstrapAdminClient);
+
+    if (node.channelClient) {
+      bootstrapService.setChannelClient(node.channelClient);
+    }
+
     const results = await bootstrapService.bootstrap(
       config.additionalPeersJson
     );
@@ -889,7 +1128,7 @@ async function main(): Promise<void> {
     // any bootstrap/discovery routes that may have overwritten them.
     if (btpRoutes.length > 0) {
       for (const route of btpRoutes) {
-        connector.addRoute(route);
+        connector.addRoute({ ...route, priority: route.priority ?? 0 });
       }
       console.log(`[BTP] Restored ${btpRoutes.length} constructor route(s) after bootstrap`);
     }
