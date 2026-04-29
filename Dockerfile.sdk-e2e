@@ -118,8 +118,7 @@ RUN pnpm -r \
       --external:@toon-protocol/memvid-node \
       --external:@toon-protocol/pet-dvm \
       --external:@toon-protocol/pet-circuit \
-      --external:socks-proxy-agent \
-      --external:@toon-protocol/mill
+      --external:socks-proxy-agent
 
 # -- Assemble minimal runtime directory --------------------------------------
 # Only the entrypoint-sdk bundle + native modules + dynamically-required packages.
@@ -157,9 +156,15 @@ RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive
     find /runtime/node_modules -name '*.d.mts' -delete && \
     rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
 
-# Stage @toon-protocol/mill (tsup-built, swap handler for Docker peers).
+# Stage @toon-protocol/{core,sdk,mill} (tsup-built, needed by mill at runtime).
 # pet-dvm / pet-circuit / memvid-node are excluded (not needed for ator E2E).
-RUN mkdir -p /runtime/node_modules/@toon-protocol/mill && \
+RUN mkdir -p /runtime/node_modules/@toon-protocol/core && \
+    cp packages/core/package.json /runtime/node_modules/@toon-protocol/core/ && \
+    cp -r packages/core/dist /runtime/node_modules/@toon-protocol/core/ && \
+    mkdir -p /runtime/node_modules/@toon-protocol/sdk && \
+    cp packages/sdk/package.json /runtime/node_modules/@toon-protocol/sdk/ && \
+    cp -r packages/sdk/dist /runtime/node_modules/@toon-protocol/sdk/ && \
+    mkdir -p /runtime/node_modules/@toon-protocol/mill && \
     cp packages/mill/package.json /runtime/node_modules/@toon-protocol/mill/ && \
     cp -r packages/mill/dist /runtime/node_modules/@toon-protocol/mill/
 
@@ -182,6 +187,9 @@ RUN addgroup -g 1001 toon && \
 
 # Copy minimal runtime from builder stage (--chown avoids duplicate layer)
 COPY --from=builder --chown=toon:toon /runtime ./
+
+# Ensure /app/data is writable by the toon user (connector stores SQLite + ledger here)
+RUN mkdir -p /app/data && chown toon:toon /app/data
 
 # Environment variables (with defaults — match Dockerfile.oyster)
 ENV NODE_ENV=production
