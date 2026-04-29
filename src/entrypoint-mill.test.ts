@@ -11,14 +11,7 @@
  * trigger main() automatically — tests drive it explicitly with mocks.
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Hoisted mock for @toon-protocol/mill: startMill returns a stub instance
 // so main() can complete without spinning up any real infrastructure.
@@ -73,7 +66,11 @@ function validConfigJson(): string {
 }
 
 // Track env-var keys we mutate so we can restore them between tests.
-const ENV_KEYS = ['MILL_CONFIG_JSON', 'MILL_CONFIG_PATH', 'NODE_NOSTR_SECRET_KEY'];
+const ENV_KEYS = [
+  'MILL_CONFIG_JSON',
+  'MILL_CONFIG_PATH',
+  'NODE_NOSTR_SECRET_KEY',
+];
 
 // --- Lifecycle --------------------------------------------------------------
 

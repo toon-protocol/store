@@ -119,7 +119,13 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
       assertSafeKey(chain, 'channels');
       if (!Array.isArray(entries)) continue;
       channels[chain] = entries
-        .filter((e) => e && e.channelId && typeof e.cumulativeAmount !== 'undefined' && typeof e.nonce !== 'undefined')
+        .filter(
+          (e) =>
+            e &&
+            e.channelId &&
+            typeof e.cumulativeAmount !== 'undefined' &&
+            typeof e.nonce !== 'undefined'
+        )
         .map((e) => ({
           channelId: e.channelId,
           cumulativeAmount: toBigInt(e.cumulativeAmount),
@@ -251,15 +257,17 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
 
   // Fee markup via rateProvider wrapping
   const feeBasisPoints = parseInt(env['FEE_BASIS_POINTS'] ?? '0', 10);
-  if (Number.isNaN(feeBasisPoints) || feeBasisPoints < 0 || feeBasisPoints > 10000) {
+  if (
+    Number.isNaN(feeBasisPoints) ||
+    feeBasisPoints < 0 ||
+    feeBasisPoints > 10000
+  ) {
     throw new Error('FEE_BASIS_POINTS must be 0-10000');
   }
   if (feeBasisPoints > 0) {
     const baseRateProvider = out.rateProvider;
     out.rateProvider = (pair) => {
-      const baseRate = baseRateProvider
-        ? baseRateProvider(pair)
-        : 1_000_000n; // 1:1 rate (1e6 = 1 unit)
+      const baseRate = baseRateProvider ? baseRateProvider(pair) : 1_000_000n; // 1:1 rate (1e6 = 1 unit)
       // Apply markup as haircut: reduce output by (feeBasisPoints / 10000)
       return (baseRate * (10_000n - BigInt(feeBasisPoints))) / 10_000n;
     };
@@ -285,12 +293,22 @@ export async function main(): Promise<MillInstance> {
 
   // Validate required fields
   if (!config.secretKey && !config.mnemonic) {
-    throw new Error('Either NODE_NOSTR_SECRET_KEY or mnemonic must be provided');
+    throw new Error(
+      'Either NODE_NOSTR_SECRET_KEY or mnemonic must be provided'
+    );
   }
-  if (!config.swapPairs || !Array.isArray(config.swapPairs) || config.swapPairs.length === 0) {
+  if (
+    !config.swapPairs ||
+    !Array.isArray(config.swapPairs) ||
+    config.swapPairs.length === 0
+  ) {
     throw new Error('swapPairs must be non-empty array in config');
   }
-  if (!config.chains || !Array.isArray(config.chains) || config.chains.length === 0) {
+  if (
+    !config.chains ||
+    !Array.isArray(config.chains) ||
+    config.chains.length === 0
+  ) {
     throw new Error('chains must be non-empty array in config');
   }
 
@@ -301,7 +319,8 @@ export async function main(): Promise<MillInstance> {
   const { pubkey, evmAddress } = instance.identity;
   const safePubkey = typeof pubkey === 'string' ? pubkey : 'unknown';
   const safeEvm = typeof evmAddress === 'string' ? evmAddress : null;
-  const safeBlsPort = typeof instance.blsPort === 'number' ? instance.blsPort : 3200;
+  const safeBlsPort =
+    typeof instance.blsPort === 'number' ? instance.blsPort : 3200;
   logJson('info', 'mill_ready', {
     pubkey: safePubkey,
     evmAddress: safeEvm,
