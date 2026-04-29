@@ -125,6 +125,15 @@ describe('AC-1: MILL_CONFIG_JSON cleanup (Finding #10)', () => {
     expect(process.env['MILL_CONFIG_JSON']).toBe(malformed);
   });
 
+  it('deletes process.env.MILL_CONFIG_JSON when JSON.parse succeeds with null (falsy payload)', () => {
+    // JSON.parse('null') succeeds but returns null — the delete must fire
+    // before the null-guard so the env var is cleaned even for this edge case.
+    process.env['MILL_CONFIG_JSON'] = 'null';
+
+    expect(() => loadMillConfig()).toThrow(/Failed to parse MILL_CONFIG_JSON/);
+    expect(process.env['MILL_CONFIG_JSON']).toBeUndefined();
+  });
+
   it('does not delete MILL_CONFIG_PATH (path is not secret material)', () => {
     // Use a non-existent path so loadMillConfig throws — but the throw is on
     // readFileSync, AFTER the cleanup-decision point for MILL_CONFIG_JSON.

@@ -183,16 +183,16 @@ export function loadMillConfig(): MillConfig {
   if (env['MILL_CONFIG_JSON']) {
     try {
       rawConfig = JSON.parse(env['MILL_CONFIG_JSON']);
+      // Fail-closed: drop the env var immediately after JSON.parse returns
+      // (whether rawConfig is truthy or falsy) so a later throw cannot leave
+      // secret material (mnemonic, secretKey, channel state) in process.env
+      // memory. Placed before the null-guard so JSON.parse('null') also cleans
+      // up. MILL_CONFIG_PATH is intentionally NOT cleaned — a path is not secret.
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete process.env['MILL_CONFIG_JSON'];
       if (!rawConfig) {
         throw new Error('MILL_CONFIG_JSON parsed to null or undefined');
       }
-      // Fail-closed: drop the env var as soon as it has been parsed, so a later
-      // throw (channel restoration, swap pair validation, startMill itself)
-      // cannot leave secret material (mnemonic, secretKey, channel state) in
-      // process.env memory. MILL_CONFIG_PATH is intentionally NOT cleaned —
-      // a filesystem path is not secret material.
-      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-      delete process.env['MILL_CONFIG_JSON'];
     } catch (err) {
       throw new Error(
         `Failed to parse MILL_CONFIG_JSON: ${err instanceof Error ? err.message : err}`
