@@ -686,11 +686,11 @@ async function main(): Promise<void> {
           try {
             const cm = (
               connector as unknown as {
-                channelManager: { getAllChannels(): Array<{
+                channelManager: { getAllChannels(): {
                   channelId: string;
                   chain: string;
                   status: string;
-                }> } | null;
+                }[] } | null;
               }
             ).channelManager;
             if (!cm) return;
