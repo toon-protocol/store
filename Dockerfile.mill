@@ -12,11 +12,10 @@
 #   docker build -f docker/Dockerfile.mill -t toon:mill .
 #
 # Pattern follows docker/Dockerfile.town (multi-stage, esbuild, native modules, non-root).
-
-# Metadata
-LABEL maintainer="toon-protocol"
-LABEL version="1.0.0"
-LABEL description="TOON Mill Node - Multi-chain swap peer with embedded connector"
+#
+# NOTE: image-level LABELs are declared in the runtime stage (after the
+# second FROM) — LABELs declared before any FROM are silently dropped by
+# Docker and never appear on the produced image (`docker inspect` confirms).
 
 # -- Stage 1: Builder -------------------------------------------------------
 FROM node:20-alpine AS builder
@@ -99,6 +98,12 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
 
 # -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
+
+# Image metadata (must be declared in the runtime stage so they appear on the
+# produced image; LABELs before the first FROM are silently dropped).
+LABEL maintainer="toon-protocol"
+LABEL version="1.0.0"
+LABEL description="TOON Mill Node - Multi-chain swap peer with embedded connector"
 
 # Install runtime deps for native modules ONLY.
 RUN apk add --no-cache libstdc++

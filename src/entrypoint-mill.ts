@@ -23,6 +23,32 @@ import { startMill } from '@toon-protocol/mill';
 import type { MillConfig, MillInstance } from '@toon-protocol/mill';
 import type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
 
+// --- Helper: Structured JSON logging (one object per line) ---
+// Townhouse dashboard consumes container logs as a structured stream
+// (`docker logs --follow | jq`). Pino is the SDK-side standard, but adding it
+// as an esbuild external grows the runtime image; this 15-line helper covers
+// the dashboard's needs without the bundle cost.
+type LogLevel = 'info' | 'error';
+export function logJson(
+  level: LogLevel,
+  msg: string,
+  fields?: Record<string, unknown>
+): void {
+  const line =
+    JSON.stringify({
+      ts: Date.now(),
+      level,
+      scope: 'mill-entrypoint',
+      msg,
+      ...fields,
+    }) + '\n';
+  if (level === 'error') {
+    process.stderr.write(line);
+  } else {
+    process.stdout.write(line);
+  }
+}
+
 // --- Helper: Convert value to BigInt (mirrors cli.ts) ---
 function toBigInt(v: unknown): bigint {
   if (v === null || v === undefined) {
@@ -143,7 +169,7 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
 }
 
 // --- Load config from env or file ---
-function loadMillConfig(): MillConfig {
+export function loadMillConfig(): MillConfig {
   const env = process.env;
   let rawConfig: CliRawConfig;
 
@@ -154,6 +180,13 @@ function loadMillConfig(): MillConfig {
       if (!rawConfig) {
         throw new Error('MILL_CONFIG_JSON parsed to null or undefined');
       }
+      // Fail-closed: drop the env var as soon as it has been parsed, so a later
+      // throw (channel restoration, swap pair validation, startMill itself)
+      // cannot leave secret material (mnemonic, secretKey, channel state) in
+      // process.env memory. MILL_CONFIG_PATH is intentionally NOT cleaned —
+      // a filesystem path is not secret material.
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete process.env['MILL_CONFIG_JSON'];
     } catch (err) {
       throw new Error(
         `Failed to parse MILL_CONFIG_JSON: ${err instanceof Error ? err.message : err}`
@@ -183,7 +216,7 @@ function loadMillConfig(): MillConfig {
 }
 
 // --- Apply env var overlays to config ---
-function applyEnvOverlay(cfg: MillConfig): MillConfig {
+export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   const out = { ...cfg };
   const env = process.env;
 
@@ -244,8 +277,8 @@ function applyEnvOverlay(cfg: MillConfig): MillConfig {
 }
 
 // --- Main entrypoint ---
-async function main(): Promise<MillInstance> {
-  console.log('[Mill Entrypoint] Starting Mill node...');
+export async function main(): Promise<MillInstance> {
+  logJson('info', 'starting');
 
   // Load JSON config from env or file
   const config = applyEnvOverlay(loadMillConfig());
@@ -264,21 +297,17 @@ async function main(): Promise<MillInstance> {
   // Start the Mill
   const instance = await startMill(config);
 
-  // Log startup banner
+  // Log structured startup line (replaces ASCII banner)
   const { pubkey, evmAddress } = instance.identity;
   const safePubkey = typeof pubkey === 'string' ? pubkey : 'unknown';
   const safeEvm = typeof evmAddress === 'string' ? evmAddress : null;
   const safeBlsPort = typeof instance.blsPort === 'number' ? instance.blsPort : 3200;
-  console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║                    Mill Ready                             ║
-╠═══════════════════════════════════════════════════════════╣
-║ Pubkey:        ${safePubkey.slice(0, 32)}... ║
-║ EVM Address:   ${safeEvm?.slice(0, 40) ?? 'N/A'} ║
-║ BLS Port:      ${safeBlsPort}                                       ║
-║ Swap Pairs:    ${config.swapPairs.length}                                          ║
-╚═══════════════════════════════════════════════���═══════════╝
-  `);
+  logJson('info', 'mill_ready', {
+    pubkey: safePubkey,
+    evmAddress: safeEvm,
+    blsPort: safeBlsPort,
+    swapPairCount: config.swapPairs.length,
+  });
 
   // Clean up sensitive env vars after extraction
   delete process.env['NODE_NOSTR_SECRET_KEY'];
@@ -288,12 +317,12 @@ async function main(): Promise<MillInstance> {
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[Mill Entrypoint] Received ${signal}, shutting down...`);
+    logJson('info', 'shutdown_received', { signal });
     try {
       await instance.stop();
-      console.log('[Mill Entrypoint] Mill stopped gracefully');
+      logJson('info', 'shutdown_complete');
     } catch (err) {
-      console.error('[Mill Entrypoint] Error during shutdown:', err);
+      logJson('error', 'shutdown_error', { err: String(err) });
     } finally {
       process.exit(0);
     }
@@ -301,15 +330,23 @@ async function main(): Promise<MillInstance> {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+  // SIGQUIT is sent by `kill -3` and some k8s liveness-probe failure paths.
+  // Registering costs one line and prevents shutdown() being skipped there.
+  process.on('SIGQUIT', () => shutdown('SIGQUIT'));
 
   return instance;
 }
 
 // --- Run with error handling ---
-main().catch((err) => {
-  console.error(`[Mill Entrypoint] [Fatal] ${err instanceof Error ? err.message : err}`);
-  if (err instanceof Error && err.stack) {
-    console.error(err.stack);
-  }
-  process.exit(1);
-});
+// Gated so importing this module from a test (Vitest sets VITEST=true) does
+// not trigger the IIFE — tests import the exported helpers and call them
+// directly with mocks.
+if (!process.env['VITEST']) {
+  main().catch((err) => {
+    logJson('error', 'fatal', {
+      err: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    process.exit(1);
+  });
+}
