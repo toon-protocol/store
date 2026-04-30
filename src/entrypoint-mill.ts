@@ -226,8 +226,14 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   const out = { ...cfg };
   const env = process.env;
 
-  // Secret key (from NODE_NOSTR_SECRET_KEY)
-  if (env['NODE_NOSTR_SECRET_KEY']) {
+  // MILL_MNEMONIC takes priority — required for BIP-32 swap key derivation.
+  // NODE_NOSTR_SECRET_KEY is accepted as a fallback for identity-only starts
+  // (no swap key derivation), but startMill() will throw MILL_REQUIRES_MNEMONIC
+  // unless a mnemonic is present.
+  if (env['MILL_MNEMONIC'] && env['MILL_MNEMONIC'].trim()) {
+    out.mnemonic = env['MILL_MNEMONIC'].trim();
+    delete out.secretKey;
+  } else if (env['NODE_NOSTR_SECRET_KEY']) {
     const hex = env['NODE_NOSTR_SECRET_KEY'];
     if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
       throw new Error('NODE_NOSTR_SECRET_KEY must be a 64-char hex string');
