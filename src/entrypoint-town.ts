@@ -21,6 +21,10 @@ if (process.env['CONNECTOR_URL']) {
   process.env['TOON_CONNECTOR_URL'] = process.env['CONNECTOR_URL'];
 }
 
+if (process.env['CONNECTOR_ADMIN_URL']) {
+  process.env['TOON_CONNECTOR_ADMIN_URL'] = process.env['CONNECTOR_ADMIN_URL'];
+}
+
 if (process.env['NODE_NOSTR_SECRET_KEY']) {
   process.env['TOON_SECRET_KEY'] = process.env['NODE_NOSTR_SECRET_KEY'];
 }

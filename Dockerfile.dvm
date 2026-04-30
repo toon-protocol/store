@@ -14,16 +14,16 @@
 # Pattern follows docker/Dockerfile.mill (multi-stage, esbuild, native modules, non-root).
 # Key differences: standalone HTTP mode on port 3300 (vs embedded BTP on 3000).
 
+# -- Stage 1: Builder -------------------------------------------------------
+FROM node:20-alpine AS builder
+
 # Metadata
 LABEL maintainer="toon-protocol"
 LABEL version="1.0.0"
 LABEL description="TOON DVM Node - Compute-for-hire (Arweave storage + Dungeon runs)"
 
-# -- Stage 1: Builder -------------------------------------------------------
-FROM node:20-alpine AS builder
-
 # Install build dependencies for native modules
-RUN apk add --no-cache python3 py3-setuptools make g++
+RUN apk add --no-cache python3 py3-setuptools make g++ rust cargo
 
 # Install pnpm (pinned for deterministic builds)
 RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
@@ -36,7 +36,6 @@ COPY patches/ ./patches/
 COPY packages/bls/package.json ./packages/bls/
 COPY packages/core/package.json ./packages/core/
 COPY packages/sdk/package.json ./packages/sdk/
-COPY packages/arweave/package.json ./packages/arweave/
 COPY packages/pet-dvm/package.json ./packages/pet-dvm/
 COPY packages/memvid-node/package.json ./packages/memvid-node/
 COPY packages/pet-circuit/package.json ./packages/pet-circuit/
@@ -50,20 +49,18 @@ COPY tsconfig.json ./
 COPY packages/bls/ ./packages/bls/
 COPY packages/core/ ./packages/core/
 COPY packages/sdk/ ./packages/sdk/
-COPY packages/arweave/ ./packages/arweave/
 COPY packages/pet-dvm/ ./packages/pet-dvm/
 COPY packages/memvid-node/ ./packages/memvid-node/
 COPY packages/pet-circuit/ ./packages/pet-circuit/
 COPY docker/ ./docker/
 
 # Build workspace packages needed by DVM, then bundle the entrypoint.
-# Dependency chain: core -> sdk -> bls -> arweave -> pet-dvm -> memvid-node -> pet-circuit
+# Dependency chain: core -> sdk -> bls -> pet-dvm -> memvid-node -> pet-circuit
 # Invokes esbuild directly with entrypoint-dvm.ts as the single entry point.
 RUN pnpm -r \
       --filter '@toon-protocol/core' \
       --filter '@toon-protocol/sdk' \
       --filter '@toon-protocol/bls' \
-      --filter '@toon-protocol/arweave' \
       --filter '@toon-protocol/pet-dvm' \
       --filter '@toon-protocol/memvid-node' \
       --filter '@toon-protocol/pet-circuit' \

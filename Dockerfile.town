@@ -67,7 +67,12 @@ RUN pnpm -r \
       --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
       --external:better-sqlite3 \
       --external:ethers \
-      --external:express
+      --external:express \
+      --external:mina-signer \
+      --external:o1js \
+      --external:@solana/kit \
+      --external:@solana-program/token \
+      --external:@toon-protocol/mina-zkapp
 
 # -- Assemble minimal runtime directory --------------------------------------
 RUN mkdir -p /runtime/node_modules
@@ -89,6 +94,20 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
     cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/ && \
     cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
     cp -r "$FUTP_DIR" /runtime/node_modules/
+
+# Copy all @solana/* v3 packages + @solana-program/token (connector Solana settlement SDK)
+# These are external in esbuild; must be present as real modules at runtime.
+# Each @solana+name@3.x pnpm store entry holds the package at .../node_modules/@solana/name/.
+# We copy them all so transitive requires between sub-packages resolve correctly.
+RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program && \
+    for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules/@solana/*/ 2>/dev/null); do \
+      pkg=$(basename "$store_dir"); \
+      [ ! -d "/runtime/node_modules/@solana/$pkg" ] && cp -rL "$store_dir" "/runtime/node_modules/@solana/$pkg" || true; \
+    done && \
+    SOLANA_TOKEN_STORE=$(ls -d node_modules/.pnpm/@solana-program+token@0.6*/node_modules/@solana-program/token 2>/dev/null | head -1) && \
+    [ -n "$SOLANA_TOKEN_STORE" ] && cp -rL "$SOLANA_TOKEN_STORE" /runtime/node_modules/@solana-program/token || true && \
+    WS_STORE=$(ls -d node_modules/.pnpm/ws@8.*/node_modules/ws 2>/dev/null | tail -1) && \
+    [ -n "$WS_STORE" ] && cp -rL "$WS_STORE" /runtime/node_modules/ws || true
 
 # -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
