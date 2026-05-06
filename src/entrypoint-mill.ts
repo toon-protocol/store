@@ -108,6 +108,13 @@ interface CliRawConfig {
   };
   // Rate provider for swap fee configuration
   rateProvider?: CreateSwapHandlerConfig['rateProvider'];
+  // Parent-connector peering (embedded-with-parent mode). When connectorUrl
+  // is set, the embedded ConnectorNode dials this URL as a BTP peer and
+  // installs a self-route on ilpAddress for local delivery.
+  connectorUrl?: string;
+  nodeId?: string;
+  parentPeerId?: string;
+  parentAuthToken?: string;
 }
 
 // --- Parse and normalize raw config ---
@@ -170,6 +177,10 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
   if (raw.advertisedAsset) cfg.advertisedAsset = raw.advertisedAsset;
   if (raw.transport) cfg.transport = raw.transport as MillConfig['transport'];
   if (raw.rateProvider) cfg.rateProvider = raw.rateProvider;
+  if (raw.connectorUrl) cfg.connectorUrl = raw.connectorUrl;
+  if (raw.nodeId) cfg.nodeId = raw.nodeId;
+  if (raw.parentPeerId) cfg.parentPeerId = raw.parentPeerId;
+  if (raw.parentAuthToken !== undefined) cfg.parentAuthToken = raw.parentAuthToken;
 
   return cfg;
 }
@@ -283,9 +294,23 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   // The standalone connector dials this port via BTP WebSocket
   out.btpServerPort = 3000;
 
-  // DO NOT set connectorUrl — it is deferred (see Dev Notes § Connector Wiring)
-  // The embedded connector is auto-created when btpServerPort is set and
-  // connector/connectorUrl are both omitted.
+  // Env-var passthroughs for embedded-with-parent mode. JSON config wins
+  // when both are set.
+  if (!out.connectorUrl && env['CONNECTOR_URL']) {
+    out.connectorUrl = env['CONNECTOR_URL'];
+  }
+  if (!out.ilpAddress && env['TOON_ILP_ADDRESS']) {
+    out.ilpAddress = env['TOON_ILP_ADDRESS'];
+  }
+  if (!out.nodeId && env['TOON_NODE_ID']) {
+    out.nodeId = env['TOON_NODE_ID'];
+  }
+  if (!out.parentPeerId && env['TOON_PARENT_PEER_ID']) {
+    out.parentPeerId = env['TOON_PARENT_PEER_ID'];
+  }
+  if (out.parentAuthToken === undefined && env['TOON_PARENT_AUTH_TOKEN'] !== undefined) {
+    out.parentAuthToken = env['TOON_PARENT_AUTH_TOKEN'];
+  }
 
   return out;
 }

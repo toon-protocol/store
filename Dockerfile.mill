@@ -107,6 +107,15 @@ RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program
     WS_STORE=$(ls -d node_modules/.pnpm/ws@8.*/node_modules/ws 2>/dev/null | tail -1) && \
     [ -n "$WS_STORE" ] && cp -rL "$WS_STORE" /runtime/node_modules/ws || true
 
+# Connector requires express at runtime for its health server even when
+# adminApi.enabled=false. Install via npm — same pattern as Dockerfile.sdk-e2e.
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 && \
+    cp -r /tmp/node_modules/* /runtime/node_modules/ && \
+    find /runtime/node_modules -name '*.d.ts' -delete && \
+    find /runtime/node_modules -name '*.d.ts.map' -delete && \
+    find /runtime/node_modules -name '*.js.map' -delete && \
+    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+
 # -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
 

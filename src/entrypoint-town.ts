@@ -6,9 +6,13 @@
  * esbuild into a single ESM bundle for the Docker runtime stage.
  *
  * Environment variable mapping:
- *   CONNECTOR_URL        -> TOON_CONNECTOR_URL
+ *   CONNECTOR_URL        -> TOON_CONNECTOR_URL  (parent-connector BTP URL)
  *   NODE_NOSTR_SECRET_KEY -> TOON_SECRET_KEY
  *   FEE_PER_EVENT        -> TOON_FEE_PER_EVENT
+ *   NODE_ID              -> TOON_NODE_ID         (peer id used in routes)
+ *   ILP_ADDRESS          -> TOON_ILP_ADDRESS     (e.g. g.townhouse.town)
+ *   PARENT_PEER_ID       -> TOON_PARENT_PEER_ID  (default: apex)
+ *   PARENT_AUTH_TOKEN    -> TOON_PARENT_AUTH_TOKEN (default: empty/no-auth)
  *   BLS_PORT             -> TOON_BLS_PORT (default: 3100)
  *   WS_PORT              -> TOON_RELAY_PORT (default: 7100)
  *   DEV_MODE             -> TOON_DEV_MODE
@@ -21,16 +25,28 @@ if (process.env['CONNECTOR_URL']) {
   process.env['TOON_CONNECTOR_URL'] = process.env['CONNECTOR_URL'];
 }
 
-if (process.env['CONNECTOR_ADMIN_URL']) {
-  process.env['TOON_CONNECTOR_ADMIN_URL'] = process.env['CONNECTOR_ADMIN_URL'];
-}
-
 if (process.env['NODE_NOSTR_SECRET_KEY']) {
   process.env['TOON_SECRET_KEY'] = process.env['NODE_NOSTR_SECRET_KEY'];
 }
 
 if (process.env['FEE_PER_EVENT']) {
   process.env['TOON_FEE_PER_EVENT'] = process.env['FEE_PER_EVENT'];
+}
+
+if (process.env['NODE_ID']) {
+  process.env['TOON_NODE_ID'] = process.env['NODE_ID'];
+}
+
+if (process.env['ILP_ADDRESS']) {
+  process.env['TOON_ILP_ADDRESS'] = process.env['ILP_ADDRESS'];
+}
+
+if (process.env['PARENT_PEER_ID']) {
+  process.env['TOON_PARENT_PEER_ID'] = process.env['PARENT_PEER_ID'];
+}
+
+if (process.env['PARENT_AUTH_TOKEN'] !== undefined) {
+  process.env['TOON_PARENT_AUTH_TOKEN'] = process.env['PARENT_AUTH_TOKEN'];
 }
 
 process.env['TOON_BLS_PORT'] = process.env['BLS_PORT'] ?? '3100';
