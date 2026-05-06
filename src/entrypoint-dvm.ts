@@ -3,7 +3,7 @@
  *
  * Maps Townhouse orchestrator environment variables to DVM Node config,
  * loads JSON config from DVM_CONFIG_JSON or DVM_CONFIG_PATH,
- * registers DVM handlers (Arweave + Dungeon),
+ * registers the Arweave DVM handler (kind:5094),
  * and invokes createNode() in standalone HTTP mode.
  *
  * Story 21.12 additions:
@@ -27,7 +27,9 @@
  *
  * Key differences from Town/Mill entries:
  * - Uses standalone HTTP mode (connectorUrl + handlerPort) NOT embedded BTP
- * - Registers multiple DVM handlers: kind:5094 (Arweave), kind:5250 (Dungeon)
+ * - Registers ONLY kind:5094 Arweave DVM. kind:5250 Dungeon DVM was removed
+ *   from this image (operator decision: this DVM is Arweave-only) so the
+ *   bundle no longer pulls in pet-dvm / memvid-node / o1js / mina-signer.
  * - Creates ArweaveUploadAdapter from TURBO_TOKEN for blob storage DVM
  */
 
@@ -43,10 +45,6 @@ import {
   type ArweaveUploadAdapter,
   ChunkManager,
 } from '@toon-protocol/sdk';
-import {
-  createDungeonDvmHandler,
-  type DungeonDvmConfig,
-} from '@toon-protocol/pet-dvm';
 import type { NodeConfig } from '@toon-protocol/sdk';
 import type { UnsignedEvent } from '@toon-protocol/core';
 
@@ -163,13 +161,6 @@ interface DvmRawConfig {
   // Arweave DVM config
   turboToken?: string;
   arweaveTags?: Record<string, string>;
-  // Dungeon DVM config
-  dungeonConfig?: {
-    mapWidth?: number;
-    mapHeight?: number;
-    seed?: number;
-  };
-  dungeonPricePerRun?: string | number;
 }
 
 // --- Parse and normalize config ---
@@ -293,14 +284,10 @@ export function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
     throw new Error('CONNECTOR_URL must be provided for standalone DVM mode');
   }
 
-  // Base price per byte (default 10n = $0.00001/byte)
-  // FEE_PER_JOB maps to basePricePerByte AND kindPricing[5250] for dual pricing:
-  // - basePricePerByte: applies to Arweave DVM (kind:5094) - per-byte pricing
-  // - kindPricing[5250]: applies to Dungeon DVM (kind:5250) - per-job pricing
+  // Base price per byte (default 10n = $0.00001/byte). Applies to the
+  // Arweave DVM (kind:5094) as per-byte pricing.
   if (env['FEE_PER_JOB']) {
-    const fee = BigInt(env['FEE_PER_JOB']);
-    out.basePricePerByte = fee;
-    out.kindPricing = { ...out.kindPricing, 5250: fee };
+    out.basePricePerByte = BigInt(env['FEE_PER_JOB']);
   } else if (out.basePricePerByte === undefined) {
     out.basePricePerByte = 10n;
   }
@@ -368,17 +355,6 @@ async function main(): Promise<ToonNode> {
     arweaveTags: rawConfig.arweaveTags,
   };
 
-  // Build Dungeon DVM config
-  const dungeonConfig: DungeonDvmConfig = {
-    dungeonConfig: {
-      mapWidth: rawConfig.dungeonConfig?.mapWidth ?? 40,
-      mapHeight: rawConfig.dungeonConfig?.mapHeight ?? 20,
-      seed: rawConfig.dungeonConfig?.seed ?? Math.floor(Date.now() / 1000),
-    },
-    pricePerRun: BigInt(String(rawConfig.dungeonPricePerRun ?? 10000)),
-    publishEvent: noopPublish,
-  };
-
   // Create node in standalone mode (HTTP handler, NOT embedded connector)
   console.log('[DVM Entrypoint] Creating node in standalone HTTP mode...');
   console.log(`  connectorUrl: ${config.connectorUrl}`);
@@ -404,11 +380,6 @@ async function main(): Promise<ToonNode> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   node.on(5094, counter.wrap(5094, createArweaveDvmHandler(arweaveConfig)) as any);
 
-  // kind:5250 — Dungeon run DVM
-  console.log('[DVM Entrypoint] Registering Dungeon DVM handler (kind:5250)...');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  node.on(5250, counter.wrap(5250, createDungeonDvmHandler(dungeonConfig)) as any);
-
   // Start the node
   console.log('[DVM Entrypoint] Starting DVM node...');
   await node.start();
@@ -426,7 +397,7 @@ async function main(): Promise<ToonNode> {
       version: '1.0.0',
       nodePubkey: safePubkey,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-      handlerKinds: [5094, 5250],
+      handlerKinds: [5094],
       kindPricing: Object.fromEntries(
         Object.entries(config.kindPricing ?? {}).map(([k, v]) => [k, String(v)])
       ),
@@ -449,7 +420,7 @@ async function main(): Promise<ToonNode> {
 ║ Pubkey:        ${safePubkey.slice(0, 32)}... ║
 ║ Handler Port:   ${config.handlerPort} (HTTP ILP)                          ║
 ║ BLS Port:      ${blsPort} (health endpoint)                       ║
-║ Handler Kinds: 5094 (Arweave), 5250 (Dungeon)         ║
+║ Handler Kinds: 5094 (Arweave only)                    ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 

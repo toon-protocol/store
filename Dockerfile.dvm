@@ -45,40 +45,26 @@ COPY patches/ ./patches/
 COPY packages/bls/package.json ./packages/bls/
 COPY packages/core/package.json ./packages/core/
 COPY packages/sdk/package.json ./packages/sdk/
-COPY packages/pet-dvm/package.json ./packages/pet-dvm/
-COPY packages/memvid-node/package.json ./packages/memvid-node/
-COPY packages/pet-circuit/package.json ./packages/pet-circuit/
 COPY docker/package.json ./docker/
 
 # Install all dependencies (including devDependencies needed for build)
 RUN pnpm install --frozen-lockfile
 
-# Copy source code (only packages needed for DVM)
+# Copy source code (only packages needed for the Arweave DVM)
 COPY tsconfig.json ./
 COPY packages/bls/ ./packages/bls/
 COPY packages/core/ ./packages/core/
 COPY packages/sdk/ ./packages/sdk/
-COPY packages/pet-dvm/ ./packages/pet-dvm/
-COPY packages/memvid-node/ ./packages/memvid-node/
-COPY packages/pet-circuit/ ./packages/pet-circuit/
 COPY docker/ ./docker/
 
-# Pull the memvid-core Rust crate from the sibling repo (passed via
-# `--build-context memvid=../memvid` at build time). packages/memvid-node's
-# Cargo.toml depends on `memvid-core = { path = "../../../memvid" }`, which
-# from /app/packages/memvid-node/ resolves to /memvid — copy there.
-COPY --from=memvid . /memvid
-
-# Build workspace packages needed by DVM, then bundle the entrypoint.
-# Dependency chain: core -> sdk -> bls -> pet-dvm -> memvid-node -> pet-circuit
-# Invokes esbuild directly with entrypoint-dvm.ts as the single entry point.
+# Build only the workspace packages this DVM needs. pet-dvm / memvid-node /
+# pet-circuit (kind:5250 Dungeon DVM) were removed — operator decision: this
+# image is an Arweave-only DVM provider. Drops the o1js / mina-signer / Rust
+# memvid-core dependency chain entirely (~700 MB of transitive deps gone).
 RUN pnpm -r \
       --filter '@toon-protocol/core' \
       --filter '@toon-protocol/sdk' \
       --filter '@toon-protocol/bls' \
-      --filter '@toon-protocol/pet-dvm' \
-      --filter '@toon-protocol/memvid-node' \
-      --filter '@toon-protocol/pet-circuit' \
       build && \
     cd docker && \
     pnpm exec esbuild src/entrypoint-dvm.ts \
@@ -92,12 +78,16 @@ RUN pnpm -r \
       --external:better-sqlite3 \
       --external:ethers \
       --external:express \
-      --external:mina-signer \
-      --external:o1js \
       --external:@solana/kit \
       --external:@solana-program/token \
-      --external:@toon-protocol/mina-zkapp \
-      --external:@ardrive/turbo-sdk
+      --external:@ardrive/turbo-sdk \
+      # Lazy-required by @toon-protocol/connector's mina-payment-channel
+      # settlement code via Promise.resolve().then(__importStar(require(...))).
+      # That code path is dead for Arweave-only DVM (kind:5094 doesn't
+      # touch Mina settlement) but esbuild still needs to resolve the
+      # require at build time. Mark external so the unresolved import is
+      # left in the bundle; runtime never reaches it.
+      --external:@toon-protocol/mina-zkapp
 
 # -- Assemble minimal runtime directory --------------------------------------
 RUN mkdir -p /runtime/node_modules
@@ -107,6 +97,25 @@ RUN cp docker/dist/entrypoint-dvm.js /runtime/
 
 # ESM package.json (bundle uses import.meta.url via banner)
 RUN echo '{"type":"module"}' > /runtime/package.json
+
+# Stub for the memvid-node Rust NAPI addon. The bundler emits a relative
+# require('./index.cjs') for PetBrain (used by kind:5250 Dungeon DVM, NOT
+# kind:5094 Arweave). The path resolves against /app/, so we drop a stub
+# there. PetBrain throws only if actually invoked — so the kind:5094
+# Arweave path is unaffected, and operators who want kind:5250 know to
+# build a memvid-node-included image variant.
+RUN cat > /runtime/index.cjs <<'STUB'
+// Stub for /app/index.cjs — referenced by the bundled require('./index.cjs').
+// Real PetBrain (memvid-node Rust NAPI) isn't shipped in the Arweave-only
+// build to keep the runtime lean. If the kind:5250 Dungeon DVM tries to
+// instantiate PetBrain, this throws — kind:5094 Arweave never touches it.
+class PetBrain {
+  constructor() {
+    throw new Error('PetBrain (memvid-node) not in this DVM build — kind:5094 Arweave is supported, kind:5250 Dungeon needs the full image variant.');
+  }
+}
+module.exports = { PetBrain };
+STUB
 
 # Cherry-pick better-sqlite3 (native module) + its runtime deps (bindings, file-uri-to-path)
 RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3) && \
@@ -119,6 +128,27 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
     cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/ && \
     cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
     cp -r "$FUTP_DIR" /runtime/node_modules/ || { echo 'ERROR: Failed to copy native module deps'; exit 1; }
+
+# Cherry-pick the remaining esbuild --external:* modules. Without Dungeon
+# DVM (kind:5250) the external list shrinks to: @ardrive/turbo-sdk (Arweave
+# bundler), @solana/kit + @solana-program/token (transitive from sdk), and
+# ethers/express (HTTP/RPC plumbing). All resolvable cleanly from pnpm's
+# hoist trees — no flat-store copy needed.
+RUN set -eux; \
+    mkdir -p /runtime/node_modules; \
+    for pkg in ethers express; do \
+      hoist=$(ls -d node_modules/.pnpm/${pkg}@*/node_modules 2>/dev/null | head -1); \
+      [ -n "$hoist" ] && cp -rL "$hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
+    done; \
+    # @ardrive/turbo-sdk hoist tree includes its transitive deps as siblings
+    ardrive_hoist=$(ls -d node_modules/.pnpm/@ardrive+turbo-sdk@*/node_modules 2>/dev/null | head -1); \
+    [ -n "$ardrive_hoist" ] && cp -rL "$ardrive_hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
+    # @solana v3 packages
+    for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules 2>/dev/null); do \
+      cp -rL "$store_dir"/. /runtime/node_modules/ 2>/dev/null || true; \
+    done; \
+    sol_hoist=$(ls -d node_modules/.pnpm/@solana-program+token@*/node_modules 2>/dev/null | head -1); \
+    [ -n "$sol_hoist" ] && cp -rL "$sol_hoist"/. /runtime/node_modules/ 2>/dev/null || true
 
 # -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
