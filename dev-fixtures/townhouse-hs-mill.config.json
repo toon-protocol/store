@@ -1,0 +1,38 @@
+{
+  "_comment": "HS-mode dev fixture for docker-compose-townhouse-hs.yml mill service. DEV ONLY — NOT for production. Mirrors mill-01.config.json (EVM↔Solana) but points relayUrls at the HS-mode town container.",
+  "swapPairs": [
+    {
+      "from": { "assetCode": "USDC", "assetScale": 6, "chain": "evm:base:31337" },
+      "to": { "assetCode": "USDC", "assetScale": 6, "chain": "solana:devnet" },
+      "rate": "1.0",
+      "minAmount": "1000",
+      "maxAmount": "1000000000"
+    }
+  ],
+  "chains": ["evm", "solana"],
+  "channels": {
+    "evm:base:31337": [
+      {
+        "channelId": "hs-mill-evm-ch1",
+        "cumulativeAmount": 1000000,
+        "nonce": 1,
+        "updatedAt": 0
+      }
+    ],
+    "solana:devnet": [
+      {
+        "channelId": "hs-mill-sol-ch1",
+        "cumulativeAmount": 1000000,
+        "nonce": 1,
+        "updatedAt": 0
+      }
+    ]
+  },
+  "inventory": {
+    "evm:base:31337": 10000000,
+    "solana:devnet": 10000000
+  },
+  "relayUrls": [
+    "ws://townhouse-hs-town:7100"
+  ]
+}

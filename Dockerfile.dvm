@@ -9,7 +9,16 @@
 #   - `packages/townhouse` DockerOrchestrator — builds and runs this image
 #
 # Build from repo root:
-#   docker build -f docker/Dockerfile.dvm -t toon:dvm .
+#   docker build -f docker/Dockerfile.dvm \
+#     --build-context memvid=../memvid \
+#     -t toon:dvm .
+#
+# The `--build-context memvid=...` flag points BuildKit at the sibling
+# memvid repo (clone https://github.com/ALLiDoizCode/memvid into ../memvid
+# adjacent to this town/ checkout). packages/memvid-node/Cargo.toml has
+# `memvid-core = { path = "../../../memvid" }`, which from the in-image
+# location /app/packages/memvid-node/ resolves to /memvid — so we COPY the
+# context to that exact path below.
 #
 # Pattern follows docker/Dockerfile.mill (multi-stage, esbuild, native modules, non-root).
 # Key differences: standalone HTTP mode on port 3300 (vs embedded BTP on 3000).
@@ -53,6 +62,12 @@ COPY packages/pet-dvm/ ./packages/pet-dvm/
 COPY packages/memvid-node/ ./packages/memvid-node/
 COPY packages/pet-circuit/ ./packages/pet-circuit/
 COPY docker/ ./docker/
+
+# Pull the memvid-core Rust crate from the sibling repo (passed via
+# `--build-context memvid=../memvid` at build time). packages/memvid-node's
+# Cargo.toml depends on `memvid-core = { path = "../../../memvid" }`, which
+# from /app/packages/memvid-node/ resolves to /memvid — copy there.
+COPY --from=memvid . /memvid
 
 # Build workspace packages needed by DVM, then bundle the entrypoint.
 # Dependency chain: core -> sdk -> bls -> pet-dvm -> memvid-node -> pet-circuit
