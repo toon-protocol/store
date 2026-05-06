@@ -95,3 +95,43 @@ routes:
   - prefix: g.townhouse.mill
     nextHop: mill
     priority: 100
+
+# Chain providers — required for PerPacketClaimService + ClaimReceiver to
+# auto-instantiate inside the connector. Without this block the apex rejects
+# any forwarded paid PREPARE with `T00 - Per-packet claim service not
+# configured`. The image (ghcr.io/toon-protocol/connector:3.3.3) reads
+# chainProviders from the YAML config and wires up the per-packet claim
+# pipeline at startup.
+#
+# Address provenance (DEV ONLY — Anvil deterministic deployment):
+#   chainId=evm:31337       : matches services.anvil (chain-id 31337) in
+#                             docker-compose-townhouse-hs.yml.
+#   rpcUrl=http://anvil:8545 : Docker-internal DNS to the anvil service
+#                             (NOT townhouse-hs-anvil — that's the
+#                             container_name; `anvil` is the service name
+#                             which is what other services on the
+#                             townhouse-hs-net network resolve).
+#   registryAddress         : TokenNetworkRegistry deployed by
+#                             contracts/evm/script/DeployLocal.s.sol;
+#                             deterministic from Anvil account[0] +
+#                             nonce=2. Source: connector repo
+#                             packages/connector/test/integration/multi-hop-helpers.ts:42
+#                             Confirmed against
+#                             contracts/evm/broadcast/DeployLocal.s.sol/31337/run-latest.json.
+#   tokenAddress            : MockERC20 (USDC) deployed by the same script
+#                             at deterministic Anvil account[0] nonce=0.
+#                             Source: multi-hop-helpers.ts:45.
+#   keyId                   : Anvil deterministic private key for account[3]
+#                             (Peer2 in the connector test fixtures). NOT
+#                             account[0] (deployer / treasury), NOT
+#                             account[1] (faucet ETH source), NOT
+#                             account[2] (already used as Peer1/treasury
+#                             elsewhere in dev-infra). Source:
+#                             multi-hop-helpers.ts:58.
+chainProviders:
+  - chainType: evm
+    chainId: evm:31337
+    rpcUrl: http://anvil:8545
+    registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'
+    tokenAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+    keyId: '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6'
