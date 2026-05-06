@@ -34,5 +34,9 @@
   },
   "relayUrls": [
     "ws://townhouse-hs-town:7100"
-  ]
+  ],
+  "connectorUrl": "ws://townhouse-hs-connector:3000",
+  "ilpAddress": "g.townhouse.mill",
+  "nodeId": "mill",
+  "parentPeerId": "apex"
 }
