@@ -65,7 +65,33 @@ transport:
   # managed=false: connector does NOT spawn its own anon. The sidecar does.
   managed: false
 
-# Children peer URLs are injected by the docker-compose at runtime via
-# CONNECTOR_PEERS env (which the connector image merges with this YAML).
-peers: []
-routes: []
+# Children that dial INBOUND to the apex via BTP (each child runs its own
+# embedded ConnectorNode — see packages/{town,mill}/src/cli.ts). The btpUrl
+# field is required by the connector schema and used by the apex's outbound
+# BTP client manager; in this stack the apex's transport=socks5 can't resolve
+# Docker DNS through the Anyone network, so the outbound dial fails. That's
+# fine — children dial UP to the apex on startup, and the apex accepts them
+# via BTP_ALLOW_NOAUTH (default-permissive). The static peer config makes
+# routes resolvable; the inbound BTP session is what carries traffic.
+peers:
+  - id: town
+    url: ws://townhouse-hs-town:3000
+    authToken: ''
+    assetCode: USD
+    assetScale: 6
+  - id: mill
+    url: ws://townhouse-hs-mill:3000
+    authToken: ''
+    assetCode: USD
+    assetScale: 6
+
+# Routes — children's ILP prefixes route through the named peer. Connector's
+# isValidILPAddress rejects trailing dots; RoutingTable matches via prefix +
+# '.' delimiter, so 'g.townhouse.town' (no trailing dot) is correct.
+routes:
+  - prefix: g.townhouse.town
+    nextHop: town
+    priority: 100
+  - prefix: g.townhouse.mill
+    nextHop: mill
+    priority: 100
