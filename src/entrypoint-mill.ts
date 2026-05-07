@@ -127,6 +127,14 @@ interface CliRawConfig {
     tokenAddress: string;
     keyId?: string;
   }>;
+  // Embedded-connector ClaimReceiver / chainProviders signer. When set
+  // (typically via SETTLEMENT_PRIVATE_KEY env), the embedded connector
+  // signs claims with this key in place of the identity hex.
+  settlementPrivateKey?: string;
+  // EVM treasury address advertised to the apex parent peer entry — the
+  // apex's PerPacketClaimService will use this as peerAddress on
+  // outbound channel-open calls.
+  parentEvmAddress?: string;
 }
 
 // --- Parse and normalize raw config ---
@@ -194,6 +202,9 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
   if (raw.parentPeerId) cfg.parentPeerId = raw.parentPeerId;
   if (raw.parentAuthToken !== undefined) cfg.parentAuthToken = raw.parentAuthToken;
   if (raw.chainProviders) cfg.chainProviders = raw.chainProviders;
+  if (raw.settlementPrivateKey)
+    cfg.settlementPrivateKey = raw.settlementPrivateKey;
+  if (raw.parentEvmAddress) cfg.parentEvmAddress = raw.parentEvmAddress;
 
   return cfg;
 }
@@ -323,6 +334,28 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   }
   if (out.parentAuthToken === undefined && env['TOON_PARENT_AUTH_TOKEN'] !== undefined) {
     out.parentAuthToken = env['TOON_PARENT_AUTH_TOKEN'];
+  }
+
+  // Settlement signer + parent peer EVM treasury — both safe to ship via
+  // env (private key is sensitive but already accepted as MILL_MNEMONIC /
+  // NODE_NOSTR_SECRET_KEY above; address is public). JSON config wins.
+  if (!out.settlementPrivateKey && env['SETTLEMENT_PRIVATE_KEY']) {
+    const v = env['SETTLEMENT_PRIVATE_KEY'];
+    if (!/^0x[0-9a-fA-F]{64}$/.test(v)) {
+      throw new Error(
+        'SETTLEMENT_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string'
+      );
+    }
+    out.settlementPrivateKey = v;
+  }
+  if (!out.parentEvmAddress && env['PARENT_EVM_ADDRESS']) {
+    const v = env['PARENT_EVM_ADDRESS'];
+    if (!/^0x[0-9a-fA-F]{40}$/.test(v)) {
+      throw new Error(
+        'PARENT_EVM_ADDRESS must be a 0x-prefixed 20-byte hex address'
+      );
+    }
+    out.parentEvmAddress = v;
   }
 
   return out;
