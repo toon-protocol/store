@@ -115,6 +115,18 @@ interface CliRawConfig {
   nodeId?: string;
   parentPeerId?: string;
   parentAuthToken?: string;
+  // chainProviders for ClaimReceiver + PerPacketClaimService init on the
+  // embedded connector. One entry per EVM chain mill plans to settle on.
+  // Shape mirrors the apex YAML chainProviders block. keyId is optional —
+  // mill defaults it to the identity-derived secp256k1 hex.
+  chainProviders?: ReadonlyArray<{
+    chainType: 'evm';
+    chainId: string;
+    rpcUrl: string;
+    registryAddress: string;
+    tokenAddress: string;
+    keyId?: string;
+  }>;
 }
 
 // --- Parse and normalize raw config ---
@@ -181,6 +193,7 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
   if (raw.nodeId) cfg.nodeId = raw.nodeId;
   if (raw.parentPeerId) cfg.parentPeerId = raw.parentPeerId;
   if (raw.parentAuthToken !== undefined) cfg.parentAuthToken = raw.parentAuthToken;
+  if (raw.chainProviders) cfg.chainProviders = raw.chainProviders;
 
   return cfg;
 }

@@ -129,10 +129,15 @@ RUN apk add --no-cache libstdc++
 WORKDIR /app
 
 # Create non-root user for security BEFORE copying files.
+# Symlink /app/data -> /data so the embedded connector's hardcoded
+# `./data/claims-<nodeId>.db` path (relative to WORKDIR=/app) lands in
+# the named volume mounted at /data instead of the container's
+# ephemeral writable layer.
 RUN addgroup -g 1001 toon && \
     adduser -D -u 1001 -G toon toon && \
     mkdir -p /data && \
-    chown toon:toon /data
+    chown toon:toon /data && \
+    ln -s /data /app/data
 
 # Copy minimal runtime from builder stage
 COPY --from=builder --chown=toon:toon /runtime ./
