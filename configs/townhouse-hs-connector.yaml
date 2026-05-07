@@ -96,6 +96,20 @@ peers:
     assetCode: USD
     assetScale: 6
     evmAddress: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc'
+  # Test client peer — used by packages/client/scripts/social-flow-hs-e2e.ts
+  # to send signed payment-channel claims through the apex. The url is a
+  # placeholder (the client dials INTO the apex via BTP/SOCKS, never the
+  # other way around — the apex would only outbound-dial it for hub-style
+  # claim push-back, which we don't exercise from this script). The
+  # evmAddress is Anvil acct[6], pre-funded with USDC by
+  # scripts/townhouse-hs-open-channels.sh so the apex can open a channel
+  # to it via /admin/channels.
+  - id: client
+    url: ws://townhouse-hs-client-placeholder:3000
+    authToken: ''
+    assetCode: USD
+    assetScale: 6
+    evmAddress: '0x976EA74026E726554dB657fA54763abd0C3a0aa9'
 
 # Routes — children's ILP prefixes route through the named peer. Connector's
 # isValidILPAddress rejects trailing dots; RoutingTable matches via prefix +
