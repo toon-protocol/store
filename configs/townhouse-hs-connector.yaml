@@ -163,7 +163,12 @@ chainProviders:
     # registered for blockchain: evm" warning + settlement-monitor
     # event-driven on-chain settlement silently disabled.
     chainId: evm:base:31337
-    rpcUrl: http://anvil:8545
+    # Akash anvil (DSEQ 26711267, deployed 2026-05-07). Public clearnet
+    # endpoint — apex's outbound chain-RPC dial leaves the container via
+    # the standard Docker bridge (NOT through socks5h://ator-sidecar:9050,
+    # which only governs BTP outbound). Privacy-conscious deployments
+    # would route this through the SOCKS5 proxy too — see follow-up.
+    rpcUrl: https://4c4sj003jtfhn2mguq8gcktgdo.ingress.akt.engineer
     registryAddress: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'
     tokenAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
     keyId: '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6'
