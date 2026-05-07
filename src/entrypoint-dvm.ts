@@ -1,32 +1,43 @@
 /**
- * DVM Node Entrypoint Adapter (Story 21.7)
+ * DVM Node Entrypoint Adapter (Story 21.7 + 21.12)
  *
  * Maps Townhouse orchestrator environment variables to DVM Node config,
  * loads JSON config from DVM_CONFIG_JSON or DVM_CONFIG_PATH,
- * registers DVM handlers (Arweave + Dungeon),
+ * registers the Arweave DVM handler (kind:5094),
  * and invokes createNode() in standalone HTTP mode.
+ *
+ * Story 21.12 additions:
+ *   - Hono BLS health server on blsPort (3400) exposing DvmHealthResponse
+ *   - Job-counter shim wrapping handlers (5-minute sliding window)
+ *   - KIND_PRICING_<kind>=<value> env-var support
  *
  * This is compiled via esbuild into a single ESM bundle for the Docker
  * runtime stage.
  *
  * Environment variable mapping:
- *   DVM_CONFIG_JSON      -> JSON config (mutually exclusive with DVM_CONFIG_PATH)
- *   DVM_CONFIG_PATH     -> Path to JSON config file
+ *   DVM_CONFIG_JSON       -> JSON config (mutually exclusive with DVM_CONFIG_PATH)
+ *   DVM_CONFIG_PATH      -> Path to JSON config file
  *   NODE_NOSTR_SECRET_KEY -> config.secretKey (64-char hex)
- *   BLS_PORT           -> config.blsPort (default: 3400)
- *   HANDLER_PORT       -> config.handlerPort (default: 3300)
- *   CONNECTOR_URL      -> config.connectorUrl (standalone connector HTTP URL)
- *   FEE_PER_JOB       -> config.basePricePerByte (per-job pricing)
- *   TURBO_TOKEN       -> Arweave upload token for Arweave DVM
+ *   BLS_PORT             -> config.blsPort (default: 3400)
+ *   HANDLER_PORT         -> config.handlerPort (default: 3300)
+ *   CONNECTOR_URL        -> config.connectorUrl (standalone connector HTTP URL)
+ *   FEE_PER_JOB         -> config.basePricePerByte (per-job pricing)
+ *   KIND_PRICING_<kind>  -> config.kindPricing[kind] (per-kind override)
+ *   TURBO_TOKEN         -> Arweave upload token for Arweave DVM
  *
  * Key differences from Town/Mill entries:
  * - Uses standalone HTTP mode (connectorUrl + handlerPort) NOT embedded BTP
- * - Registers multiple DVM handlers: kind:5094 (Arweave), kind:5250 (Dungeon)
+ * - Registers ONLY kind:5094 Arweave DVM. kind:5250 Dungeon DVM was removed
+ *   from this image (operator decision: this DVM is Arweave-only) so the
+ *   bundle no longer pulls in pet-dvm / memvid-node / o1js / mina-signer.
  * - Creates ArweaveUploadAdapter from TURBO_TOKEN for blob storage DVM
  */
 
 import { readFileSync } from 'node:fs';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import { createNode, type ToonNode } from '@toon-protocol/sdk';
+import type { DvmHealthResponse } from '@toon-protocol/sdk';
 import {
   createArweaveDvmHandler,
   type ArweaveDvmConfig,
@@ -34,12 +45,77 @@ import {
   type ArweaveUploadAdapter,
   ChunkManager,
 } from '@toon-protocol/sdk';
-import {
-  createDungeonDvmHandler,
-  type DungeonDvmConfig,
-} from '@toon-protocol/pet-dvm';
 import type { NodeConfig } from '@toon-protocol/sdk';
 import type { UnsignedEvent } from '@toon-protocol/core';
+
+// --- Job counter shim (5-minute sliding window) ---
+
+interface JobEvent {
+  ts: number;
+  kind: number;
+  status: 'success' | 'error';
+}
+
+interface JobCounterSnapshot {
+  total: number;
+  byKind: { kind: number; count: number }[];
+  byStatus: { processing: number; success: number; error: number; partial: number };
+}
+
+interface JobCounter {
+  wrap<T>(kind: number, handler: (ctx: T) => Promise<unknown>): (ctx: T) => Promise<unknown>;
+  snapshot(): JobCounterSnapshot;
+}
+
+export function createJobCounter(windowMs: number = 5 * 60 * 1000): JobCounter {
+  const events: JobEvent[] = [];
+  let processing = 0;
+
+  function evict() {
+    const cutoff = Date.now() - windowMs;
+    while (events.length > 0 && events[0]!.ts < cutoff) {
+      events.shift();
+    }
+  }
+
+  function wrap<T>(kind: number, handler: (ctx: T) => Promise<unknown>) {
+    return async (ctx: T): Promise<unknown> => {
+      processing++;
+      try {
+        const result = await handler(ctx);
+        processing = Math.max(0, processing - 1);
+        events.push({ ts: Date.now(), kind, status: 'success' });
+        evict();
+        return result;
+      } catch (err) {
+        processing = Math.max(0, processing - 1);
+        events.push({ ts: Date.now(), kind, status: 'error' });
+        evict();
+        throw err;
+      }
+    };
+  }
+
+  function snapshot(): JobCounterSnapshot {
+    evict();
+    const byKindMap = new Map<number, number>();
+    let success = 0;
+    let error = 0;
+    for (const e of events) {
+      byKindMap.set(e.kind, (byKindMap.get(e.kind) ?? 0) + 1);
+      if (e.status === 'success') success++;
+      else error++;
+    }
+    const byKind = Array.from(byKindMap.entries()).map(([kind, count]) => ({ kind, count }));
+    return {
+      total: events.length,
+      byKind,
+      byStatus: { processing, success, error, partial: 0 },
+    };
+  }
+
+  return { wrap, snapshot };
+}
 
 // --- Helper: Create Turbo adapter from token ---
 async function createTurboAdapter(
@@ -85,13 +161,6 @@ interface DvmRawConfig {
   // Arweave DVM config
   turboToken?: string;
   arweaveTags?: Record<string, string>;
-  // Dungeon DVM config
-  dungeonConfig?: {
-    mapWidth?: number;
-    mapHeight?: number;
-    seed?: number;
-  };
-  dungeonPricePerRun?: string | number;
 }
 
 // --- Parse and normalize config ---
@@ -164,7 +233,7 @@ function loadDvmConfig(): DvmRawConfig {
 }
 
 // --- Apply env var overlays to config ---
-function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
+export function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
   const out = { ...cfg };
   const env = process.env;
 
@@ -215,23 +284,39 @@ function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
     throw new Error('CONNECTOR_URL must be provided for standalone DVM mode');
   }
 
-  // Base price per byte (default 10n = $0.00001/byte)
-  // FEE_PER_JOB maps to basePricePerByte AND kindPricing[5250] for dual pricing:
-  // - basePricePerByte: applies to Arweave DVM (kind:5094) - per-byte pricing
-  // - kindPricing[5250]: applies to Dungeon DVM (kind:5250) - per-job pricing
+  // Base price per byte (default 10n = $0.00001/byte). Applies to the
+  // Arweave DVM (kind:5094) as per-byte pricing.
   if (env['FEE_PER_JOB']) {
-    const fee = BigInt(env['FEE_PER_JOB']);
-    out.basePricePerByte = fee;
-    out.kindPricing = { ...out.kindPricing, 5250: fee };
+    out.basePricePerByte = BigInt(env['FEE_PER_JOB']);
   } else if (out.basePricePerByte === undefined) {
     out.basePricePerByte = 10n;
+  }
+
+  // KIND_PRICING_<kind>=<value> — per-kind overrides take precedence over FEE_PER_JOB
+  // Scan all env keys matching /^KIND_PRICING_(\d+)$/.
+  const kindPricingPattern = /^KIND_PRICING_(\d+)$/;
+  for (const [key, value] of Object.entries(env)) {
+    const match = kindPricingPattern.exec(key);
+    if (!match || value === undefined) continue;
+    const kind = parseInt(match[1]!, 10);
+    if (!Number.isFinite(kind)) continue;
+    try {
+      const price = BigInt(value);
+      out.kindPricing = { ...out.kindPricing, [kind]: price };
+    } catch {
+      // Surface bad config: log a warning so operators can see why the env
+      // var didn't take effect. Do not throw — keeps startup resilient.
+      console.warn(
+        `[DVM Entrypoint] Ignoring ${key}: value ${JSON.stringify(value)} is not a valid bigint`
+      );
+    }
   }
 
   return out;
 }
 
 // --- Publish event callback (no-op for standalone DVM) ---
-async function noopPublish(event: UnsignedEvent): Promise<void> {
+async function _noopPublish(event: UnsignedEvent): Promise<void> {
   // In standalone mode, there's no relay WebSocket connection.
   // Events are either:
   // - Not published (Arweave DVM returns txId directly)
@@ -270,17 +355,6 @@ async function main(): Promise<ToonNode> {
     arweaveTags: rawConfig.arweaveTags,
   };
 
-  // Build Dungeon DVM config
-  const dungeonConfig: DungeonDvmConfig = {
-    dungeonConfig: {
-      mapWidth: rawConfig.dungeonConfig?.mapWidth ?? 40,
-      mapHeight: rawConfig.dungeonConfig?.mapHeight ?? 20,
-      seed: rawConfig.dungeonConfig?.seed ?? Math.floor(Date.now() / 1000),
-    },
-    pricePerRun: BigInt(String(rawConfig.dungeonPricePerRun ?? 10000)),
-    publishEvent: noopPublish,
-  };
-
   // Create node in standalone mode (HTTP handler, NOT embedded connector)
   console.log('[DVM Entrypoint] Creating node in standalone HTTP mode...');
   console.log(`  connectorUrl: ${config.connectorUrl}`);
@@ -297,30 +371,56 @@ async function main(): Promise<ToonNode> {
     devMode: process.env['NODE_ENV'] !== 'production',
   });
 
-  // Register DVM handlers
+  // Job counter shim — wraps each handler to track byKind + byStatus counters
+  const counter = createJobCounter();
+
+  // Register DVM handlers (wrapped with counter shim)
   // kind:5094 — Arweave blob storage DVM
   console.log('[DVM Entrypoint] Registering Arweave DVM handler (kind:5094)...');
-  node.on(5094, createArweaveDvmHandler(arweaveConfig));
-
-  // kind:5250 — Dungeon run DVM
-  console.log('[DVM Entrypoint] Registering Dungeon DVM handler (kind:5250)...');
-  node.on(5250, createDungeonDvmHandler(dungeonConfig));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  node.on(5094, counter.wrap(5094, createArweaveDvmHandler(arweaveConfig)) as any);
 
   // Start the node
   console.log('[DVM Entrypoint] Starting DVM node...');
   await node.start();
 
-  // Log startup banner
+  // BLS health server on blsPort (3400 default) — started after node.start()
   const pubkey = node.identity?.pubkey;
   const safePubkey = typeof pubkey === 'string' ? pubkey : 'unknown';
+  const startedAt = Date.now();
+  const blsPort = config.blsPort ?? 3400;
+
+  const blsApp = new Hono();
+  blsApp.get('/health', (c) => {
+    const health: DvmHealthResponse = {
+      status: 'ok',
+      version: '1.0.0',
+      nodePubkey: safePubkey,
+      uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+      handlerKinds: [5094],
+      kindPricing: Object.fromEntries(
+        Object.entries(config.kindPricing ?? {}).map(([k, v]) => [k, String(v)])
+      ),
+      basePricePerByte: String(config.basePricePerByte ?? 10n),
+      jobsRecent: counter.snapshot(),
+    };
+    return c.json(health);
+  });
+
+  const blsServer = serve({ fetch: blsApp.fetch, port: blsPort }) as unknown as {
+    close: (cb?: (err?: Error) => void) => void;
+  };
+  console.log(`[DVM Entrypoint] BLS health server on port ${blsPort}`);
+
+  // Log startup banner
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                     DVM Ready                          ║
 ╠═══════════════════════════════════════════════════════════╣
 ║ Pubkey:        ${safePubkey.slice(0, 32)}... ║
 ║ Handler Port:   ${config.handlerPort} (HTTP ILP)                          ║
-║ BLS Port:      ${config.blsPort} (health endpoint)                       ║
-║ Handler Kinds: 5094 (Arweave), 5250 (Dungeon)         ║
+║ BLS Port:      ${blsPort} (health endpoint)                       ║
+║ Handler Kinds: 5094 (Arweave only)                    ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 
@@ -334,6 +434,11 @@ async function main(): Promise<ToonNode> {
     shuttingDown = true;
     console.log(`[DVM Entrypoint] Received ${signal}, shutting down...`);
     try {
+      // serve() returns a Node http.Server whose close() takes a callback.
+      // Wrap to actually wait for sockets to drain before stopping the node.
+      await new Promise<void>((resolve, reject) => {
+        blsServer.close((err) => (err ? reject(err) : resolve()));
+      });
       await node.stop();
       console.log('[DVM Entrypoint] DVM stopped gracefully');
     } catch (err) {
@@ -352,11 +457,14 @@ async function main(): Promise<ToonNode> {
   return node;
 }
 
-// --- Run with error handling ---
-main().catch((err) => {
-  console.error(`[DVM Entrypoint] [Fatal] ${err instanceof Error ? err.message : err}`);
-  if (err instanceof Error && err.stack) {
-    console.error(err.stack);
-  }
-  process.exit(1);
-});
+// Gated so importing this module from a test (Vitest sets VITEST=true) does
+// not spin up an actual DVM node — tests drive exported functions directly.
+if (!process.env['VITEST']) {
+  main().catch((err) => {
+    console.error(`[DVM Entrypoint] [Fatal] ${err instanceof Error ? err.message : err}`);
+    if (err instanceof Error && err.stack) {
+      console.error(err.stack);
+    }
+    process.exit(1);
+  });
+}

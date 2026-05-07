@@ -1,0 +1,51 @@
+# Town SOL Devnet — Akash-hosted Solana test-validator image
+#
+# Bakes infra/solana/entrypoint.sh + contracts/solana/*.so into the upstream
+# solana-test-validator image so it runs standalone on Akash (no host bind
+# mounts available there).
+#
+# Build:
+#   docker build -f docker/Dockerfile.akash-solana -t ghcr.io/toon-protocol/akash-solana:demo .
+# Push:
+#   docker push ghcr.io/toon-protocol/akash-solana:demo
+#
+# Mirrors the dev compose solana service (docker-compose-townhouse-dev.yml:128-153)
+# except --ledger points at /data/test-ledger for persistence (not tmpfs).
+
+FROM ghcr.io/beeman/solana-test-validator:latest
+
+USER root
+
+# Node 18 (Debian 12 default) + npm + curl. Node is for the post-startup
+# bootstrap (Mock USDC mint + faucet treasury); curl is used by the entrypoint
+# readiness probe. Upstream beeman/solana-test-validator:latest dropped curl,
+# so we re-add it here. --no-install-recommends + cache clean keep size in
+# check.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nodejs npm ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Bake the BPF programs that get loaded at genesis.
+COPY contracts/solana /programs
+
+# Bake the existing entrypoint (loads .so files via --bpf-program at genesis,
+# probes /health for readiness, then runs the USDC bootstrap).
+COPY infra/solana/entrypoint.sh /entrypoint.sh
+
+# Bootstrap module: SPL primitives + Mock USDC mint creator + dev keypairs.
+# Runs once at startup against http://localhost:8899 (idempotent on existing
+# mints). See infra/solana/bootstrap-usdc.mjs.
+COPY infra/solana/package.json /bootstrap/package.json
+COPY infra/solana/spl-primitives.mjs /bootstrap/spl-primitives.mjs
+COPY infra/solana/spl-primitives.d.mts /bootstrap/spl-primitives.d.mts
+COPY infra/solana/bootstrap-usdc.mjs /bootstrap/bootstrap-usdc.mjs
+COPY infra/solana/keys /bootstrap/keys
+RUN cd /bootstrap && npm install --omit=dev --no-audit --no-fund \
+ && npm cache clean --force
+
+# Patch the ledger path to /data so persistent volume survives restarts.
+RUN sed -i 's|--limit-ledger-size 50000000|--ledger /data/test-ledger --limit-ledger-size 50000000|' /entrypoint.sh \
+ && chmod +x /entrypoint.sh \
+ && mkdir -p /data
+
+ENTRYPOINT ["/entrypoint.sh"]

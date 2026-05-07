@@ -1,0 +1,92 @@
+# Town EVM Devnet — Akash-hosted Anvil image
+#
+# Bakes contracts/evm + a deploy/fund entrypoint into the foundry image so it
+# runs standalone on Akash without host volume mounts (Akash doesn't support
+# bind mounts).
+#
+# Build:
+#   docker build -f docker/Dockerfile.akash-anvil -t ghcr.io/toon-protocol/akash-anvil:demo .
+# Push:
+#   docker push ghcr.io/toon-protocol/akash-anvil:demo
+#
+# Mirrors the dev compose anvil command (docker-compose-townhouse-dev.yml:67-123)
+# except it uses --state /data/state.json for snapshot persistence and reads
+# CHAIN_ID + ANVIL_* from env so the SDL can override.
+
+FROM ghcr.io/foundry-rs/foundry:latest
+
+USER root
+
+# Bake contracts (forge script DeployLocal.s.sol uses these).
+COPY contracts/evm /contracts
+
+COPY <<'EOF' /entrypoint.sh
+#!/bin/sh
+set -eu
+
+CHAIN_ID="${CHAIN_ID:-31338}"
+ANVIL_HOST="${ANVIL_HOST:-0.0.0.0}"
+ANVIL_PORT="${ANVIL_PORT:-8545}"
+ANVIL_ACCOUNTS="${ANVIL_ACCOUNTS:-10}"
+ANVIL_BALANCE="${ANVIL_BALANCE:-10000}"
+ANVIL_BLOCK_TIME="${ANVIL_BLOCK_TIME:-2}"
+STATE_FILE="${STATE_FILE:-/data/state.json}"
+
+mkdir -p "$(dirname "$STATE_FILE")"
+
+echo "Starting Anvil (chain-id=$CHAIN_ID, port=$ANVIL_PORT, state=$STATE_FILE)..."
+anvil \
+  --host "$ANVIL_HOST" \
+  --port "$ANVIL_PORT" \
+  --chain-id "$CHAIN_ID" \
+  --accounts "$ANVIL_ACCOUNTS" \
+  --balance "$ANVIL_BALANCE" \
+  --block-time "$ANVIL_BLOCK_TIME" \
+  --state "$STATE_FILE" \
+  --state-interval 30 &
+ANVIL_PID=$!
+
+trap 'kill -TERM "$ANVIL_PID" 2>/dev/null || true' TERM INT
+
+echo "Waiting for Anvil to be ready..."
+until cast client --rpc-url "http://localhost:$ANVIL_PORT" 2>/dev/null | grep -q 'anvil'; do
+  sleep 1
+done
+
+# Deploy contracts only on first boot (state file absent).
+if [ ! -s "$STATE_FILE" ]; then
+  echo "First boot — deploying contracts..."
+  cd /contracts
+  forge script script/DeployLocal.s.sol:DeployLocalScript \
+    --rpc-url "http://localhost:$ANVIL_PORT" \
+    --broadcast \
+    --skip-simulation \
+    || echo "Deployment failed (non-fatal)"
+
+  echo "Funding test accounts with Mock USDC..."
+  DEPLOYER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+  TOKEN=0x5FbDB2315678afecb367f032d93F642f64180aa3
+  AMOUNT=10000000000000000000000
+  for ADDR in \
+    0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+    0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65 \
+    0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc \
+    0x976EA74026E726554dB657fA54763abd0C3a0aa9 \
+    0x14dC79964da2C08b23698B3D3cc7Ca32193d9955 \
+    0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f \
+    0xa0Ee7A142d267C1f36714E4a8F75612F20a79720; do
+    cast send --rpc-url "http://localhost:$ANVIL_PORT" --private-key "$DEPLOYER_KEY" \
+      "$TOKEN" "transfer(address,uint256)" "$ADDR" "$AMOUNT" 2>/dev/null \
+      && echo "Funded $ADDR" || echo "Fund $ADDR failed (non-fatal)"
+  done
+else
+  echo "State file exists — skipping deployment (warm boot)."
+fi
+
+echo "Anvil ready."
+wait "$ANVIL_PID"
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

@@ -12,11 +12,10 @@
 #   docker build -f docker/Dockerfile.mill -t toon:mill .
 #
 # Pattern follows docker/Dockerfile.town (multi-stage, esbuild, native modules, non-root).
-
-# Metadata
-LABEL maintainer="toon-protocol"
-LABEL version="1.0.0"
-LABEL description="TOON Mill Node - Multi-chain swap peer with embedded connector"
+#
+# NOTE: image-level LABELs are declared in the runtime stage (after the
+# second FROM) — LABELs declared before any FROM are silently dropped by
+# Docker and never appear on the produced image (`docker inspect` confirms).
 
 # -- Stage 1: Builder -------------------------------------------------------
 FROM node:20-alpine AS builder
@@ -97,8 +96,34 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
     cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
     cp -r "$FUTP_DIR" /runtime/node_modules/
 
+# Copy all @solana/* v3 packages + @solana-program/token (connector Solana settlement SDK)
+RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program && \
+    for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules/@solana/*/ 2>/dev/null); do \
+      pkg=$(basename "$store_dir"); \
+      [ ! -d "/runtime/node_modules/@solana/$pkg" ] && cp -rL "$store_dir" "/runtime/node_modules/@solana/$pkg" || true; \
+    done && \
+    SOLANA_TOKEN_STORE=$(ls -d node_modules/.pnpm/@solana-program+token@0.6*/node_modules/@solana-program/token 2>/dev/null | head -1) && \
+    [ -n "$SOLANA_TOKEN_STORE" ] && cp -rL "$SOLANA_TOKEN_STORE" /runtime/node_modules/@solana-program/token || true && \
+    WS_STORE=$(ls -d node_modules/.pnpm/ws@8.*/node_modules/ws 2>/dev/null | tail -1) && \
+    [ -n "$WS_STORE" ] && cp -rL "$WS_STORE" /runtime/node_modules/ws || true
+
+# Connector requires express at runtime for its health server even when
+# adminApi.enabled=false. Install via npm — same pattern as Dockerfile.sdk-e2e.
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 && \
+    cp -r /tmp/node_modules/* /runtime/node_modules/ && \
+    find /runtime/node_modules -name '*.d.ts' -delete && \
+    find /runtime/node_modules -name '*.d.ts.map' -delete && \
+    find /runtime/node_modules -name '*.js.map' -delete && \
+    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+
 # -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
+
+# Image metadata (must be declared in the runtime stage so they appear on the
+# produced image; LABELs before the first FROM are silently dropped).
+LABEL maintainer="toon-protocol"
+LABEL version="1.0.0"
+LABEL description="TOON Mill Node - Multi-chain swap peer with embedded connector"
 
 # Install runtime deps for native modules ONLY.
 RUN apk add --no-cache libstdc++
@@ -106,10 +131,15 @@ RUN apk add --no-cache libstdc++
 WORKDIR /app
 
 # Create non-root user for security BEFORE copying files.
+# Symlink /app/data -> /data so the embedded connector's hardcoded
+# `./data/claims-<nodeId>.db` path (relative to WORKDIR=/app) lands in
+# the named volume mounted at /data instead of the container's
+# ephemeral writable layer.
 RUN addgroup -g 1001 toon && \
     adduser -D -u 1001 -G toon toon && \
     mkdir -p /data && \
-    chown toon:toon /data
+    chown toon:toon /data && \
+    ln -s /data /app/data
 
 # Copy minimal runtime from builder stage
 COPY --from=builder --chown=toon:toon /runtime ./

@@ -1,0 +1,59 @@
+# Town SOL Explorer — Akash-hosted Solana Explorer image
+#
+# Builds the official solana-labs/explorer (the source behind
+# explorer.solana.com) as a production Next.js server, pre-configured to
+# default to our custom RPC cluster.
+#
+# Build:
+#   docker build -f docker/Dockerfile.akash-solana-explorer \
+#     -t ghcr.io/toon-protocol/akash-solana-explorer:demo .
+# Push:
+#   docker push ghcr.io/toon-protocol/akash-solana-explorer:demo
+#
+# Pinned to a known-good commit. Bump SOLANA_EXPLORER_REF to upgrade.
+
+# solana-labs/explorer has no tags; pin to a commit SHA on master.
+# Bump deliberately when rolling forward. Last known-good: 2026-05-04.
+ARG SOLANA_EXPLORER_REF=63fe184b6a1543f86c436c9e1cce1dcc7696a818
+
+FROM node:20-alpine AS builder
+
+ARG SOLANA_EXPLORER_REF
+
+RUN apk add --no-cache git python3 make g++
+
+WORKDIR /app
+RUN git clone https://github.com/solana-labs/explorer.git . \
+ && git checkout "${SOLANA_EXPLORER_REF}"
+
+# Repo uses pnpm; package manager pinned in package.json. Install + build.
+RUN corepack enable \
+ && corepack prepare --activate \
+ && pnpm install --frozen-lockfile \
+ && pnpm build
+
+
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+# Copy only what's needed to run `next start`. Next.js 14 standalone output
+# would be smaller, but the upstream config doesn't enable it; copy the full
+# build instead.
+COPY --from=builder /app /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+# Sane defaults; SDL env can override at deploy time.
+ENV NEXT_PUBLIC_DEFAULT_CLUSTER=custom
+ENV NEXT_PUBLIC_CLUSTER_NAME="Town SOL Devnet"
+
+EXPOSE 3000
+
+# Invoke Next.js directly via the local binary. We deliberately avoid
+# `pnpm start` here because the runtime stage (a fresh node:20-alpine)
+# doesn't have corepack/pnpm activated; only the builder stage does.
+# `node_modules/.bin/next` is always present after a successful build.
+CMD ["node_modules/.bin/next", "start", "-p", "3000", "-H", "0.0.0.0"]
