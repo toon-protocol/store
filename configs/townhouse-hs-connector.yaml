@@ -73,17 +73,29 @@ transport:
 # fine — children dial UP to the apex on startup, and the apex accepts them
 # via BTP_ALLOW_NOAUTH (default-permissive). The static peer config makes
 # routes resolvable; the inbound BTP session is what carries traffic.
+#
+# `evmAddress` is per-child. The apex's PerPacketClaimService dials these
+# addresses when opening payment channels via POST /channels (operator
+# script: scripts/townhouse-hs-open-channels.sh). DEV-ONLY assignment —
+# Anvil deterministic accounts:
+#   apex (this connector) → acct[3] = 0x90F79bf6EB2c4f870365E785982E1f101E93b906
+#                            (chainProviders.keyId privkey above)
+#   town                  → acct[4] = 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
+#   mill                  → acct[5] = 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
+# Operators MUST replace these for any non-Anvil deployment.
 peers:
   - id: town
     url: ws://townhouse-hs-town:3000
     authToken: ''
     assetCode: USD
     assetScale: 6
+    evmAddress: '0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65'
   - id: mill
     url: ws://townhouse-hs-mill:3000
     authToken: ''
     assetCode: USD
     assetScale: 6
+    evmAddress: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc'
 
 # Routes — children's ILP prefixes route through the named peer. Connector's
 # isValidILPAddress rejects trailing dots; RoutingTable matches via prefix +
