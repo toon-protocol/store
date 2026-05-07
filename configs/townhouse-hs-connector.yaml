@@ -125,7 +125,7 @@ routes:
 # Chain providers — required for PerPacketClaimService + ClaimReceiver to
 # auto-instantiate inside the connector. Without this block the apex rejects
 # any forwarded paid PREPARE with `T00 - Per-packet claim service not
-# configured`. The image (ghcr.io/toon-protocol/connector:3.4.0) reads
+# configured`. The image (ghcr.io/toon-protocol/connector:3.4.1) reads
 # chainProviders from the YAML config and wires up the per-packet claim
 # pipeline at startup.
 #
