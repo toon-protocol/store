@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type * as SdkModule from '@toon-protocol/sdk';
 
 // ── Mock heavy deps that would pull in WASM/native modules ──────────────────
 
@@ -16,7 +17,7 @@ vi.mock('@toon-protocol/pet-dvm', () => ({
 }));
 
 vi.mock('@toon-protocol/sdk', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@toon-protocol/sdk')>();
+  const actual = await importOriginal<typeof SdkModule>();
   return {
     ...actual,
     createNode: vi.fn(async () => ({

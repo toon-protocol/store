@@ -316,7 +316,7 @@ export function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
 }
 
 // --- Publish event callback (no-op for standalone DVM) ---
-async function noopPublish(event: UnsignedEvent): Promise<void> {
+async function _noopPublish(event: UnsignedEvent): Promise<void> {
   // In standalone mode, there's no relay WebSocket connection.
   // Events are either:
   // - Not published (Arweave DVM returns txId directly)

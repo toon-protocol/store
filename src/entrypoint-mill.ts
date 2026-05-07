@@ -119,14 +119,14 @@ interface CliRawConfig {
   // embedded connector. One entry per EVM chain mill plans to settle on.
   // Shape mirrors the apex YAML chainProviders block. keyId is optional —
   // mill defaults it to the identity-derived secp256k1 hex.
-  chainProviders?: ReadonlyArray<{
+  chainProviders?: readonly {
     chainType: 'evm';
     chainId: string;
     rpcUrl: string;
     registryAddress: string;
     tokenAddress: string;
     keyId?: string;
-  }>;
+  }[];
   // Embedded-connector ClaimReceiver / chainProviders signer. When set
   // (typically via SETTLEMENT_PRIVATE_KEY env), the embedded connector
   // signs claims with this key in place of the identity hex.
@@ -223,7 +223,7 @@ export function loadMillConfig(): MillConfig {
       // secret material (mnemonic, secretKey, channel state) in process.env
       // memory. Placed before the null-guard so JSON.parse('null') also cleans
       // up. MILL_CONFIG_PATH is intentionally NOT cleaned — a path is not secret.
-      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+       
       delete process.env['MILL_CONFIG_JSON'];
       if (!rawConfig) {
         throw new Error('MILL_CONFIG_JSON parsed to null or undefined');
