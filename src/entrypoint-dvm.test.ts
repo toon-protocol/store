@@ -158,14 +158,15 @@ describe('applyEnvOverlay — KIND_PRICING_<kind> support', () => {
     expect(out.kindPricing?.[5250]).toBe(10000n);
   });
 
-  it('KIND_PRICING_5094=5 overrides FEE_PER_JOB for kind 5094', () => {
+  it('KIND_PRICING_5094=5 coexists with FEE_PER_JOB basePricePerByte', () => {
     process.env['FEE_PER_JOB'] = '10';
     process.env['KIND_PRICING_5094'] = '5';
     const out = applyEnvOverlay({});
-    // FEE_PER_JOB sets basePricePerByte + kindPricing[5250]
+    // FEE_PER_JOB sets basePricePerByte. (kind:5250 was removed in commit
+    // ca29625 — DVM is Arweave-only now, so FEE_PER_JOB no longer fans
+    // out to a per-kind entry.)
     expect(out.basePricePerByte).toBe(10n);
-    expect(out.kindPricing?.[5250]).toBe(10n);
-    // KIND_PRICING_5094 overrides for kind 5094
+    // KIND_PRICING_5094 sets kind 5094 pricing
     expect(out.kindPricing?.[5094]).toBe(5n);
   });
 
