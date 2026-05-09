@@ -1,0 +1,156 @@
+# TOON Townhouse API Container (esbuild-bundled Multi-Stage Build)
+#
+# Purpose:
+#   Containerized Townhouse API server for HS-mode deployment (Story 45.4).
+#   Mounts /var/run/docker.sock at runtime to orchestrate sibling containers.
+#
+# Consumers:
+#   - docker-compose-townhouse-hs.yml (Story 45.2) — townhouse-api service
+#   - `npx @toon-protocol/townhouse hs up` (Story 45.4) — one-command apex start
+#
+# Build from repo root:
+#   docker build -f docker/Dockerfile.townhouse-api -t toon:townhouse-api .
+#
+# Pattern follows docker/Dockerfile.mill (multi-stage, esbuild, non-root).
+# Key difference: no @solana/* or mina-signer cherry-picks — those transitive
+# imports from the connector dep chain are kept as externals, installed via npm
+# in the runtime stage (simpler than cherry-picking pnpm's hoist tree for the
+# few paths the API server actually exercises at runtime).
+#
+# NOTE: image-level LABELs are declared in the runtime stage (after the
+# second FROM) — LABELs declared before any FROM are silently dropped by
+# Docker and never appear on the produced image.
+
+# -- Stage 1: Builder -------------------------------------------------------
+FROM node:20-alpine AS builder
+
+# Install build dependencies for native modules
+RUN apk add --no-cache python3 py3-setuptools make g++
+
+# Install pnpm (pinned for deterministic builds)
+RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+
+WORKDIR /app
+
+# Copy dependency manifests for layer-cache efficiency
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY patches/ ./patches/
+COPY packages/bls/package.json ./packages/bls/
+COPY packages/core/package.json ./packages/core/
+COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/mill/package.json ./packages/mill/
+COPY packages/townhouse/package.json ./packages/townhouse/
+COPY docker/package.json ./docker/
+
+# Install all dependencies (including devDependencies needed for build)
+RUN pnpm install --frozen-lockfile
+
+# Copy source code (only packages in the townhouse dep chain)
+COPY tsconfig.json ./
+COPY packages/bls/ ./packages/bls/
+COPY packages/core/ ./packages/core/
+COPY packages/sdk/ ./packages/sdk/
+COPY packages/mill/ ./packages/mill/
+COPY packages/townhouse/ ./packages/townhouse/
+COPY docker/ ./docker/
+
+# Build workspace packages, then bundle the entrypoint.
+# Dependency chain: core → sdk → bls → mill → townhouse
+RUN pnpm -r \
+      --filter '@toon-protocol/core' \
+      --filter '@toon-protocol/sdk' \
+      --filter '@toon-protocol/bls' \
+      --filter '@toon-protocol/mill' \
+      --filter '@toon-protocol/townhouse' \
+      build && \
+    cd docker && \
+    pnpm exec esbuild src/entrypoint-townhouse-api.ts \
+      --bundle \
+      --platform=node \
+      --target=node20 \
+      --format=esm \
+      --minify \
+      --outfile=dist/entrypoint-townhouse-api.js \
+      --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
+      --external:dockerode \
+      --external:ethers \
+      --external:express \
+      --external:mina-signer \
+      --external:o1js \
+      --external:@solana/kit \
+      --external:@solana-program/token \
+      --external:@toon-protocol/mina-zkapp
+
+# -- Assemble minimal runtime directory --------------------------------------
+RUN mkdir -p /runtime/node_modules
+
+# Copy esbuild bundle
+RUN cp docker/dist/entrypoint-townhouse-api.js /runtime/
+
+# ESM package.json (bundle uses import.meta.url via banner)
+RUN echo '{"type":"module"}' > /runtime/package.json
+
+# Install external modules: dockerode (Docker socket client), ethers + express
+# (connector dep chain), socks-proxy-agent (ATOR transport).
+RUN cd /tmp && npm init -y && \
+    npm install --omit=dev dockerode@4 ethers@6 express@4 socks-proxy-agent@8 && \
+    cp -r /tmp/node_modules/* /runtime/node_modules/ && \
+    find /runtime/node_modules -name '*.d.ts' -delete && \
+    find /runtime/node_modules -name '*.d.ts.map' -delete && \
+    find /runtime/node_modules -name '*.js.map' -delete && \
+    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+
+# Copy @solana/* v3 packages and @solana-program/token — transitive externals
+# from the connector dep chain. The API server never exercises Solana settlement
+# paths at runtime, but the bundle references them as external imports and Node
+# will attempt to resolve them on startup.
+RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program && \
+    for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules/@solana/*/ 2>/dev/null); do \
+      pkg=$(basename "$store_dir"); \
+      [ ! -d "/runtime/node_modules/@solana/$pkg" ] && cp -rL "$store_dir" "/runtime/node_modules/@solana/$pkg" || true; \
+    done && \
+    SOLANA_TOKEN_STORE=$(ls -d node_modules/.pnpm/@solana-program+token@0.6*/node_modules/@solana-program/token 2>/dev/null | head -1) && \
+    [ -n "$SOLANA_TOKEN_STORE" ] && cp -rL "$SOLANA_TOKEN_STORE" /runtime/node_modules/@solana-program/token || true && \
+    WS_STORE=$(ls -d node_modules/.pnpm/ws@8.*/node_modules/ws 2>/dev/null | tail -1) && \
+    [ -n "$WS_STORE" ] && cp -rL "$WS_STORE" /runtime/node_modules/ws || true
+
+# -- Stage 2: Runtime --------------------------------------------------------
+FROM node:20-alpine
+
+# Image metadata (must be in runtime stage — see header comment)
+LABEL maintainer="toon-protocol"
+LABEL version="0.1.0"
+LABEL description="TOON Townhouse API - Fastify orchestration API for HS-mode deployment"
+
+# Install runtime deps for native modules ONLY.
+RUN apk add --no-cache libstdc++
+
+WORKDIR /app
+
+# Create non-root user (uid:gid 1001:1001, matches town/mill/dvm pattern).
+# The container mounts /var/run/docker.sock at runtime — the toon user must be
+# in the docker group (gid 999 by default on most Linux hosts). Operators who
+# need socket access should add --group-add 999 to their docker run command,
+# or run with --privileged in development. The Dockerfile does NOT bake in the
+# docker group assumption; that would tie the image to a specific host gid.
+RUN addgroup -g 1001 toon && \
+    adduser -D -u 1001 -G toon toon
+
+# Copy minimal runtime from builder stage
+COPY --from=builder --chown=toon:toon /runtime ./
+
+# Environment variable defaults
+ENV NODE_ENV=production
+ENV TOWNHOUSE_API_PORT=28090
+
+# Expose port:
+#   28090 - Townhouse API (Fastify, operator maps to preferred host port)
+EXPOSE 28090
+
+# Health check against the API health endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://localhost:${TOWNHOUSE_API_PORT}/api/health || exit 1
+
+# Run as non-root user
+USER toon
+CMD ["node", "/app/entrypoint-townhouse-api.js"]
