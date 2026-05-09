@@ -21,11 +21,13 @@
     "@toon-protocol/relay": "workspace:*",
     "@toon-protocol/sdk": "workspace:*",
     "@toon-protocol/town": "workspace:*",
+    "@toon-protocol/townhouse": "workspace:*",
     "hono": "^4.11.10",
     "nostr-tools": "^2.10.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/dockerode": "^3.3.0",
     "@types/node": "^20.11.0",
     "@types/ws": "^8.5.10",
     "esbuild": "^0.24.0",
