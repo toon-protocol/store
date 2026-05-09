@@ -17,8 +17,6 @@
  *   docker build -f docker/Dockerfile.townhouse-api -t toon:townhouse-api .
  */
 
-import { join } from 'node:path';
-
 import Docker from 'dockerode';
 
 import {
@@ -119,10 +117,10 @@ const shutdown = async (sig: string): Promise<void> => {
   console.log(`\n[townhouse-api] ${sig} — closing...`);
   try {
     transportProbe.stop();
-  } catch {}
+  } catch (_) { /* ignore stop errors on shutdown */ }
   try {
     await apiServer.app.close();
-  } catch {}
+  } catch (_) { /* ignore close errors on shutdown */ }
   process.exit(0);
 };
 process.on('SIGINT', () => void shutdown('SIGINT'));
