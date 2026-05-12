@@ -122,8 +122,14 @@ LABEL maintainer="toon-protocol"
 LABEL version="0.1.0"
 LABEL description="TOON Townhouse API - Fastify orchestration API for HS-mode deployment"
 
-# Install runtime deps for native modules ONLY.
-RUN apk add --no-cache libstdc++
+# Install runtime deps: native modules + docker CLI/compose.
+# The orchestrator (DockerOrchestrator.startNodeViaCompose) shells out to
+# `docker compose -f ... up -d <type>` for each lazy peer-node provisioning
+# request. Without docker-cli + docker-cli-compose installed in the image,
+# every `node add` POST fails at step 4 (`start-container`) with ENOENT on
+# the `docker` binary. Discovered by Story 46.4 live gate run (Finding E,
+# 2026-05-11).
+RUN apk add --no-cache libstdc++ docker-cli docker-cli-compose
 
 WORKDIR /app
 

@@ -73,13 +73,32 @@ await walletManager.fromMnemonic(mnemonic);
 console.log('[townhouse-api] wallet decrypted');
 
 const docker = new Docker();
-const orchestrator = new DockerOrchestrator(docker, config, walletManager);
 
+// Construct the HS-profile orchestrator. `compose/townhouse-hs.yml` is written
+// by handleHsUp on the host (via materializeComposeTemplate('hs', {townhouseHome:configDir}))
+// and reaches the container at /.townhouse/compose/townhouse-hs.yml via the
+// ${TOWNHOUSE_HOME}:/.townhouse:rw bind mount. The default 'dev' profile would
+// fail `startNodeViaCompose` with OrchestratorError on the first /api/nodes POST.
+// Discovered by Story 46.4 live gate run (Finding F, 2026-05-11).
+const composePath = '/.townhouse/compose/townhouse-hs.yml';
+const orchestrator = new DockerOrchestrator(docker, config, walletManager, {
+  profile: 'hs',
+  composePath,
+});
+
+// Connector admin URL — 127.0.0.1 inside a container resolves to THIS
+// container's loopback, not the host's and not the connector's. Both
+// containers share the `townhouse-hs-net` Docker network, and the connector
+// has `hostname: connector` per the compose template, so Docker DNS resolves
+// the right peer. Discovered by Story 46.4 live gate run (Finding G,
+// 2026-05-11). Override via env var for non-default deployments.
+const connectorHost =
+  process.env['TOWNHOUSE_CONNECTOR_HOST'] ?? 'connector';
 const connectorAdmin = new ConnectorAdminClient(
-  `http://127.0.0.1:${config.connector.adminPort}`
+  `http://${connectorHost}:${config.connector.adminPort}`
 );
 console.log(
-  `[townhouse-api] connector admin: http://127.0.0.1:${config.connector.adminPort}`
+  `[townhouse-api] connector admin: http://${connectorHost}:${config.connector.adminPort}`
 );
 
 const transportProbe = new TransportProbe({
