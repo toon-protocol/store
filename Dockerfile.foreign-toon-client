@@ -1,0 +1,195 @@
+# syntax=docker/dockerfile:1.7
+# Persistent Akash Foreign-TOON-Client Pod image (Story 49.3)
+#
+# Purpose:
+#   Long-lived Akash deployment that wraps 49.1's in-process publish flow
+#   behind a Fastify HTTP control plane. Runs a LOCAL `anon` daemon
+#   (ator-onion mode) for outbound SOCKS5 to the operator's .anyone hidden
+#   service — NO HiddenServiceDir (the pod is a CLIENT, not an HS host).
+#   The datacenter's anon builds better circuits than routing through the
+#   potentially overloaded public proxy.
+#
+# Consumers:
+#   - scripts/akash-deploy.sh cmd_build_foreign_toon_client
+#   - deploy/akash/foreign-toon-client.sdl.yaml
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.foreign-toon-client \
+#     -t ghcr.io/toon-protocol/akash-foreign-toon-client:demo .
+
+# ── Stage 1: anon-base (Debian + ator-protocol .deb) ─────────────────────────
+# Pinned to the same version that docker/townhouse-ator-sidecar uses, so the
+# anon binary behaviour is consistent across the two integration paths.
+FROM debian:bookworm-slim AS anon-base
+
+ARG TARGETARCH
+ARG ANON_VERSION=0.4.10.0-beta
+ARG DEB_REVISION=1.d12.bookworm+1
+ARG ANON_RELEASE_BASE=https://github.com/anyone-protocol/ator-protocol/releases/download/v${ANON_VERSION}
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+# Checksums mirrored from docker/townhouse-ator-sidecar/checksums.txt — keep
+# in sync. sha256sum -c compatible format (checksum, two spaces, filename).
+COPY docker/townhouse-ator-sidecar/checksums.txt /tmp/checksums.txt
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) DEB_FILE="anon_${ANON_VERSION}-${DEB_REVISION}_amd64.deb" ;; \
+        arm64) DEB_FILE="anon_${ANON_VERSION}-${DEB_REVISION}_arm64.deb" ;; \
+        *)     echo "ERROR: unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    URL_FILE="$(echo "${DEB_FILE}" | sed 's/+/%2B/g')"; \
+    curl -fsSL -o "/tmp/${DEB_FILE}" "${ANON_RELEASE_BASE}/${URL_FILE}"; \
+    cd /tmp; \
+    grep "  ${DEB_FILE}\$" /tmp/checksums.txt > /tmp/checksum.active; \
+    sha256sum -c /tmp/checksum.active; \
+    apt-get update; \
+    echo 'anon anon/terms boolean true' | debconf-set-selections; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "/tmp/${DEB_FILE}"; \
+    rm -f "/tmp/${DEB_FILE}" /tmp/checksums.txt /tmp/checksum.active; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    anon --version | grep -q "${ANON_VERSION}"
+
+# ── Stage 2: Node.js builder (workspace + esbuild bundle) ────────────────────
+FROM node:20-bookworm-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
+RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+
+WORKDIR /app
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
+COPY patches/ ./patches/
+COPY packages/bls/package.json ./packages/bls/
+COPY packages/client/package.json ./packages/client/
+COPY packages/core/package.json ./packages/core/
+COPY packages/relay/package.json ./packages/relay/
+COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/town/package.json ./packages/town/
+COPY packages/mill/package.json ./packages/mill/
+COPY packages/townhouse/package.json ./packages/townhouse/
+COPY docker/package.json ./docker/
+
+RUN pnpm install --frozen-lockfile
+
+COPY tsconfig.json ./
+COPY packages/bls/ ./packages/bls/
+COPY packages/client/ ./packages/client/
+COPY packages/core/ ./packages/core/
+COPY packages/relay/ ./packages/relay/
+COPY packages/sdk/ ./packages/sdk/
+COPY packages/town/ ./packages/town/
+COPY packages/mill/ ./packages/mill/
+COPY packages/townhouse/contracts/ ./packages/townhouse/contracts/
+COPY docker/ ./docker/
+
+RUN pnpm -r \
+      --filter '@toon-protocol/core' \
+      --filter '@toon-protocol/relay' \
+      --filter '@toon-protocol/client' \
+      build
+
+RUN cd docker && \
+    pnpm exec esbuild src/entrypoint-foreign-pod.ts \
+      --bundle \
+      --platform=node \
+      --target=node20 \
+      --format=esm \
+      --minify \
+      --outfile=dist/entrypoint-foreign-pod.js \
+      --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
+      --external:fastify \
+      --external:@fastify/cors \
+      --external:ethers \
+      --external:better-sqlite3 \
+      --external:@ardrive/turbo-sdk \
+      --external:o1js \
+      --external:@solana/kit \
+      --external:@solana-program/token \
+      --external:@toon-protocol/mina-zkapp \
+      --external:@toon-protocol/memvid-node \
+      --external:@toon-protocol/pet-dvm \
+      --external:@toon-protocol/pet-circuit \
+      --external:socks-proxy-agent \
+      --external:@noble/curves
+
+RUN mkdir -p /runtime/node_modules /runtime/contracts
+RUN cp docker/dist/entrypoint-foreign-pod.js /runtime/
+RUN echo '{"type":"module"}' > /runtime/package.json
+RUN cp packages/townhouse/contracts/foreign-publish.schema.json /runtime/contracts/
+
+RUN cd /tmp && \
+    npm init -y && \
+    npm install --omit=dev \
+      fastify@^5.0.0 \
+      @fastify/cors@^10.0.0 \
+      socks-proxy-agent@^8.0.0 \
+      ws@^8.18.0 \
+      ethers@^6.0.0 \
+      express@^4.0.0 \
+      better-sqlite3@^11.0.0 \
+      @noble/curves@^1.8.1 && \
+    cp -r /tmp/node_modules/* /runtime/node_modules/ && \
+    find /runtime/node_modules -name '*.d.ts' -delete && \
+    find /runtime/node_modules -name '*.d.ts.map' -delete && \
+    find /runtime/node_modules -name '*.js.map' -delete && \
+    find /runtime/node_modules -name '*.d.mts' -delete && \
+    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+
+# ── Stage 3: Runtime (debian:bookworm-slim + Node.js + anon) ─────────────────
+# We start from anon-base (which has the anon binary already installed via .deb)
+# and layer Node.js 20 on top. This is cheaper than copying anon out of
+# anon-base into a node:20-bookworm-slim base because the .deb installs system
+# libs (libevent, openssl, etc) that anon needs at runtime.
+FROM anon-base AS runtime
+
+# Node.js 20 from NodeSource (matches the major version used by the builder
+# stage's node:20-bookworm-slim base). Keeps the apt-installed Node aligned
+# with the bundled JS target=node20.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+        gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends nodejs; \
+    apt-get purge -y --auto-remove curl gnupg; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    node --version
+
+WORKDIR /runtime
+COPY --from=builder /runtime /runtime
+
+# Anon data directory. The container runs as root (matches the townhouse
+# ator-sidecar convention — Akash provider Pod Security Policies sometimes
+# reject non-root images). anon's strict ownership check on DataDirectory
+# then matches the running user.
+RUN mkdir -p /var/lib/anon /etc/anon && chown -R root:root /var/lib/anon /etc/anon
+
+ENV NODE_ENV=production
+ENV POD_PORT=8080
+ENV ANON_SOCKS_PORT=9050
+ENV FOREIGN_PUBLISH_SCHEMA_PATH=/runtime/contracts/foreign-publish.schema.json
+
+EXPOSE 8080
+
+# Pod takes 30-120s to fully boot: anon bootstrap (30-90s) + faucet drip + balance poll.
+# start-period gives anon enough headroom to build a circuit before health checks begin.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+process.env.POD_PORT+'/healthz').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))" || exit 1
+
+CMD ["node", "/runtime/entrypoint-foreign-pod.js"]

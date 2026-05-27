@@ -15,6 +15,8 @@ const result = await esbuild.build({
   entryPoints: [
     'src/entrypoint-sdk.ts',
     'src/attestation-server.ts',
+    'src/entrypoint-foreign-pod.ts',
+    'src/entrypoint-dvm.ts',
   ],
   bundle: true,
   format: 'esm',
@@ -29,7 +31,11 @@ const result = await esbuild.build({
   // - better-sqlite3: native .node binary (used by relay SqliteEventStore + connector claims)
   // - ethers: dynamic require(packageName) in connector's requireOptional()
   // - express: dynamic require(packageName) in connector's AdminServer/HealthServer
-  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'o1js', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'socks-proxy-agent'],
+  // - fastify: deep dynamic-require graph (avvio, find-my-way); ship as flat
+  //   node_modules so the foreign-pod entrypoint can require() it at runtime
+  // - @noble/curves: dynamic import inside packages/client/dist causes esbuild
+  //   to fail resolving the subpath export in Docker's pnpm store layout
+  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'o1js', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves'],
 
   // The connector (@crosstown/connector) is CJS and its requireOptional() uses
   // require(packageName). When esbuild bundles CJS into ESM output, these

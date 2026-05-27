@@ -18,6 +18,16 @@ vi.mock('@toon-protocol/pet-dvm', () => ({
 
 vi.mock('@toon-protocol/sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof SdkModule>();
+  // Use a constructable class for TurboUploadAdapter so `new` works in tests.
+  class TurboUploadAdapterStub {
+    public client: unknown;
+    constructor(client: unknown) {
+      this.client = client;
+    }
+    async upload() {
+      return { txId: 'stub-tx' };
+    }
+  }
   return {
     ...actual,
     createNode: vi.fn(async () => ({
@@ -27,13 +37,44 @@ vi.mock('@toon-protocol/sdk', async (importOriginal) => {
       stop: vi.fn(async () => {}),
     })),
     createArweaveDvmHandler: vi.fn(() => vi.fn()),
-    TurboUploadAdapter: vi.fn(),
+    TurboUploadAdapter: TurboUploadAdapterStub,
     ChunkManager: vi.fn(() => ({})),
   };
 });
 
+// Mock @ardrive/turbo-sdk/node so we can introspect which path createTurboAdapter
+// took without doing real network / signer work.
+const ArweaveSignerCalls: { jwk: unknown }[] = [];
+const TurboFactoryCalls: { args: unknown }[] = [];
+const TurboFactoryUnauthCalls: { args: unknown }[] = [];
+vi.mock('@ardrive/turbo-sdk/node', () => {
+  class ArweaveSigner {
+    public jwk: unknown;
+    constructor(jwk: unknown) {
+      this.jwk = jwk;
+      ArweaveSignerCalls.push({ jwk });
+    }
+  }
+  return {
+    ArweaveSigner,
+    TurboFactory: {
+      authenticated: vi.fn((args: unknown) => {
+        TurboFactoryCalls.push({ args });
+        return {
+          // Probe-friendly: tests can override per case via mockResolvedValueOnce.
+          getBalance: vi.fn(async () => ({ winc: '0' })),
+        };
+      }),
+      unauthenticated: vi.fn((args: unknown) => {
+        TurboFactoryUnauthCalls.push({ args });
+        return { upload: vi.fn(async () => ({ id: 'fake-txid' })) };
+      }),
+    },
+  };
+});
+
 // After mocks, import the functions under test
-import { createJobCounter, applyEnvOverlay } from './entrypoint-dvm.js';
+import { createJobCounter, applyEnvOverlay, createTurboAdapter } from './entrypoint-dvm.js';
 
 // ── Job counter tests ────────────────────────────────────────────────────────
 
@@ -184,6 +225,107 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// ── createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution (Phase 4) ──
+
+describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', () => {
+  // A minimum-viable RSA JWK shape. We don't care about cryptographic validity
+  // — the mocked ArweaveSigner just records what it received.
+  const FAKE_JWK = {
+    kty: 'RSA',
+    n: Buffer.from('a'.repeat(64)).toString('base64url'),
+    e: 'AQAB',
+    d: 'd-value',
+    p: 'p-value',
+    q: 'q-value',
+    dp: 'dp-value',
+    dq: 'dq-value',
+    qi: 'qi-value',
+  };
+
+  beforeEach(() => {
+    ArweaveSignerCalls.length = 0;
+    TurboFactoryCalls.length = 0;
+    TurboFactoryUnauthCalls.length = 0;
+  });
+
+  it('DVM_ARWEAVE_JWK_B64 set + valid JWK → constructs ArweaveSigner-backed client', async () => {
+    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
+    const result = await createTurboAdapter(b64, undefined);
+
+    expect(result.source).toBe('arweave-jwk-b64');
+    expect(result.adapter).toBeDefined();
+    expect(result.client).toBeDefined();
+    expect(ArweaveSignerCalls).toHaveLength(1);
+    expect(ArweaveSignerCalls[0]?.jwk).toMatchObject({ kty: 'RSA' });
+    expect(TurboFactoryCalls).toHaveLength(1);
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'arweave' });
+    // Address must be derivable from the modulus n field.
+    expect(result.arweaveAddress).toBeDefined();
+    expect(typeof result.arweaveAddress).toBe('string');
+  });
+
+  it('DVM_ARWEAVE_JWK_B64 malformed base64 → clean error, no silent fallback', async () => {
+    // Provide a TURBO_TOKEN to prove we do NOT fall back to it.
+    const legacyToken = JSON.stringify(FAKE_JWK);
+    // `Buffer.from(..., 'base64')` doesn't throw on most non-base64 strings —
+    // it returns garbage bytes. So the malformed case is detected at the
+    // JSON.parse step. Pass clearly-non-JSON bytes.
+    const garbageB64 = Buffer.from('this is not json', 'utf-8').toString('base64');
+    await expect(createTurboAdapter(garbageB64, legacyToken)).rejects.toThrow(
+      /DVM_ARWEAVE_JWK_B64 does not decode to valid JSON/
+    );
+    // ArweaveSigner must NOT have been constructed (we bailed before).
+    expect(ArweaveSignerCalls).toHaveLength(0);
+  });
+
+  it('DVM_ARWEAVE_JWK_B64 missing RSA fields → clean error, no silent fallback', async () => {
+    const badJwk = { kty: 'EC', n: undefined };
+    const b64 = Buffer.from(JSON.stringify(badJwk), 'utf-8').toString('base64');
+    const legacyToken = JSON.stringify(FAKE_JWK);
+    await expect(createTurboAdapter(b64, legacyToken)).rejects.toThrow(
+      /missing required RSA JWK fields/
+    );
+    expect(ArweaveSignerCalls).toHaveLength(0);
+  });
+
+  it('DVM_ARWEAVE_JWK_B64 absent + TURBO_TOKEN set → legacy path used', async () => {
+    const legacyToken = JSON.stringify(FAKE_JWK);
+    const result = await createTurboAdapter(undefined, legacyToken);
+
+    expect(result.source).toBe('turbo-token-legacy');
+    expect(result.adapter).toBeDefined();
+    expect(result.client).toBeDefined();
+    // Legacy path uses `privateKey:` not the ArweaveSigner constructor.
+    expect(ArweaveSignerCalls).toHaveLength(0);
+    expect(TurboFactoryCalls).toHaveLength(1);
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ privateKey: expect.any(Object) });
+  });
+
+  it('Both absent → ephemeral JWK free-tier adapter (≤100KB uploads via TurboFactory.authenticated)', async () => {
+    const result = await createTurboAdapter(undefined, undefined);
+
+    expect(result.source).toBe('unauthenticated-free-tier');
+    expect(result.client).toBeDefined();
+    expect(result.arweaveAddress).toBeUndefined();
+    expect(ArweaveSignerCalls).toHaveLength(0);
+    // Free-tier path uses an ephemeral JWK via TurboFactory.authenticated() so
+    // Turbo accepts ≤100KB uploads without a funded wallet.
+    expect(TurboFactoryCalls).toHaveLength(1);
+    expect(TurboFactoryUnauthCalls).toHaveLength(0);
+    // Adapter is functional — does not throw on upload.
+    await expect(
+      result.adapter.upload({} as Parameters<typeof result.adapter.upload>[0])
+    ).resolves.toBeDefined();
+  });
+
+  it('DVM AR address is non-empty when JWK source resolves (feed-through for boot-log)', async () => {
+    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
+    const result = await createTurboAdapter(b64, undefined);
+    expect(result.arweaveAddress).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(result.arweaveAddress?.length).toBeGreaterThan(10);
+  });
+});
 
 describe('entrypoint-dvm.ts — BLS server static analysis', () => {
   let src: string;

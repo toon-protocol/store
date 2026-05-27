@@ -143,6 +143,21 @@ RUN set -eux; \
     # @ardrive/turbo-sdk hoist tree includes its transitive deps as siblings
     ardrive_hoist=$(ls -d node_modules/.pnpm/@ardrive+turbo-sdk@*/node_modules 2>/dev/null | head -1); \
     [ -n "$ardrive_hoist" ] && cp -rL "$ardrive_hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
+    # Turbo-sdk transitive deps in separate pnpm flat-store entries: copy
+    # the scoped-org hoist dirs that @ardrive/turbo-sdk 1.40.x needs.
+    for org in @cosmjs @ethersproject @ecies @dha-team @metamask @walletconnect @protobufjs @permaweb; do \
+      for store_dir in $(ls -d node_modules/.pnpm/${org}+*@*/node_modules 2>/dev/null); do \
+        cp -rL "$store_dir"/. /runtime/node_modules/ 2>/dev/null || true; \
+      done; \
+    done; \
+    # Unscoped transitive deps of turbo-sdk (and their transitive deps)
+    for pkg in arweave base64url base-x bs58 axios axios-retry avsc long protobufjs \
+                follow-redirects eventemitter3 lru-cache mnemonist pako hash-wasm \
+                warp-arbundles warp-contracts; do \
+      for hoist in $(ls -d node_modules/.pnpm/${pkg}@*/node_modules 2>/dev/null); do \
+        cp -rL "$hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
+      done; \
+    done; \
     # @solana v3 packages
     for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules 2>/dev/null); do \
       cp -rL "$store_dir"/. /runtime/node_modules/ 2>/dev/null || true; \

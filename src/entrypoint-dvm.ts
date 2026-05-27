@@ -23,7 +23,11 @@
  *   CONNECTOR_URL        -> config.connectorUrl (standalone connector HTTP URL)
  *   FEE_PER_JOB         -> config.basePricePerByte (per-job pricing)
  *   KIND_PRICING_<kind>  -> config.kindPricing[kind] (per-kind override)
- *   TURBO_TOKEN         -> Arweave upload token for Arweave DVM
+ *   DVM_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of derived RSA JWK (Phase 4)
+ *                          Piped in by the host orchestrator via WalletManager.
+ *                          Treated as secret — never logged.
+ *   TURBO_TOKEN         -> Legacy fallback: raw JSON JWK for Arweave DVM
+ *                          uploads. Still honored for backward compat.
  *
  * Key differences from Town/Mill entries:
  * - Uses standalone HTTP mode (connectorUrl + handlerPort) NOT embedded BTP
@@ -117,37 +121,130 @@ export function createJobCounter(windowMs: number = 5 * 60 * 1000): JobCounter {
   return { wrap, snapshot };
 }
 
-// --- Helper: Create Turbo adapter from token ---
-async function createTurboAdapter(
-  token: string | undefined
-): Promise<ArweaveUploadAdapter> {
-  if (!token) {
-    // Return a null adapter that throws — caller must check before using
+// --- Helper: bytes formatter (inlined; cannot import host-side @toon-protocol/townhouse) ---
+// Mirrors packages/townhouse/src/credits/units.ts:formatWincAsBytes — base-1000
+// SI units, rounds DOWN. Duplicated here to keep the Docker bundle self-contained.
+const WINC_PER_BYTE_FALLBACK = 610_000n; // ~ARIO mainnet rate floor; sufficient for a boot-time log line
+function formatWincAsBytes(winc: bigint): string {
+  if (winc <= 0n) return '~0 B';
+  const bytes = winc / WINC_PER_BYTE_FALLBACK;
+  if (bytes < 1_000n) return `~${bytes.toString()} B`;
+  if (bytes < 1_000_000n) return `~${(bytes / 1_000n).toString()} KB`;
+  if (bytes < 1_000_000_000n) return `~${(bytes / 1_000_000n).toString()} MB`;
+  if (bytes < 1_000_000_000_000n) return `~${(bytes / 1_000_000_000n).toString()} GB`;
+  return `~${(bytes / 1_000_000_000_000n).toString()} TB`;
+}
+
+// --- Helper: derive the Arweave address (n field of the JWK) without leaking the JWK ---
+// Arweave address = base64url(SHA-256(modulus n bytes)). We import lazily so the
+// (still-too-rare) bad-JWK path also surfaces a clean error.
+async function arweaveAddressFromJwk(jwk: { n?: string }): Promise<string | undefined> {
+  if (!jwk?.n || typeof jwk.n !== 'string') return undefined;
+  try {
+    const { createHash } = await import('node:crypto');
+    // The Arweave JWK `n` field is base64url-encoded modulus bytes.
+    const modulusBytes = Buffer.from(jwk.n, 'base64url');
+    return createHash('sha256').update(modulusBytes).digest('base64url');
+  } catch {
+    return undefined;
+  }
+}
+
+interface CreateTurboAdapterResult {
+  adapter: ArweaveUploadAdapter;
+  /** Source of the credentials, for boot-log diagnostics. */
+  source: 'arweave-jwk-b64' | 'turbo-token-legacy' | 'unauthenticated-free-tier';
+  /** Arweave address of the upload-signing key (only set for authenticated paths). */
+  arweaveAddress?: string;
+  /** The constructed Turbo client when source !== 'none', for balance probing. */
+  client?: unknown;
+}
+
+// --- Helper: Create Turbo adapter from env (preferred AR JWK path; legacy TURBO_TOKEN fallback) ---
+export async function createTurboAdapter(
+  arweaveJwkB64: string | undefined,
+  legacyToken: string | undefined
+): Promise<CreateTurboAdapterResult> {
+  // Lazy-import turbo-sdk so a stub-only path (mode #3) doesn't pull it in.
+  const importTurbo = () => import('@ardrive/turbo-sdk/node');
+
+  // ── Preferred: DVM_ARWEAVE_JWK_B64 (piped by the host orchestrator) ─────
+  if (arweaveJwkB64) {
+    let jwkJson: string;
+    try {
+      jwkJson = Buffer.from(arweaveJwkB64, 'base64').toString('utf-8');
+    } catch (err) {
+      throw new Error(
+        `DVM_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
+      );
+    }
+    let jwk: { kty?: string; n?: string; d?: string };
+    try {
+      jwk = JSON.parse(jwkJson);
+    } catch (err) {
+      throw new Error(
+        `DVM_ARWEAVE_JWK_B64 does not decode to valid JSON: ${err instanceof Error ? err.message : err}`
+      );
+    }
+    if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'RSA' || !jwk.n || !jwk.d) {
+      throw new Error(
+        'DVM_ARWEAVE_JWK_B64 is missing required RSA JWK fields (kty=RSA, n, d).'
+      );
+    }
+    const { TurboFactory, ArweaveSigner } = await importTurbo();
+    const signer = new ArweaveSigner(
+      jwk as unknown as ConstructorParameters<typeof ArweaveSigner>[0]
+    );
+    const client = TurboFactory.authenticated({
+      signer,
+      token: 'arweave',
+    });
+    const arweaveAddress = await arweaveAddressFromJwk(jwk);
     return {
-      upload: async () => {
-        throw new Error(
-          'TURBO_TOKEN is required for Arweave DVM uploads. Set TURBO_TOKEN env var.'
-        );
-      },
+      adapter: new TurboUploadAdapter(client),
+      source: 'arweave-jwk-b64',
+      arweaveAddress,
+      client,
     };
   }
 
-  // Lazy-import turbo-sdk and create authenticated client from token
-  const { TurboFactory } = await import('@ardrive/turbo-sdk/node');
-  // Token is a signed JWK (JSON) from operator's Arweave wallet
-  // Parse it and use as JWK for Turbo authenticated client
-  let jwk: unknown;
-  try {
-    jwk = JSON.parse(token);
-  } catch {
-    throw new Error(
-      'TURBO_TOKEN must be a valid JSON JWK. Use Arweave wallet private key (JSON).'
-    );
+  // ── Legacy: TURBO_TOKEN (raw JWK JSON) ──────────────────────────────────
+  if (legacyToken) {
+    let jwk: { kty?: string; n?: string; d?: string };
+    try {
+      jwk = JSON.parse(legacyToken);
+    } catch {
+      throw new Error(
+        'TURBO_TOKEN must be a valid JSON JWK. Use Arweave wallet private key (JSON).'
+      );
+    }
+    const { TurboFactory } = await importTurbo();
+    const client = TurboFactory.authenticated({
+      privateKey: jwk as Parameters<typeof TurboFactory.authenticated>[0]['privateKey'],
+    });
+    const arweaveAddress = await arweaveAddressFromJwk(jwk);
+    return {
+      adapter: new TurboUploadAdapter(client),
+      source: 'turbo-token-legacy',
+      arweaveAddress,
+      client,
+    };
   }
-  const client = TurboFactory.authenticated({
-    privateKey: jwk as Parameters<typeof TurboFactory.authenticated>[0]['privateKey'],
-  });
-  return new TurboUploadAdapter(client);
+
+  // ── Ephemeral JWK free tier (≤100 KB uploads, no wallet required) ─────────
+  // TurboFactory.authenticated({privateKey: ephemeralJwk}) with a zero-balance
+  // account gives Turbo upload access without a deposit. The JWK is ephemeral —
+  // it rotates on every DVM restart and cannot be funded.
+  const { TurboFactory } = await importTurbo();
+  const { default: Arweave } = await import('arweave');
+  const arweave = Arweave.init({});
+  const ephemeralJwk = await arweave.crypto.generateJWK();
+  const client = TurboFactory.authenticated({ privateKey: ephemeralJwk });
+  return {
+    adapter: new TurboUploadAdapter(client),
+    source: 'unauthenticated-free-tier',
+    client,
+  };
 }
 
 // --- Raw config shape ---
@@ -343,14 +440,76 @@ async function main(): Promise<ToonNode> {
     throw new Error('CONNECTOR_URL is required for standalone DVM mode');
   }
 
-  // Build Arweave DVM components
-  // TURBO_TOKEN can be in JSON config or env var
-  const turboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
-  const turboAdapter = turboToken ? await createTurboAdapter(turboToken) : null;
+  // Build Arweave DVM components.
+  //
+  // Resolution order (Phase 4):
+  //   1. DVM_ARWEAVE_JWK_B64 (preferred — piped by host orchestrator from the
+  //      operator's BIP-39 wallet via WalletManager.getArweaveJwk('dvm'))
+  //   2. TURBO_TOKEN (legacy raw-JWK JSON env var)
+  //   3. Neither → stub adapter that throws with a `townhouse credits buy` CTA
+  //
+  // The JWK env var is treated as secret material — do NOT log its value.
+  const arweaveJwkB64 = process.env['DVM_ARWEAVE_JWK_B64'];
+  const legacyTurboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
+  const turboResult = await createTurboAdapter(arweaveJwkB64, legacyTurboToken);
+
+  const sourceLabel =
+    turboResult.source === 'arweave-jwk-b64'
+      ? 'DVM_ARWEAVE_JWK_B64 (wallet-derived)'
+      : turboResult.source === 'turbo-token-legacy'
+        ? 'TURBO_TOKEN (legacy)'
+        : 'unauthenticated (free tier, ≤100KB)';
+  console.log(`[DVM Entrypoint] Arweave credit source: ${sourceLabel}`);
+  if (turboResult.source === 'unauthenticated-free-tier') {
+    console.warn(
+      '[DVM Entrypoint] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
+      ' Set DVM_ARWEAVE_JWK_B64 with a funded wallet to lift the size limit.' +
+      " Do NOT fund the ephemeral address — it rotates on every DVM restart."
+    );
+  }
+  if (turboResult.arweaveAddress) {
+    console.log(`[DVM Entrypoint] Arweave address: ${turboResult.arweaveAddress}`);
+  }
+
+  // Best-effort boot-time credit balance probe (warning-only — do not refuse
+  // to start, operators may want the DVM running while they fund).
+  if (turboResult.client && typeof turboResult.client === 'object') {
+    try {
+      const probe = turboResult.client as { getBalance?: () => Promise<{ winc: string | bigint }> };
+      if (typeof probe.getBalance === 'function') {
+        const rawBalance = await probe.getBalance();
+        const wincStr = typeof rawBalance?.winc === 'bigint'
+          ? rawBalance.winc.toString()
+          : String(rawBalance?.winc ?? '0');
+        let wincBig: bigint;
+        try {
+          wincBig = BigInt(wincStr);
+        } catch {
+          wincBig = 0n;
+        }
+        console.log(
+          `[DVM Entrypoint] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
+        );
+        if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
+          console.warn(
+            `[DVM Entrypoint] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`
+          );
+        }
+      }
+    } catch (err) {
+      // Probe failure must not block boot — log and continue.
+      console.warn(
+        `[DVM Entrypoint] Could not probe Arweave credit balance: ${err instanceof Error ? err.message : err}`
+      );
+    }
+  } else if (turboResult.source === 'none') {
+    console.warn(`[DVM Entrypoint] ${buildNoCreditsMessage(undefined)}`);
+  }
+
   const chunkManager = new ChunkManager(); // in-memory, v1
 
   const arweaveConfig: ArweaveDvmConfig = {
-    turboAdapter,
+    turboAdapter: turboResult.adapter,
     chunkManager,
     arweaveTags: rawConfig.arweaveTags,
   };

@@ -12,8 +12,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fastify/cors": "^10.0.0",
     "@hono/node-server": "^1.13.7",
+    "@noble/curves": "^1.8.1",
     "@toon-protocol/bls": "workspace:*",
+    "@toon-protocol/client": "workspace:*",
     "@toon-protocol/connector": "^3.3.3",
     "@toon-protocol/core": "workspace:*",
     "@toon-protocol/mill": "workspace:*",
@@ -22,8 +25,13 @@
     "@toon-protocol/sdk": "workspace:*",
     "@toon-protocol/town": "workspace:*",
     "@toon-protocol/townhouse": "workspace:*",
+    "ajv": "^8.18.0",
+    "ajv-formats": "^3.0.1",
+    "bs58": "^6.0.0",
+    "fastify": "^5.0.0",
     "hono": "^4.11.10",
     "nostr-tools": "^2.10.4",
+    "viem": "^2.47.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
