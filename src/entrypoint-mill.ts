@@ -28,7 +28,7 @@ import type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
 // (`docker logs --follow | jq`). Pino is the SDK-side standard, but adding it
 // as an esbuild external grows the runtime image; this 15-line helper covers
 // the dashboard's needs without the bundle cost.
-type LogLevel = 'info' | 'error';
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export function logJson(
   level: LogLevel,
   msg: string,
@@ -42,11 +42,38 @@ export function logJson(
       msg,
       ...fields,
     }) + '\n';
-  if (level === 'error') {
+  // warn/error → stderr so failures (e.g. a never-stored kind:10032
+  // advertisement, Story 50.4 AC #2) surface on the operator's error stream.
+  if (level === 'error' || level === 'warn') {
     process.stderr.write(line);
   } else {
     process.stdout.write(line);
   }
+}
+
+/**
+ * Adapt {@link logJson} to the `MillLogger` shape `startMill()` expects, so
+ * Mill's internal diagnostics (including kind:10032 advertisement
+ * success/failure) reach the container log stream instead of being swallowed
+ * by `startMill()`'s default no-op logger (Story 50.4 AC #2).
+ */
+function millEntrypointLogger(): NonNullable<MillConfig['logger']> {
+  const at =
+    (level: LogLevel) =>
+    (...args: unknown[]): void => {
+      const msg = typeof args[0] === 'string' ? args[0] : String(args[0]);
+      const fields =
+        args[1] && typeof args[1] === 'object'
+          ? (args[1] as Record<string, unknown>)
+          : undefined;
+      logJson(level, msg, fields);
+    };
+  return {
+    debug: at('debug'),
+    info: at('info'),
+    warn: at('warn'),
+    error: at('error'),
+  };
 }
 
 // --- Helper: Convert value to BigInt (mirrors cli.ts) ---
@@ -135,6 +162,13 @@ interface CliRawConfig {
   // apex's PerPacketClaimService will use this as peerAddress on
   // outbound channel-open calls.
   parentEvmAddress?: string;
+  // Story 50.4 — ILP address of the relay node that stores the kind:10032
+  // advertisement (e.g. the apex `g.townhouse`). When set, Mill advertises via
+  // an ILP PREPARE through its embedded connector instead of an unpaid Nostr
+  // WS publish (which a pay-to-write TOON relay rejects).
+  peerInfoIlpDestination?: string;
+  // Story 50.4 — per-byte price for the kind:10032 ILP advertisement amount.
+  peerInfoPricePerByte?: string | number;
 }
 
 // --- Parse and normalize raw config ---
@@ -205,6 +239,23 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
   if (raw.settlementPrivateKey)
     cfg.settlementPrivateKey = raw.settlementPrivateKey;
   if (raw.parentEvmAddress) cfg.parentEvmAddress = raw.parentEvmAddress;
+  if (raw.peerInfoIlpDestination)
+    cfg.peerInfoIlpDestination = raw.peerInfoIlpDestination;
+  if (raw.peerInfoPricePerByte !== undefined) {
+    // Mirror the env-path validation (applyEnvOverlay): a fractional value
+    // throws a friendly error instead of an opaque BigInt RangeError, and a
+    // negative value is rejected before it becomes a negative ILP amount.
+    let ppb: bigint;
+    try {
+      ppb = toBigInt(raw.peerInfoPricePerByte);
+    } catch {
+      throw new Error('peerInfoPricePerByte must be an integer');
+    }
+    if (ppb < 0n) {
+      throw new Error('peerInfoPricePerByte must be non-negative');
+    }
+    cfg.peerInfoPricePerByte = ppb;
+  }
 
   return cfg;
 }
@@ -320,8 +371,11 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
 
   // Env-var passthroughs for embedded-with-parent mode. JSON config wins
   // when both are set.
-  if (!out.connectorUrl && env['CONNECTOR_URL']) {
-    out.connectorUrl = env['CONNECTOR_URL'];
+  // Accept the legacy `CONNECTOR_URL` and the `TOON_`-prefixed alias used by
+  // the townhouse orchestrator / E2E harness (Story 50.4), matching the other
+  // TOON_-prefixed passthroughs below. CONNECTOR_URL wins when both are set.
+  if (!out.connectorUrl && (env['CONNECTOR_URL'] || env['TOON_CONNECTOR_URL'])) {
+    out.connectorUrl = env['CONNECTOR_URL'] ?? env['TOON_CONNECTOR_URL'];
   }
   if (!out.ilpAddress && env['TOON_ILP_ADDRESS']) {
     out.ilpAddress = env['TOON_ILP_ADDRESS'];
@@ -358,6 +412,26 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
     out.parentEvmAddress = v;
   }
 
+  // Story 50.4 — kind:10032 ILP advertisement target. JSON config wins.
+  if (!out.peerInfoIlpDestination && env['TOON_PEERINFO_ILP_ADDRESS']) {
+    out.peerInfoIlpDestination = env['TOON_PEERINFO_ILP_ADDRESS'];
+  }
+  if (
+    out.peerInfoPricePerByte === undefined &&
+    env['TOON_PEERINFO_PRICE_PER_BYTE'] !== undefined &&
+    env['TOON_PEERINFO_PRICE_PER_BYTE'] !== ''
+  ) {
+    const v = env['TOON_PEERINFO_PRICE_PER_BYTE'];
+    try {
+      out.peerInfoPricePerByte = BigInt(v);
+    } catch {
+      throw new Error('TOON_PEERINFO_PRICE_PER_BYTE must be an integer');
+    }
+    if (out.peerInfoPricePerByte < 0n) {
+      throw new Error('TOON_PEERINFO_PRICE_PER_BYTE must be non-negative');
+    }
+  }
+
   return out;
 }
 
@@ -367,6 +441,12 @@ export async function main(): Promise<MillInstance> {
 
   // Load JSON config from env or file
   const config = applyEnvOverlay(loadMillConfig());
+
+  // Surface Mill's internal diagnostics (kind:10032 advertisement, connector
+  // start, publish failures) on the container log stream (Story 50.4 AC #2).
+  if (!config.logger) {
+    config.logger = millEntrypointLogger();
+  }
 
   // Validate required fields
   if (!config.secretKey && !config.mnemonic) {

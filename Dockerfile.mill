@@ -67,6 +67,8 @@ RUN pnpm -r \
       --outfile=dist/entrypoint-mill.js \
       --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
       --external:better-sqlite3 \
+      --external:@libsql/client \
+      --external:libsql \
       --external:ethers \
       --external:express \
       --external:mina-signer \
@@ -109,7 +111,14 @@ RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program
 
 # Connector requires express at runtime for its health server even when
 # adminApi.enabled=false. Install via npm — same pattern as Dockerfile.sdk-e2e.
-RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 && \
+#
+# @libsql/client + libsql (toon-protocol/connector#79): connector 3.8.0 moved its
+# local settlement/claim SQLite store off better-sqlite3 to libsql, lazy-required
+# at runtime. Without them Mill's embedded connector silently disables the
+# per-packet claim subsystem (incl. the relation-aware InboundClaimValidator from
+# connector#78). libsql ships a prebuilt linux-x64-musl NAPI binding that loads
+# on node:20-alpine (verified).
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 @libsql/client@0.14.0 libsql@0.4.7 && \
     cp -r /tmp/node_modules/* /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \

@@ -66,6 +66,8 @@ RUN pnpm -r \
       --outfile=dist/entrypoint-town.js \
       --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
       --external:better-sqlite3 \
+      --external:@libsql/client \
+      --external:libsql \
       --external:ethers \
       --external:express \
       --external:mina-signer \
@@ -113,7 +115,16 @@ RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program
 # inside the container) even when we set adminApi.enabled=false. Install it
 # (and ethers, which the connector lazy-loads for settlement) into the
 # runtime via npm — same pattern as Dockerfile.sdk-e2e.
-RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 && \
+#
+# @libsql/client + libsql (toon-protocol/connector#79): connector 3.8.0 migrated
+# its local settlement/claim SQLite store off better-sqlite3 to libsql, which it
+# lazy-`requireOptional`s at runtime. Without these the per-packet claim
+# subsystem (incl. the relation-aware InboundClaimValidator that connector#78
+# adds) silently fails to initialize and value-bearing packets auto-fulfill
+# instead of claim-gating. libsql ships a prebuilt linux-x64-musl NAPI binding
+# that loads on this node:20-alpine runtime (verified). better-sqlite3 above is
+# retained separately for the Nostr relay's own event store.
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 @libsql/client@0.14.0 libsql@0.4.7 && \
     cp -r /tmp/node_modules/* /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
