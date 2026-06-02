@@ -20,7 +20,11 @@
 
 import { readFileSync } from 'node:fs';
 import { startMill } from '@toon-protocol/mill';
-import type { MillConfig, MillInstance } from '@toon-protocol/mill';
+import type {
+  MillConfig,
+  MillChainProvider,
+  MillInstance,
+} from '@toon-protocol/mill';
 import type { CreateSwapHandlerConfig } from '@toon-protocol/sdk';
 
 // --- Helper: Structured JSON logging (one object per line) ---
@@ -143,17 +147,11 @@ interface CliRawConfig {
   parentPeerId?: string;
   parentAuthToken?: string;
   // chainProviders for ClaimReceiver + PerPacketClaimService init on the
-  // embedded connector. One entry per EVM chain mill plans to settle on.
-  // Shape mirrors the apex YAML chainProviders block. keyId is optional —
-  // mill defaults it to the identity-derived secp256k1 hex.
-  chainProviders?: readonly {
-    chainType: 'evm';
-    chainId: string;
-    rpcUrl: string;
-    registryAddress: string;
-    tokenAddress: string;
-    keyId?: string;
-  }[];
+  // embedded connector. One entry per chain mill plans to settle on (EVM /
+  // Solana / Mina). Shape mirrors the apex YAML chainProviders block (the
+  // connector's ChainProviderConfigEntry discriminated union). keyId is
+  // optional — mill defaults it to the identity-derived secp256k1 hex.
+  chainProviders?: readonly MillChainProvider[];
   // Embedded-connector ClaimReceiver / chainProviders signer. When set
   // (typically via SETTLEMENT_PRIVATE_KEY env), the embedded connector
   // signs claims with this key in place of the identity hex.
@@ -234,7 +232,8 @@ function parseRawConfig(raw: CliRawConfig): MillConfig {
   if (raw.connectorUrl) cfg.connectorUrl = raw.connectorUrl;
   if (raw.nodeId) cfg.nodeId = raw.nodeId;
   if (raw.parentPeerId) cfg.parentPeerId = raw.parentPeerId;
-  if (raw.parentAuthToken !== undefined) cfg.parentAuthToken = raw.parentAuthToken;
+  if (raw.parentAuthToken !== undefined)
+    cfg.parentAuthToken = raw.parentAuthToken;
   if (raw.chainProviders) cfg.chainProviders = raw.chainProviders;
   if (raw.settlementPrivateKey)
     cfg.settlementPrivateKey = raw.settlementPrivateKey;
@@ -274,7 +273,7 @@ export function loadMillConfig(): MillConfig {
       // secret material (mnemonic, secretKey, channel state) in process.env
       // memory. Placed before the null-guard so JSON.parse('null') also cleans
       // up. MILL_CONFIG_PATH is intentionally NOT cleaned — a path is not secret.
-       
+
       delete process.env['MILL_CONFIG_JSON'];
       if (!rawConfig) {
         throw new Error('MILL_CONFIG_JSON parsed to null or undefined');
@@ -374,7 +373,10 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   // Accept the legacy `CONNECTOR_URL` and the `TOON_`-prefixed alias used by
   // the townhouse orchestrator / E2E harness (Story 50.4), matching the other
   // TOON_-prefixed passthroughs below. CONNECTOR_URL wins when both are set.
-  if (!out.connectorUrl && (env['CONNECTOR_URL'] || env['TOON_CONNECTOR_URL'])) {
+  if (
+    !out.connectorUrl &&
+    (env['CONNECTOR_URL'] || env['TOON_CONNECTOR_URL'])
+  ) {
     out.connectorUrl = env['CONNECTOR_URL'] ?? env['TOON_CONNECTOR_URL'];
   }
   if (!out.ilpAddress && env['TOON_ILP_ADDRESS']) {
@@ -386,7 +388,10 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   if (!out.parentPeerId && env['TOON_PARENT_PEER_ID']) {
     out.parentPeerId = env['TOON_PARENT_PEER_ID'];
   }
-  if (out.parentAuthToken === undefined && env['TOON_PARENT_AUTH_TOKEN'] !== undefined) {
+  if (
+    out.parentAuthToken === undefined &&
+    env['TOON_PARENT_AUTH_TOKEN'] !== undefined
+  ) {
     out.parentAuthToken = env['TOON_PARENT_AUTH_TOKEN'];
   }
 
