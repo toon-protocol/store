@@ -60,17 +60,51 @@ export function logJson(
  * Mill's internal diagnostics (including kind:10032 advertisement
  * success/failure) reach the container log stream instead of being swallowed
  * by `startMill()`'s default no-op logger (Story 50.4 AC #2).
+ *
+ * Two calling conventions reach this logger and BOTH must serialize cleanly
+ * (issue #87 — a live T00 swap reject was undebuggable because the structured
+ * payload collapsed to `[object Object]`):
+ *
+ *   1. String-first (mill.ts internal calls):
+ *        logger.warn('mill.peerInfo.publish_failed', { err: '...' })
+ *   2. Object-first / pino merging-object (SDK swap-handler + claim issuer):
+ *        logger.error({ event: 'swap_handler.issuer_failed', err: '...' })
+ *
+ * For (2) we must NOT `String(payload)` (that yields `[object Object]` and
+ * loses every field). Instead we lift the payload's `event`/`msg` to the log
+ * message and spread the rest of its fields so the event name and error
+ * details survive in the structured line.
  */
-function millEntrypointLogger(): NonNullable<MillConfig['logger']> {
+export function millEntrypointLogger(): NonNullable<MillConfig['logger']> {
   const at =
     (level: LogLevel) =>
     (...args: unknown[]): void => {
-      const msg = typeof args[0] === 'string' ? args[0] : String(args[0]);
+      const first = args[0];
+      // Convention (2): object-first (pino merging object). Lift `event`/`msg`
+      // to the message and keep the remaining fields structured so swap_handler.*
+      // diagnostics (event names + error details) survive in the log line.
+      if (first && typeof first === 'object') {
+        const payload = first as Record<string, unknown>;
+        const { event, msg, ...rest } = payload;
+        const message =
+          typeof event === 'string'
+            ? event
+            : typeof msg === 'string'
+              ? msg
+              : 'log';
+        // A pino merging object may be followed by a format string
+        // (logger.error({ ... }, 'message')); fold it into the message.
+        const tail = typeof args[1] === 'string' ? args[1] : undefined;
+        logJson(level, tail ? `${message}: ${tail}` : message, rest);
+        return;
+      }
+      // Convention (1): string-first.
+      const message = typeof first === 'string' ? first : String(first);
       const fields =
         args[1] && typeof args[1] === 'object'
           ? (args[1] as Record<string, unknown>)
           : undefined;
-      logJson(level, msg, fields);
+      logJson(level, message, fields);
     };
   return {
     debug: at('debug'),
@@ -477,7 +511,17 @@ export async function main(): Promise<MillInstance> {
   // Start the Mill
   const instance = await startMill(config);
 
-  // Log structured startup line (replaces ASCII banner)
+  // Log structured startup line (replaces ASCII banner).
+  //
+  // `instance.identity` is derived from MILL_MNEMONIC (see mill.ts:
+  // `const identity = fromMnemonic(config.mnemonic)`), and that SAME identity
+  // is used as the swap-handler gift-wrap recipient (`recipientSecretKey:
+  // identity.secretKey`) AND published as the kind:10032 IlpPeerInfo `pubkey`.
+  // So this pubkey is the key a streamSwap caller must encrypt (NIP-59
+  // gift-wrap) to and pass as `millPubkey` — it is the MILL_MNEMONIC identity,
+  // NOT the NODE_NOSTR_SECRET_KEY-derived node nostr identity. Issues #80/#88:
+  // we surface it under the unambiguous `swapRecipientPubkey` field (keeping
+  // `pubkey` for back-compat) so a copy/paste from logs targets the right key.
   const { pubkey, evmAddress } = instance.identity;
   const safePubkey = typeof pubkey === 'string' ? pubkey : 'unknown';
   const safeEvm = typeof evmAddress === 'string' ? evmAddress : null;
@@ -485,6 +529,10 @@ export async function main(): Promise<MillInstance> {
     typeof instance.blsPort === 'number' ? instance.blsPort : 3200;
   logJson('info', 'mill_ready', {
     pubkey: safePubkey,
+    // Explicit alias: the MILL_MNEMONIC-derived gift-wrap recipient that
+    // streamSwap callers must use as `millPubkey` (== kind:10032 IlpPeerInfo
+    // pubkey). Distinct from the node's NODE_NOSTR_SECRET_KEY nostr identity.
+    swapRecipientPubkey: safePubkey,
     evmAddress: safeEvm,
     blsPort: safeBlsPort,
     swapPairCount: config.swapPairs.length,

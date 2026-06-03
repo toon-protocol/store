@@ -40,6 +40,7 @@ import {
   loadMillConfig,
   applyEnvOverlay,
   logJson,
+  millEntrypointLogger,
   main,
 } from './entrypoint-mill.js';
 
@@ -215,6 +216,9 @@ describe('AC-3: Structured JSON logging (Finding #12)', () => {
     const ready = parsedLines.find((p) => p['msg'] === 'mill_ready');
     expect(ready).toBeDefined();
     expect(ready?.['pubkey']).toBe('a'.repeat(64));
+    // Issues #80/#88: the swap gift-wrap recipient is the same MILL_MNEMONIC
+    // identity pubkey, surfaced under an unambiguous field for client discovery.
+    expect(ready?.['swapRecipientPubkey']).toBe('a'.repeat(64));
     expect(ready?.['evmAddress']).toBe('0x' + 'b'.repeat(40));
     expect(ready?.['blsPort']).toBe(3200);
     expect(ready?.['swapPairCount']).toBe(1);
@@ -224,6 +228,74 @@ describe('AC-3: Structured JSON logging (Finding #12)', () => {
       expect(line).not.toMatch(/Mill Ready/);
       expect(line).not.toMatch(/╔/);
     }
+  });
+});
+
+// ===========================================================================
+// Issue #87: millEntrypointLogger serializes structured payloads (no
+// "[object Object]"). The SDK swap-handler + claim issuer log pino-style with
+// a single object-first merging argument; the shim must preserve the event
+// name and error fields instead of collapsing them.
+// ===========================================================================
+
+describe('Issue #87: millEntrypointLogger object-first serialization', () => {
+  function captureLine(
+    fn: (logger: ReturnType<typeof millEntrypointLogger>) => void,
+    stream: 'stdout' | 'stderr' = 'stdout'
+  ): Record<string, unknown> {
+    const spy = vi
+      .spyOn(process[stream], 'write')
+      .mockImplementation(() => true);
+    fn(millEntrypointLogger());
+    expect(spy).toHaveBeenCalledTimes(1);
+    const written = String(spy.mock.calls[0]?.[0] ?? '');
+    return JSON.parse(written.trimEnd()) as Record<string, unknown>;
+  }
+
+  it('object-first (pino merging object) lifts event name and keeps fields — not "[object Object]"', () => {
+    const parsed = captureLine(
+      (logger) =>
+        logger.error?.({
+          event: 'swap_handler.issuer_failed',
+          err: 'no inventory for evm:base',
+          pair: 'USDC:solana',
+        }),
+      'stderr'
+    );
+    expect(parsed['msg']).not.toBe('[object Object]');
+    expect(parsed['msg']).toBe('swap_handler.issuer_failed');
+    expect(parsed['err']).toBe('no inventory for evm:base');
+    expect(parsed['pair']).toBe('USDC:solana');
+    // `event` is lifted to msg, not duplicated as a field.
+    expect(parsed['event']).toBeUndefined();
+  });
+
+  it('object-first with `msg` key (no `event`) uses msg as the message', () => {
+    const parsed = captureLine((logger) =>
+      logger.info?.({ msg: 'swap_handler.claim_issued', amount: 1000 })
+    );
+    expect(parsed['msg']).toBe('swap_handler.claim_issued');
+    expect(parsed['amount']).toBe(1000);
+  });
+
+  it('object-first followed by a format string folds the string into the message', () => {
+    const parsed = captureLine(
+      (logger) =>
+        logger.warn?.({ event: 'swap_handler.rate_conversion_failed' }, 'NaN'),
+      'stderr'
+    );
+    expect(parsed['msg']).toBe('swap_handler.rate_conversion_failed: NaN');
+  });
+
+  it('string-first (mill.ts convention) still works', () => {
+    // warn routes to stderr (see logJson).
+    const parsed = captureLine(
+      (logger) =>
+        logger.warn?.('mill.peerInfo.publish_failed', { err: 'relay down' }),
+      'stderr'
+    );
+    expect(parsed['msg']).toBe('mill.peerInfo.publish_failed');
+    expect(parsed['err']).toBe('relay down');
   });
 });
 
