@@ -67,6 +67,20 @@
  *                                       0 = free relay (connector skips
  *                                       per-packet claim generation).
  *   LOG_LEVEL             (default info)
+ *
+ * Solana payment (Stage 2c — opt-in; default path stays EVM-only):
+ *   SOLANA_PROGRAM_ID                 — payment-channel program id (base58).
+ *   TARGET_SETTLEMENT_ADDRESS_SOLANA  — apex Solana settlement pubkey (base58),
+ *                                       claim recipient / channel peer.
+ *     (Solana payment is ENABLED only when BOTH of the above are set. The pod
+ *      then derives EVM + Solana from a single mnemonic, negotiates
+ *      SOLANA_CHAIN_KEY, opens a real on-chain Solana channel at the
+ *      connector-parity PDA, and signs a connector-format Solana claim.)
+ *   SOLANA_CHAIN_KEY      (default solana:devnet)
+ *   SOLANA_TOKEN_MINT     (default SOLANA_USDC_MINT) — SPL mint for PDA derivation.
+ *   SOLANA_DEPOSIT_AMOUNT + SOLANA_PAYER_TOKEN_ACCOUNT (optional, both required
+ *                                       to deposit on open; else open w/o deposit).
+ *   SOLANA_CHALLENGE_DURATION (default 86400)
  */
 
 import { createConnection } from 'node:net';
@@ -77,24 +91,23 @@ import Fastify from 'fastify';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import {
-  privateKeyToAddress,
-  generatePrivateKey,
-} from 'viem/accounts';
+import { privateKeyToAddress, generatePrivateKey } from 'viem/accounts';
 import { createPublicClient, http as viemHttp } from 'viem';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
+import { encodeEventToToon, decodeEventFromToon } from '@toon-protocol/relay';
 import {
-  encodeEventToToon,
-  decodeEventFromToon,
-} from '@toon-protocol/relay';
-import { ToonClient } from '@toon-protocol/client';
+  ToonClient,
+  generateMnemonic,
+  deriveFullIdentity,
+} from '@toon-protocol/client';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import type { NostrEvent } from 'nostr-tools/pure';
 
 // Schema is loaded at runtime from a known on-image path.
-const SCHEMA_PATH = process.env['FOREIGN_PUBLISH_SCHEMA_PATH']
-  || '/runtime/contracts/foreign-publish.schema.json';
+const SCHEMA_PATH =
+  process.env['FOREIGN_PUBLISH_SCHEMA_PATH'] ||
+  '/runtime/contracts/foreign-publish.schema.json';
 
 // Anon data directory (matches the Dockerfile.toon-client `mkdir -p
 // /var/lib/anon` step). Owned by root since the container runs as root —
@@ -124,6 +137,29 @@ interface PodEnv {
   evmUsdcThreshold: bigint;
   solUsdcThreshold: number;
   feePerEvent: bigint; // ILP units per publish (0 = free relay)
+  /**
+   * Solana payment params. When `solana.enabled` is true the pod negotiates a
+   * Solana-denominated claim (in ADDITION to the EVM path): it pays the apex on
+   * Solana, opening a real on-chain channel and signing a connector-format
+   * Solana balance proof (client lib post-#105). Enabled when SOLANA_PROGRAM_ID
+   * and TARGET_SETTLEMENT_ADDRESS_SOLANA are both set. Default EVM path is
+   * unchanged when these are unset.
+   */
+  solana: {
+    enabled: boolean;
+    chainKey: string; // e.g. "solana:devnet"
+    programId: string;
+    tokenMint: string; // SPL mint (base58) used for PDA derivation + as the negotiated token
+    targetSettlementAddress: string; // apex Solana settlement pubkey (base58) — claim recipient / channel peer
+    // Optional on-chain deposit when opening the channel: BOTH the amount (base
+    // units) AND the payer's funded SPL token account (ATA, base58) must be set.
+    // When omitted the channel opens without a deposit (connector accepts on
+    // `opened` status + participant membership; deposit is consumed only at
+    // on-chain claim/settle time).
+    depositAmount: string | null;
+    payerTokenAccount: string | null;
+    challengeDuration: number;
+  };
 }
 
 function parseEnv(): PodEnv {
@@ -133,19 +169,63 @@ function parseEnv(): PodEnv {
     if (!v) throw new Error(`[toon-client] required env ${k} is unset`);
     return v;
   };
-  const rateLimitPerMin = parseInt(env['PUBLISH_RATE_LIMIT_PER_MIN'] || '30', 10);
+  const rateLimitPerMin = parseInt(
+    env['PUBLISH_RATE_LIMIT_PER_MIN'] || '30',
+    10
+  );
   if (!Number.isInteger(rateLimitPerMin) || rateLimitPerMin < 1) {
-    throw new Error(`[toon-client] PUBLISH_RATE_LIMIT_PER_MIN must be a positive integer, got: ${env['PUBLISH_RATE_LIMIT_PER_MIN']}`);
+    throw new Error(
+      `[toon-client] PUBLISH_RATE_LIMIT_PER_MIN must be a positive integer, got: ${env['PUBLISH_RATE_LIMIT_PER_MIN']}`
+    );
   }
   const anonSocksPort = parseInt(env['ANON_SOCKS_PORT'] || '9050', 10);
-  if (!Number.isInteger(anonSocksPort) || anonSocksPort < 1 || anonSocksPort > 65535) {
-    throw new Error(`[toon-client] ANON_SOCKS_PORT must be a valid port, got: ${env['ANON_SOCKS_PORT']}`);
+  if (
+    !Number.isInteger(anonSocksPort) ||
+    anonSocksPort < 1 ||
+    anonSocksPort > 65535
+  ) {
+    throw new Error(
+      `[toon-client] ANON_SOCKS_PORT must be a valid port, got: ${env['ANON_SOCKS_PORT']}`
+    );
   }
   // ator-public mode: take the first URL from the comma-separated list.
   const rawProxy = env['ANYONE_PROXY_URLS']?.split(',')[0]?.trim() || null;
   if (rawProxy && !rawProxy.startsWith('socks5h://')) {
-    throw new Error(`[toon-client] ANYONE_PROXY_URLS must use socks5h:// scheme, got: ${rawProxy}`);
+    throw new Error(
+      `[toon-client] ANYONE_PROXY_URLS must use socks5h:// scheme, got: ${rawProxy}`
+    );
   }
+
+  // Solana payment: enabled only when both the program id and the apex's Solana
+  // settlement address are present (you cannot open a channel / address a claim
+  // without both). Everything else falls back to sensible local-devnet defaults.
+  const solanaProgramId = env['SOLANA_PROGRAM_ID']?.trim() || '';
+  const solanaTargetSettlement =
+    (
+      env['TARGET_SETTLEMENT_ADDRESS_SOLANA'] ||
+      env['SOLANA_TARGET_SETTLEMENT_ADDRESS']
+    )?.trim() || '';
+  const solanaEnabled = solanaProgramId !== '' && solanaTargetSettlement !== '';
+  const solanaTokenMint =
+    env['SOLANA_TOKEN_MINT']?.trim() ||
+    env['SOLANA_USDC_MINT']?.trim() ||
+    '6GbdrVghwNKTz9raga7y3Y4qqX5Zgg3AC4d48Kt7C59Q';
+  const solanaDepositAmount = env['SOLANA_DEPOSIT_AMOUNT']?.trim() || null;
+  const solanaPayerTokenAccount =
+    env['SOLANA_PAYER_TOKEN_ACCOUNT']?.trim() || null;
+  const solanaChallengeDuration = parseInt(
+    env['SOLANA_CHALLENGE_DURATION'] || '86400',
+    10
+  );
+  if (
+    !Number.isInteger(solanaChallengeDuration) ||
+    solanaChallengeDuration < 1
+  ) {
+    throw new Error(
+      `[toon-client] SOLANA_CHALLENGE_DURATION must be a positive integer, got: ${env['SOLANA_CHALLENGE_DURATION']}`
+    );
+  }
+
   return {
     faucetUrl: need('FAUCET_URL'),
     evmRpcUrl: need('EVM_RPC_URL'),
@@ -168,16 +248,35 @@ function parseEnv(): PodEnv {
       '0x90F79bf6EB2c4f870365E785982E1f101E93b906',
     evmEthThresholdWei: 1n,
     solLamportThreshold: 1,
-    solanaUsdcMint: env['SOLANA_USDC_MINT'] || '6GbdrVghwNKTz9raga7y3Y4qqX5Zgg3AC4d48Kt7C59Q',
+    solanaUsdcMint:
+      env['SOLANA_USDC_MINT'] || '6GbdrVghwNKTz9raga7y3Y4qqX5Zgg3AC4d48Kt7C59Q',
     evmUsdcThreshold: 1_000_000n,
     solUsdcThreshold: 1_000_000,
     feePerEvent: BigInt(env['TOON_FEE_PER_EVENT'] || '0'),
+    solana: {
+      enabled: solanaEnabled,
+      chainKey: env['SOLANA_CHAIN_KEY']?.trim() || 'solana:devnet',
+      programId: solanaProgramId,
+      tokenMint: solanaTokenMint,
+      targetSettlementAddress: solanaTargetSettlement,
+      depositAmount: solanaDepositAmount,
+      payerTokenAccount: solanaPayerTokenAccount,
+      challengeDuration: solanaChallengeDuration,
+    },
   };
 }
 
 // ---------- Key generation (memory-only) ----------
 
 interface EphemeralKeys {
+  /**
+   * BIP-39 mnemonic — present ONLY in Solana-payment mode. When set, the
+   * ToonClient is constructed from this phrase so the EVM (secp256k1) and Solana
+   * (Ed25519) identities derive consistently and the client registers a Solana
+   * signer + opens the on-chain Solana channel with the SAME key it signs claims
+   * with. In EVM-only mode this is undefined and `evmPrivateKey` is used.
+   */
+  mnemonic?: string;
   evmPrivateKey: `0x${string}`;
   evmAddress: `0x${string}`;
   solSecretKey: Uint8Array;
@@ -185,6 +284,10 @@ interface EphemeralKeys {
   nostrPubkey: string; // BTP peer identity (64-char hex secp256k1 x-coord)
 }
 
+/**
+ * EVM-only ephemeral keys: random EVM + random Solana (Solana key is funded but
+ * not used to pay — the EVM path negotiates EVM). Unchanged legacy behaviour.
+ */
 function generateEphemeralKeys(): EphemeralKeys {
   const evmPrivateKey = generatePrivateKey();
   const evmAddress = privateKeyToAddress(evmPrivateKey);
@@ -193,18 +296,59 @@ function generateEphemeralKeys(): EphemeralKeys {
   const solPublicKeyBase58 = bs58.encode(solPub);
   const nostrPrivKey = generateSecretKey();
   const nostrPubkey = getPublicKey(nostrPrivKey);
-  return { evmPrivateKey, evmAddress, solSecretKey, solPublicKeyBase58, nostrPubkey };
+  return {
+    evmPrivateKey,
+    evmAddress,
+    solSecretKey,
+    solPublicKeyBase58,
+    nostrPubkey,
+  };
+}
+
+/**
+ * Solana-payment ephemeral keys: derive EVM + Solana from a single ephemeral
+ * BIP-39 mnemonic via the client's own derivation (so the funded Solana pubkey,
+ * the on-chain channel keypair, and the claim-signing key are all the same).
+ */
+async function generateMnemonicKeys(): Promise<EphemeralKeys> {
+  const mnemonic = generateMnemonic();
+  const identity = await deriveFullIdentity(mnemonic);
+  if (!identity.solana.publicKey) {
+    throw new Error(
+      '[toon-client] Solana payment enabled but Solana key derivation failed ' +
+        '(is the Ed25519 optional dep present in the image?)'
+    );
+  }
+  return {
+    mnemonic,
+    evmPrivateKey:
+      `0x${Buffer.from(identity.evm.privateKey).toString('hex')}` as `0x${string}`,
+    evmAddress: identity.evm.address as `0x${string}`,
+    solSecretKey: identity.solana.secretKey, // 64-byte keypair (seed||pubkey)
+    solPublicKeyBase58: identity.solana.publicKey,
+    nostrPubkey: getPublicKey(identity.nostr.secretKey),
+  };
 }
 
 // ---------- Local anon daemon ----------
 
 // Simple TCP connect — confirms the anon SOCKS5 port has bound and is
 // accepting connections. Mirrors packages/client/src/transport/socks5.ts.
-async function tcpProbe(host: string, port: number, timeoutMs: number): Promise<void> {
+async function tcpProbe(
+  host: string,
+  port: number,
+  timeoutMs: number
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const sock = createConnection({ host, port }, () => { sock.destroy(); resolve(); });
+    const sock = createConnection({ host, port }, () => {
+      sock.destroy();
+      resolve();
+    });
     sock.once('error', reject);
-    sock.setTimeout(timeoutMs, () => { sock.destroy(); reject(new Error('timeout')); });
+    sock.setTimeout(timeoutMs, () => {
+      sock.destroy();
+      reject(new Error('timeout'));
+    });
   });
 }
 
@@ -246,7 +390,7 @@ function spawnAnon(log: (msg: string) => void): ChildProcess {
 async function waitForAnonSocks(
   socksPort: number,
   deadlineMs: number,
-  log: (msg: string) => void,
+  log: (msg: string) => void
 ): Promise<void> {
   log(`[anon] waiting for SOCKS5 bind on 127.0.0.1:${socksPort}…`);
   let lastErr: string | null = null;
@@ -264,7 +408,9 @@ async function waitForAnonSocks(
     }
     await new Promise((r) => setTimeout(r, 2_000));
   }
-  throw new Error(`[anon] SOCKS5 never bound on 127.0.0.1:${socksPort} by deadline`);
+  throw new Error(
+    `[anon] SOCKS5 never bound on 127.0.0.1:${socksPort} by deadline`
+  );
 }
 
 // ---------- Faucet calls (49.2 contract) ----------
@@ -273,10 +419,12 @@ async function dripFromFaucet(
   faucetUrl: string,
   chain: 'evm' | 'solana',
   recipient: string,
-  log: (msg: string) => void,
+  log: (msg: string) => void
 ): Promise<void> {
   const url = `${faucetUrl.replace(/\/+$/, '')}/faucet`;
-  log(`[faucet] POST ${url} chain=${chain} recipient=${recipient.slice(0, 10)}…`);
+  log(
+    `[faucet] POST ${url} chain=${chain} recipient=${recipient.slice(0, 10)}…`
+  );
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -285,10 +433,14 @@ async function dripFromFaucet(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`[faucet] ${chain} drip failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+    throw new Error(
+      `[faucet] ${chain} drip failed: HTTP ${res.status} ${body.slice(0, 200)}`
+    );
   }
   const json = (await res.json()) as Record<string, unknown>;
-  log(`[faucet] ${chain} drip tx=${(json['tx'] as string)?.slice(0, 20) ?? '?'}…`);
+  log(
+    `[faucet] ${chain} drip tx=${(json['tx'] as string)?.slice(0, 20) ?? '?'}…`
+  );
 }
 
 async function pollEvmBalance(
@@ -296,7 +448,7 @@ async function pollEvmBalance(
   address: `0x${string}`,
   thresholdWei: bigint,
   deadlineMs: number,
-  log: (msg: string) => void,
+  log: (msg: string) => void
 ): Promise<bigint> {
   const client = createPublicClient({ transport: viemHttp(rpcUrl) });
   while (Date.now() < deadlineMs) {
@@ -311,7 +463,9 @@ async function pollEvmBalance(
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error(`[balance] EVM ${address} never crossed ${thresholdWei} wei by deadline`);
+  throw new Error(
+    `[balance] EVM ${address} never crossed ${thresholdWei} wei by deadline`
+  );
 }
 
 async function pollSolBalance(
@@ -319,24 +473,34 @@ async function pollSolBalance(
   pubkeyBase58: string,
   thresholdLamports: number,
   deadlineMs: number,
-  log: (msg: string) => void,
+  log: (msg: string) => void
 ): Promise<number> {
   while (Date.now() < deadlineMs) {
     try {
       const res = await fetch(rpcUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [pubkeyBase58] }),
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getBalance',
+          params: [pubkeyBase58],
+        }),
         signal: AbortSignal.timeout(5_000),
       });
       if (res.ok) {
-        const json = (await res.json()) as { result?: { value?: number }; error?: unknown };
+        const json = (await res.json()) as {
+          result?: { value?: number };
+          error?: unknown;
+        };
         if (json.error) {
           log(`[balance] SOL RPC error: ${JSON.stringify(json.error)}`);
         } else {
           const value = json.result?.value ?? 0;
           if (value >= thresholdLamports) {
-            log(`[balance] SOL ${pubkeyBase58.slice(0, 10)}… = ${value} lamports`);
+            log(
+              `[balance] SOL ${pubkeyBase58.slice(0, 10)}… = ${value} lamports`
+            );
             return value;
           }
         }
@@ -346,7 +510,9 @@ async function pollSolBalance(
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error(`[balance] SOL ${pubkeyBase58} never crossed ${thresholdLamports} lamports by deadline`);
+  throw new Error(
+    `[balance] SOL ${pubkeyBase58} never crossed ${thresholdLamports} lamports by deadline`
+  );
 }
 
 // ERC-20 balanceOf via raw eth_call; selector = keccak256("balanceOf(address)")[0:4]
@@ -356,16 +522,20 @@ async function pollEvmUsdcBalance(
   ownerAddress: `0x${string}`,
   thresholdUnits: bigint,
   deadlineMs: number,
-  log: (msg: string) => void,
+  log: (msg: string) => void
 ): Promise<bigint> {
   const client = createPublicClient({ transport: viemHttp(rpcUrl) });
-  const data = `0x70a08231${ownerAddress.slice(2).padStart(64, '0')}` as `0x${string}`;
+  const data =
+    `0x70a08231${ownerAddress.slice(2).padStart(64, '0')}` as `0x${string}`;
   while (Date.now() < deadlineMs) {
     try {
       const result = await client.call({ to: tokenAddress, data });
-      const balance = result.data && result.data !== '0x' ? BigInt(result.data) : 0n;
+      const balance =
+        result.data && result.data !== '0x' ? BigInt(result.data) : 0n;
       if (balance >= thresholdUnits) {
-        log(`[balance] EVM USDC ${ownerAddress.slice(0, 10)}… = ${balance} units`);
+        log(
+          `[balance] EVM USDC ${ownerAddress.slice(0, 10)}… = ${balance} units`
+        );
         return balance;
       }
     } catch (err) {
@@ -373,7 +543,9 @@ async function pollEvmUsdcBalance(
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error(`[balance] EVM USDC ${ownerAddress} never crossed ${thresholdUnits} units by deadline`);
+  throw new Error(
+    `[balance] EVM USDC ${ownerAddress} never crossed ${thresholdUnits} units by deadline`
+  );
 }
 
 // SPL token balance via getTokenAccountsByOwner (jsonParsed encoding).
@@ -383,7 +555,7 @@ async function pollSolUsdcBalance(
   ownerBase58: string,
   thresholdUnits: number,
   deadlineMs: number,
-  log: (msg: string) => void,
+  log: (msg: string) => void
 ): Promise<number> {
   while (Date.now() < deadlineMs) {
     try {
@@ -391,21 +563,38 @@ async function pollSolUsdcBalance(
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          jsonrpc: '2.0', id: 1,
+          jsonrpc: '2.0',
+          id: 1,
           method: 'getTokenAccountsByOwner',
           params: [ownerBase58, { mint: usdcMint }, { encoding: 'jsonParsed' }],
         }),
         signal: AbortSignal.timeout(5_000),
       });
       if (res.ok) {
-        interface TResp { result?: { value?: { account?: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }[] }; error?: unknown }
+        interface TResp {
+          result?: {
+            value?: {
+              account?: {
+                data?: {
+                  parsed?: { info?: { tokenAmount?: { amount?: string } } };
+                };
+              };
+            }[];
+          };
+          error?: unknown;
+        }
         const json = (await res.json()) as TResp;
         if (json.error) {
           log(`[balance] SOL USDC RPC error: ${JSON.stringify(json.error)}`);
         } else {
-          const amount = Number(json.result?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount?.amount ?? '0');
+          const amount = Number(
+            json.result?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount
+              ?.amount ?? '0'
+          );
           if (amount >= thresholdUnits) {
-            log(`[balance] SOL USDC ${ownerBase58.slice(0, 10)}… = ${amount} units`);
+            log(
+              `[balance] SOL USDC ${ownerBase58.slice(0, 10)}… = ${amount} units`
+            );
             return amount;
           }
         }
@@ -415,19 +604,27 @@ async function pollSolUsdcBalance(
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error(`[balance] SOL USDC ${ownerBase58} never crossed ${thresholdUnits} units by deadline`);
+  throw new Error(
+    `[balance] SOL USDC ${ownerBase58} never crossed ${thresholdUnits} units by deadline`
+  );
 }
 
 // ---------- Rate limit (windowed counter per source IP) ----------
 
-interface BucketState { count: number; windowStart: number; }
+interface BucketState {
+  count: number;
+  windowStart: number;
+}
 
 class IpRateLimiter {
   private readonly buckets = new Map<string, BucketState>();
   private static readonly MAX_BUCKETS = 50_000;
   constructor(private readonly perMin: number) {}
 
-  consume(ip: string, now = Date.now()): { ok: true } | { ok: false; retryAfterSec: number } {
+  consume(
+    ip: string,
+    now = Date.now()
+  ): { ok: true } | { ok: false; retryAfterSec: number } {
     const windowMs = 60_000;
     const bucket = this.buckets.get(ip);
     if (!bucket || now - bucket.windowStart >= windowMs) {
@@ -438,34 +635,59 @@ class IpRateLimiter {
       this.buckets.set(ip, { count: 1, windowStart: now });
       return { ok: true };
     }
-    if (bucket.count < this.perMin) { bucket.count += 1; return { ok: true }; }
-    const retryAfterSec = Math.ceil((bucket.windowStart + windowMs - now) / 1000);
+    if (bucket.count < this.perMin) {
+      bucket.count += 1;
+      return { ok: true };
+    }
+    const retryAfterSec = Math.ceil(
+      (bucket.windowStart + windowMs - now) / 1000
+    );
     return { ok: false, retryAfterSec: Math.max(1, retryAfterSec) };
   }
 }
 
 // ---------- ToonClient cache (per targetHostname, AC #3) ----------
 
-interface ClientCacheEntry { client: ToonClient; channelId: string; createdAt: number; }
+interface ClientCacheEntry {
+  client: ToonClient;
+  channelId: string;
+  createdAt: number;
+}
 
 const HOSTNAME_REGEX = /^[a-z2-7]+\.(anyone|anon)$/;
 function isValidHostname(s: unknown): s is string {
   return typeof s === 'string' && s.length <= 80 && HOSTNAME_REGEX.test(s);
 }
 
-interface PublishRequestBody { event: NostrEvent; targetHostname: string; }
+interface PublishRequestBody {
+  event: NostrEvent;
+  targetHostname: string;
+}
 
 // ---------- Main ----------
 
 async function main(): Promise<void> {
   const env = parseEnv();
-  const log = (msg: string): void => console.log(`[${new Date().toISOString()}] ${msg}`);
+  const log = (msg: string): void =>
+    console.log(`[${new Date().toISOString()}] ${msg}`);
   log(`[toon-client] booting — log level ${env.logLevel}`);
 
-  // Step 1: generate ephemeral signer keys (memory only, log PUBLIC only)
-  const keys = generateEphemeralKeys();
+  // Step 1: generate ephemeral signer keys (memory only, log PUBLIC only).
+  // Solana-payment mode derives EVM + Solana from a single mnemonic so the
+  // funded Solana account, the on-chain channel keypair, and the claim-signing
+  // key are identical; EVM-only mode keeps the legacy random-key behaviour.
+  const keys = env.solana.enabled
+    ? await generateMnemonicKeys()
+    : generateEphemeralKeys();
   log(`[keys] EVM address: ${keys.evmAddress}`);
   log(`[keys] Solana pubkey: ${keys.solPublicKeyBase58}`);
+  if (env.solana.enabled) {
+    log(
+      `[keys] Solana payment ENABLED — chain=${env.solana.chainKey} ` +
+        `program=${env.solana.programId} mint=${env.solana.tokenMint} ` +
+        `apexRecipient=${env.solana.targetSettlementAddress}`
+    );
+  }
 
   // Mutable boot state — updated asynchronously by the boot sequence below.
   // Routes read from this state so Fastify can serve /healthz immediately.
@@ -479,12 +701,21 @@ async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
 
   // Step 2: ajv compile the schema (synchronous, fast)
-  const ajv = new Ajv({ strict: false, allErrors: true, allowUnionTypes: true });
+  const ajv = new Ajv({
+    strict: false,
+    allErrors: true,
+    allowUnionTypes: true,
+  });
   addFormats(ajv);
   const schemaJson = JSON.parse(readFileSync(SCHEMA_PATH, 'utf-8')) as object;
   ajv.addSchema(schemaJson, 'foreign-publish');
-  const validateRequest = ajv.getSchema('foreign-publish#/definitions/PublishRequest');
-  if (!validateRequest) throw new Error('foreign-publish.schema.json missing definitions/PublishRequest');
+  const validateRequest = ajv.getSchema(
+    'foreign-publish#/definitions/PublishRequest'
+  );
+  if (!validateRequest)
+    throw new Error(
+      'foreign-publish.schema.json missing definitions/PublishRequest'
+    );
 
   // Step 3: rate limiter + ToonClient cache + creation lock
   const rateLimiter = new IpRateLimiter(env.publishRateLimitPerMin);
@@ -493,7 +724,10 @@ async function main(): Promise<void> {
 
   // Step 4: start Fastify IMMEDIATELY so /healthz is reachable within ~100ms
   // of pod startup (before the proxy probe + faucet calls complete).
-  const fastify = Fastify({ logger: { level: env.logLevel }, bodyLimit: 64 * 1024 });
+  const fastify = Fastify({
+    logger: { level: env.logLevel },
+    bodyLimit: 64 * 1024,
+  });
 
   // NOTE: balances reflect the boot-time faucet drip and are NOT refreshed
   // after boot. Use for readiness signalling only.
@@ -522,27 +756,41 @@ async function main(): Promise<void> {
     // LIMITATION: callers can spoof X-Forwarded-For to bypass per-IP limiting.
     // Acceptable for a dev fixture; production fix: validate XFF against a
     // known-proxy IP range or set TRUST_PROXY=0 to use req.socket.remoteAddress.
-    const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim()
-      || req.ip || 'unknown';
+    const ip =
+      (req.headers['x-forwarded-for'] as string | undefined)
+        ?.split(',')[0]
+        ?.trim() ||
+      req.ip ||
+      'unknown';
     const verdict = rateLimiter.consume(ip);
     if (!verdict.ok) {
       reply.header('retry-after', String(verdict.retryAfterSec));
-      return reply.status(429).send({ error: 'rate_limited', retryAfterSec: verdict.retryAfterSec });
+      return reply
+        .status(429)
+        .send({ error: 'rate_limited', retryAfterSec: verdict.retryAfterSec });
     }
 
     const body = req.body as PublishRequestBody;
     if (!validateRequest(body)) {
       const errors = validateRequest.errors ?? [];
       const missingTarget = errors.find(
-        (e) => e.keyword === 'required' &&
-          (e.params as { missingProperty?: string })?.missingProperty === 'targetHostname',
+        (e) =>
+          e.keyword === 'required' &&
+          (e.params as { missingProperty?: string })?.missingProperty ===
+            'targetHostname'
       );
       if (missingTarget) {
-        return reply.status(400).send({ error: 'targetHostname required', field: 'targetHostname' });
+        return reply
+          .status(400)
+          .send({ error: 'targetHostname required', field: 'targetHostname' });
       }
       return reply.status(400).send({
         error: 'invalid_request',
-        ajvErrors: errors.map((e) => ({ path: e.instancePath, message: e.message, keyword: e.keyword })),
+        ajvErrors: errors.map((e) => ({
+          path: e.instancePath,
+          message: e.message,
+          keyword: e.keyword,
+        })),
       });
     }
     if (!isValidHostname(body.targetHostname)) {
@@ -577,9 +825,44 @@ async function main(): Promise<void> {
         let creating = clientCreating.get(targetHostname);
         if (!creating) {
           creating = (async () => {
+            // Multi-chain settlement maps. EVM is always present; Solana is
+            // added (and chosen as the negotiated chain) when SOLANA_PROGRAM_ID +
+            // TARGET_SETTLEMENT_ADDRESS_SOLANA are set. The default (EVM-only)
+            // path is byte-for-byte the legacy single-chain config.
+            const supportedChains = [env.chainKey];
+            const chainRpcUrls: Record<string, string> = {
+              [env.chainKey]: env.evmRpcUrl,
+            };
+            const settlementAddresses: Record<string, string> = {
+              [env.chainKey]: keys.evmAddress,
+            };
+            const preferredTokens: Record<string, string> = {
+              [env.chainKey]: env.tokenAddress,
+            };
+            const tokenNetworks: Record<string, string> = {
+              [env.chainKey]: env.tokenNetworkAddress,
+            };
+
+            if (env.solana.enabled) {
+              supportedChains.push(env.solana.chainKey);
+              chainRpcUrls[env.solana.chainKey] = env.solanaRpcUrl;
+              settlementAddresses[env.solana.chainKey] =
+                keys.solPublicKeyBase58;
+              preferredTokens[env.solana.chainKey] = env.solana.tokenMint;
+              // For Solana the "tokenNetwork" slot carries the program id — it is
+              // what the ChannelManager records and the connector reads as the
+              // payment-channel program (ChainMetadata.programId).
+              tokenNetworks[env.solana.chainKey] = env.solana.programId;
+            }
+
             const client = new ToonClient({
               connectorUrl: 'http://127.0.0.1:1', // required by validateConfig, unused at runtime
-              evmPrivateKey: keys.evmPrivateKey,
+              // Solana mode: drive from a mnemonic so the client derives + registers
+              // a Solana signer (Ed25519) consistent with the funded account and the
+              // on-chain channel keypair. EVM mode: explicit EVM key (legacy).
+              ...(env.solana.enabled
+                ? { mnemonic: keys.mnemonic }
+                : { evmPrivateKey: keys.evmPrivateKey }),
               ilpInfo: {
                 pubkey: '00'.repeat(32),
                 ilpAddress: `g.toon.client.${keys.evmAddress.slice(2, 18).toLowerCase()}`,
@@ -596,37 +879,90 @@ async function main(): Promise<void> {
               destinationAddress: 'g.townhouse.town',
               knownPeers: [],
               relayUrl: '',
-              supportedChains: [env.chainKey],
-              chainRpcUrls: { [env.chainKey]: env.evmRpcUrl },
-              settlementAddresses: { [env.chainKey]: keys.evmAddress },
-              preferredTokens: { [env.chainKey]: env.tokenAddress },
-              tokenNetworks: { [env.chainKey]: env.tokenNetworkAddress },
+              supportedChains,
+              chainRpcUrls,
+              settlementAddresses,
+              preferredTokens,
+              tokenNetworks,
+              // Solana payment-channel params — wired into the on-chain channel
+              // client so negotiating solana:* opens a REAL on-chain channel
+              // (connector-parity PDA) and signs a connector-format claim.
+              ...(env.solana.enabled
+                ? {
+                    solanaChannel: {
+                      rpcUrl: env.solanaRpcUrl,
+                      programId: env.solana.programId,
+                      tokenMint: env.solana.tokenMint,
+                      challengeDuration: env.solana.challengeDuration,
+                      ...(env.solana.depositAmount &&
+                      env.solana.payerTokenAccount
+                        ? {
+                            deposit: {
+                              amount: env.solana.depositAmount,
+                              // The payer's funded SPL token account (ATA for
+                              // owner=client Solana pubkey, mint), created/funded
+                              // out-of-band by the e2e bootstrap.
+                              payerTokenAccount: env.solana.payerTokenAccount,
+                            },
+                          }
+                        : {}),
+                    },
+                  }
+                : {}),
             });
             await client.start();
 
             // Inject peer negotiation — bootstrap returns 0 peers (no relayUrl),
             // so we tell the channel manager the apex's settlement address manually.
-            // Mirrors 49.1 Step 17.
+            // Mirrors 49.1 Step 17. In Solana mode we negotiate the Solana chain
+            // (chainType 'solana', programId in tokenNetwork, apex Solana pubkey as
+            // recipient) so openChannel() opens the on-chain Solana channel and the
+            // balance proof is a Solana-denominated claim; otherwise EVM as before.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const negotiations = (client as any).peerNegotiations as Map<string, unknown> | undefined;
-            if (!(negotiations instanceof Map)) throw new Error('ToonClient.peerNegotiations layout changed');
-            negotiations.set('town', {
-              chain: env.chainKey,
-              chainType: 'evm' as const,
-              chainId: env.chainId,
-              settlementAddress: env.targetSettlementAddress,
-              tokenAddress: env.tokenAddress,
-              tokenNetwork: env.tokenNetworkAddress,
-            });
+            const negotiations = (client as any).peerNegotiations as
+              | Map<string, unknown>
+              | undefined;
+            if (!(negotiations instanceof Map))
+              throw new Error('ToonClient.peerNegotiations layout changed');
+            if (env.solana.enabled) {
+              negotiations.set('town', {
+                chain: env.solana.chainKey,
+                chainType: 'solana' as const,
+                chainId: 0,
+                settlementAddress: env.solana.targetSettlementAddress,
+                tokenAddress: env.solana.tokenMint,
+                tokenNetwork: env.solana.programId,
+              });
+            } else {
+              negotiations.set('town', {
+                chain: env.chainKey,
+                chainType: 'evm' as const,
+                chainId: env.chainId,
+                settlementAddress: env.targetSettlementAddress,
+                tokenAddress: env.tokenAddress,
+                tokenNetwork: env.tokenNetworkAddress,
+              });
+            }
 
             const channelId = await client.openChannel('g.townhouse.town');
-            const newEntry: ClientCacheEntry = { client, channelId, createdAt: Date.now() };
+            const newEntry: ClientCacheEntry = {
+              client,
+              channelId,
+              createdAt: Date.now(),
+            };
             clientCache.set(targetHostname, newEntry);
-            req.log.info({ targetHostname, channelId }, '[publish] new ToonClient cached');
+            req.log.info(
+              { targetHostname, channelId },
+              '[publish] new ToonClient cached'
+            );
             return newEntry;
           })();
           clientCreating.set(targetHostname, creating);
-          creating.finally(() => clientCreating.delete(targetHostname)).catch(() => { /* logged below */ });
+          creating
+            .finally(() => clientCreating.delete(targetHostname))
+            .catch(() => {
+              /* logged below */
+            });
         }
         // Race client creation against a 45s deadline so the pod returns a JSON
         // 503+retryable before the Akash nginx ingress times out at ~60s.
@@ -638,9 +974,12 @@ async function main(): Promise<void> {
         try {
           entry = await Promise.race([creating, createDeadline]);
         } catch (createErr) {
-          const createMsg = createErr instanceof Error ? createErr.message : String(createErr);
+          const createMsg =
+            createErr instanceof Error ? createErr.message : String(createErr);
           if (createMsg === 'publish_timeout') {
-            return reply.status(503).send({ error: 'publish_timeout', retryable: true });
+            return reply
+              .status(503)
+              .send({ error: 'publish_timeout', retryable: true });
           }
           throw createErr;
         }
@@ -652,10 +991,16 @@ async function main(): Promise<void> {
       // fee=0 the relay accepts the event for free and the connector skips
       // per-packet claim generation (amount===0n guard in packet-handler.ts).
       const paymentAmount = env.feePerEvent;
-      const proof = await entry.client.signBalanceProof(entry.channelId, paymentAmount);
+      const proof = await entry.client.signBalanceProof(
+        entry.channelId,
+        paymentAmount
+      );
 
       // AC #7: caller controls retries; pod has no replay cache.
-      const publishResult = await entry.client.publishEvent(event, { claim: proof, ilpAmount: env.feePerEvent });
+      const publishResult = await entry.client.publishEvent(event, {
+        claim: proof,
+        ilpAmount: env.feePerEvent,
+      });
       const durationMs = Date.now() - startMs;
 
       if (!publishResult.success) {
@@ -675,7 +1020,10 @@ async function main(): Promise<void> {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const cause = (err instanceof Error && err.cause instanceof Error) ? err.cause.message : null;
+      const cause =
+        err instanceof Error && err.cause instanceof Error
+          ? err.cause.message
+          : null;
       const detail = cause ? `${msg}: ${cause}` : msg;
       req.log.error({ err: detail, targetHostname }, '[publish] failed');
       return reply.status(502).send({ error: detail, retryable: true });
@@ -732,23 +1080,61 @@ async function main(): Promise<void> {
       // the happy path automatic. USDC polls are best-effort regardless.
       const [evmBal, solBal] = await Promise.all([
         (async () => {
-          dripFromFaucet(env.faucetUrl, 'evm', keys.evmAddress, log).catch((err: Error) =>
-            log(`[faucet] EVM drip non-fatal: ${err.message} — relying on out-of-band funding`)
+          dripFromFaucet(env.faucetUrl, 'evm', keys.evmAddress, log).catch(
+            (err: Error) =>
+              log(
+                `[faucet] EVM drip non-fatal: ${err.message} — relying on out-of-band funding`
+              )
           );
           const deadline = Date.now() + 30_000;
-          const bal = await pollEvmBalance(env.evmRpcUrl, keys.evmAddress, env.evmEthThresholdWei, deadline, log);
-          pollEvmUsdcBalance(env.evmRpcUrl, env.tokenAddress, keys.evmAddress, env.evmUsdcThreshold, deadline, log)
-            .catch((err: Error) => log(`[balance] EVM USDC (non-fatal): ${err.message}`));
+          const bal = await pollEvmBalance(
+            env.evmRpcUrl,
+            keys.evmAddress,
+            env.evmEthThresholdWei,
+            deadline,
+            log
+          );
+          pollEvmUsdcBalance(
+            env.evmRpcUrl,
+            env.tokenAddress,
+            keys.evmAddress,
+            env.evmUsdcThreshold,
+            deadline,
+            log
+          ).catch((err: Error) =>
+            log(`[balance] EVM USDC (non-fatal): ${err.message}`)
+          );
           return bal;
         })(),
         (async () => {
-          dripFromFaucet(env.faucetUrl, 'solana', keys.solPublicKeyBase58, log).catch((err: Error) =>
-            log(`[faucet] SOL drip non-fatal: ${err.message} — relying on out-of-band funding`)
+          dripFromFaucet(
+            env.faucetUrl,
+            'solana',
+            keys.solPublicKeyBase58,
+            log
+          ).catch((err: Error) =>
+            log(
+              `[faucet] SOL drip non-fatal: ${err.message} — relying on out-of-band funding`
+            )
           );
           const deadline = Date.now() + 30_000;
-          const bal = await pollSolBalance(env.solanaRpcUrl, keys.solPublicKeyBase58, env.solLamportThreshold, deadline, log);
-          pollSolUsdcBalance(env.solanaRpcUrl, env.solanaUsdcMint, keys.solPublicKeyBase58, env.solUsdcThreshold, deadline, log)
-            .catch((err: Error) => log(`[balance] SOL USDC (non-fatal): ${err.message}`));
+          const bal = await pollSolBalance(
+            env.solanaRpcUrl,
+            keys.solPublicKeyBase58,
+            env.solLamportThreshold,
+            deadline,
+            log
+          );
+          pollSolUsdcBalance(
+            env.solanaRpcUrl,
+            env.solanaUsdcMint,
+            keys.solPublicKeyBase58,
+            env.solUsdcThreshold,
+            deadline,
+            log
+          ).catch((err: Error) =>
+            log(`[balance] SOL USDC (non-fatal): ${err.message}`)
+          );
           return bal;
         })(),
       ]);
@@ -756,9 +1142,13 @@ async function main(): Promise<void> {
       solBalance = Number(solBal);
       bootComplete = true;
       anyoneReady = true;
-      log(`[boot] complete — EVM=${evmBalance} wei, SOL=${solBalance} lamports, proxy=${socks5ProxyUrl}`);
+      log(
+        `[boot] complete — EVM=${evmBalance} wei, SOL=${solBalance} lamports, proxy=${socks5ProxyUrl}`
+      );
     } catch (err) {
-      log(`[boot] ERROR: ${(err as Error).message} — pod running but boot failed; /publish will 503`);
+      log(
+        `[boot] ERROR: ${(err as Error).message} — pod running but boot failed; /publish will 503`
+      );
     }
   })();
 
@@ -766,9 +1156,17 @@ async function main(): Promise<void> {
     if (isShuttingDown) return;
     isShuttingDown = true;
     log(`[shutdown] received ${signal}`);
-    try { await fastify.close(); } catch (err) { log(`[shutdown] fastify: ${(err as Error).message}`); }
+    try {
+      await fastify.close();
+    } catch (err) {
+      log(`[shutdown] fastify: ${(err as Error).message}`);
+    }
     for (const [hostname, entry] of clientCache.entries()) {
-      try { await entry.client.stop(); } catch (err) { log(`[shutdown] stop ${hostname}: ${(err as Error).message}`); }
+      try {
+        await entry.client.stop();
+      } catch (err) {
+        log(`[shutdown] stop ${hostname}: ${(err as Error).message}`);
+      }
     }
     if (anonChild && !anonChild.killed) {
       try {
@@ -785,6 +1183,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  console.error(`[toon-client] fatal: ${err instanceof Error ? err.stack || err.message : String(err)}`);
+  console.error(
+    `[toon-client] fatal: ${err instanceof Error ? err.stack || err.message : String(err)}`
+  );
   process.exit(1);
 });
