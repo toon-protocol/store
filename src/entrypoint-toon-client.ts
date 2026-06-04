@@ -1,5 +1,5 @@
 /**
- * Foreign-TOON-client pod entrypoint (Story 49.3).
+ * TOON-client pod entrypoint (Story 49.3).
  *
  * Wraps 49.1's proven in-process publish flow in a Fastify HTTP control plane,
  * shipped as a long-lived Akash deployment. Runs a LOCAL `anon` daemon
@@ -37,7 +37,7 @@
  * Idempotency: Nostr layer (event.id = SHA-256 of canonical event). Pod is
  * stateless w.r.t. replay — retries MUST reuse the same signed event object.
  *
- * AC mapping (see _bmad-output/implementation-artifacts/49-3-persistent-akash-foreign-client-pod.md):
+ * AC mapping (see _bmad-output/implementation-artifacts/49-3-persistent-akash-toon-client-pod.md):
  *   AC #1   /healthz + boot + faucet auto-fund + USDC balance
  *   AC #2   POST /publish round-trip
  *   AC #3   Runtime-mutable targetHostname (cached ToonClient map keyed by hostname)
@@ -82,7 +82,7 @@ import {
   generatePrivateKey,
 } from 'viem/accounts';
 import { createPublicClient, http as viemHttp } from 'viem';
-import { ed25519 } from '@noble/curves/ed25519';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
 import {
   encodeEventToToon,
@@ -96,7 +96,7 @@ import type { NostrEvent } from 'nostr-tools/pure';
 const SCHEMA_PATH = process.env['FOREIGN_PUBLISH_SCHEMA_PATH']
   || '/runtime/contracts/foreign-publish.schema.json';
 
-// Anon data directory (matches the Dockerfile.foreign-toon-client `mkdir -p
+// Anon data directory (matches the Dockerfile.toon-client `mkdir -p
 // /var/lib/anon` step). Owned by root since the container runs as root —
 // same convention as docker/townhouse-ator-sidecar/Dockerfile.
 const ANON_DATA_DIR = '/var/lib/anon';
@@ -130,21 +130,21 @@ function parseEnv(): PodEnv {
   const env = process.env;
   const need = (k: string): string => {
     const v = env[k];
-    if (!v) throw new Error(`[foreign-pod] required env ${k} is unset`);
+    if (!v) throw new Error(`[toon-client] required env ${k} is unset`);
     return v;
   };
   const rateLimitPerMin = parseInt(env['PUBLISH_RATE_LIMIT_PER_MIN'] || '30', 10);
   if (!Number.isInteger(rateLimitPerMin) || rateLimitPerMin < 1) {
-    throw new Error(`[foreign-pod] PUBLISH_RATE_LIMIT_PER_MIN must be a positive integer, got: ${env['PUBLISH_RATE_LIMIT_PER_MIN']}`);
+    throw new Error(`[toon-client] PUBLISH_RATE_LIMIT_PER_MIN must be a positive integer, got: ${env['PUBLISH_RATE_LIMIT_PER_MIN']}`);
   }
   const anonSocksPort = parseInt(env['ANON_SOCKS_PORT'] || '9050', 10);
   if (!Number.isInteger(anonSocksPort) || anonSocksPort < 1 || anonSocksPort > 65535) {
-    throw new Error(`[foreign-pod] ANON_SOCKS_PORT must be a valid port, got: ${env['ANON_SOCKS_PORT']}`);
+    throw new Error(`[toon-client] ANON_SOCKS_PORT must be a valid port, got: ${env['ANON_SOCKS_PORT']}`);
   }
   // ator-public mode: take the first URL from the comma-separated list.
   const rawProxy = env['ANYONE_PROXY_URLS']?.split(',')[0]?.trim() || null;
   if (rawProxy && !rawProxy.startsWith('socks5h://')) {
-    throw new Error(`[foreign-pod] ANYONE_PROXY_URLS must use socks5h:// scheme, got: ${rawProxy}`);
+    throw new Error(`[toon-client] ANYONE_PROXY_URLS must use socks5h:// scheme, got: ${rawProxy}`);
   }
   return {
     faucetUrl: need('FAUCET_URL'),
@@ -460,7 +460,7 @@ interface PublishRequestBody { event: NostrEvent; targetHostname: string; }
 async function main(): Promise<void> {
   const env = parseEnv();
   const log = (msg: string): void => console.log(`[${new Date().toISOString()}] ${msg}`);
-  log(`[foreign-pod] booting — log level ${env.logLevel}`);
+  log(`[toon-client] booting — log level ${env.logLevel}`);
 
   // Step 1: generate ephemeral signer keys (memory only, log PUBLIC only)
   const keys = generateEphemeralKeys();
@@ -582,7 +582,7 @@ async function main(): Promise<void> {
               evmPrivateKey: keys.evmPrivateKey,
               ilpInfo: {
                 pubkey: '00'.repeat(32),
-                ilpAddress: `g.toon.foreign.${keys.evmAddress.slice(2, 18).toLowerCase()}`,
+                ilpAddress: `g.toon.client.${keys.evmAddress.slice(2, 18).toLowerCase()}`,
                 btpEndpoint: `ws://${targetHostname}:3000/btp`,
                 assetCode: 'USD',
                 assetScale: 6,
@@ -785,6 +785,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  console.error(`[foreign-pod] fatal: ${err instanceof Error ? err.stack || err.message : String(err)}`);
+  console.error(`[toon-client] fatal: ${err instanceof Error ? err.stack || err.message : String(err)}`);
   process.exit(1);
 });

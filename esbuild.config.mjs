@@ -15,7 +15,6 @@ const result = await esbuild.build({
   entryPoints: [
     'src/entrypoint-sdk.ts',
     'src/attestation-server.ts',
-    'src/entrypoint-foreign-pod.ts',
     'src/entrypoint-dvm.ts',
   ],
   bundle: true,
@@ -32,7 +31,7 @@ const result = await esbuild.build({
   // - ethers: dynamic require(packageName) in connector's requireOptional()
   // - express: dynamic require(packageName) in connector's AdminServer/HealthServer
   // - fastify: deep dynamic-require graph (avvio, find-my-way); ship as flat
-  //   node_modules so the foreign-pod entrypoint can require() it at runtime
+  //   node_modules so the toon-client entrypoint can require() it at runtime
   // - @noble/curves: dynamic import inside packages/client/dist causes esbuild
   //   to fail resolving the subpath export in Docker's pnpm store layout
   external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'o1js', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves'],

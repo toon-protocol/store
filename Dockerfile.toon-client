@@ -1,21 +1,30 @@
 # syntax=docker/dockerfile:1.7
-# Persistent Akash Foreign-TOON-Client Pod image (Story 49.3)
+# toon-client pod image (Story 49.3)
 #
 # Purpose:
-#   Long-lived Akash deployment that wraps 49.1's in-process publish flow
-#   behind a Fastify HTTP control plane. Runs a LOCAL `anon` daemon
-#   (ator-onion mode) for outbound SOCKS5 to the operator's .anyone hidden
-#   service — NO HiddenServiceDir (the pod is a CLIENT, not an HS host).
-#   The datacenter's anon builds better circuits than routing through the
-#   potentially overloaded public proxy.
+#   Long-lived deployment that wraps 49.1's in-process publish flow behind a
+#   Fastify HTTP control plane. Runs a LOCAL `anon` daemon (ator-onion mode)
+#   for outbound SOCKS5 to the operator's .anyone hidden service — NO
+#   HiddenServiceDir (the pod is a CLIENT, not an HS host).
+#
+#   REAL npm-consumer build: rather than esbuild-inlining the local client
+#   source, this image PACKS the local @toon-protocol workspace packages into
+#   npm tarballs (exactly what `npm publish` uploads) and `npm install`s them
+#   into a clean consumer project. So it exercises the client's published
+#   surface — package.json `files`, `exports`, declared `dependencies` /
+#   `optionalDependencies` — the same way `npm i @toon-protocol/client` would
+#   for a third-party developer. The entrypoint is transpiled with all package
+#   imports left external, so it resolves @toon-protocol/client (+ deps) from
+#   node_modules at runtime, not from a bundle.
 #
 # Consumers:
-#   - scripts/akash-deploy.sh cmd_build_foreign_toon_client
-#   - deploy/akash/foreign-toon-client.sdl.yaml
+#   - scripts/akash-deploy.sh cmd_build_toon_client
+#   - deploy/akash/toon-client.sdl.yaml
+#   - scripts/townhouse-e2e-local-hs.sh (local e2e, `up --local` rebuilds this)
 #
 # Build (from repo root):
-#   docker build -f docker/Dockerfile.foreign-toon-client \
-#     -t ghcr.io/toon-protocol/akash-foreign-toon-client:demo .
+#   docker build -f docker/Dockerfile.toon-client \
+#     -t ghcr.io/toon-protocol/toon-client:demo .
 
 # ── Stage 1: anon-base (Debian + ator-protocol .deb) ─────────────────────────
 # Pinned to the same version that docker/townhouse-ator-sidecar uses, so the
@@ -58,9 +67,11 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     anon --version | grep -q "${ANON_VERSION}"
 
-# ── Stage 2: Node.js builder (workspace + esbuild bundle) ────────────────────
+# ── Stage 2: Node.js builder (pack workspace → install as an npm consumer) ───
 FROM node:20-bookworm-slim AS builder
 
+# python3/make/g++: native build of better-sqlite3 (a @toon-protocol/relay dep)
+# when the consumer project installs it from the registry.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 make g++ && \
     rm -rf /var/lib/apt/lists/*
@@ -87,64 +98,82 @@ COPY packages/bls/ ./packages/bls/
 COPY packages/client/ ./packages/client/
 COPY packages/core/ ./packages/core/
 COPY packages/relay/ ./packages/relay/
-COPY packages/sdk/ ./packages/sdk/
-COPY packages/town/ ./packages/town/
-COPY packages/mill/ ./packages/mill/
 COPY packages/townhouse/contracts/ ./packages/townhouse/contracts/
 COPY docker/ ./docker/
 
+# Build the local packages, then PACK each into a version-stamped npm tarball.
+# pnpm rewrites `workspace:*` deps → real versions on pack, exactly as it would
+# on `npm publish`. The tarball IS the published artifact.
 RUN pnpm -r \
+      --filter '@toon-protocol/bls' \
       --filter '@toon-protocol/core' \
       --filter '@toon-protocol/relay' \
       --filter '@toon-protocol/client' \
       build
 
-RUN cd docker && \
-    pnpm exec esbuild src/entrypoint-foreign-pod.ts \
+# `pnpm pack` is not a recursive command (no --filter), so pack from each
+# package dir. `--pack-destination` collects the tarballs in one place.
+RUN mkdir -p /tarballs && \
+    ( cd packages/bls    && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/core   && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/relay  && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/client && pnpm pack --pack-destination /tarballs ) && \
+    ( cd /tarballs && \
+      mv toon-protocol-bls-*.tgz    bls.tgz && \
+      mv toon-protocol-core-*.tgz   core.tgz && \
+      mv toon-protocol-relay-*.tgz  relay.tgz && \
+      mv toon-protocol-client-*.tgz client.tgz )
+
+# Clean consumer project: install the packed tarballs (file:) + the entrypoint's
+# own registry deps, exactly like a third-party developer. This `npm install`
+# is the PUBLISH-SURFACE GATE — it fails if the client's `files`/`exports`/
+# `dependencies` are wrong. npm satisfies the tarballs' inter-package version
+# refs from the sibling file: deps, and pulls everything else (incl. the
+# client's optionalDependencies + relay's native better-sqlite3) from the
+# public registry.
+WORKDIR /consumer
+RUN cat > package.json <<'JSON'
+{
+  "name": "toon-client-consumer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@toon-protocol/bls": "file:/tarballs/bls.tgz",
+    "@toon-protocol/core": "file:/tarballs/core.tgz",
+    "@toon-protocol/relay": "file:/tarballs/relay.tgz",
+    "@toon-protocol/client": "file:/tarballs/client.tgz",
+    "@noble/curves": "^2.0.0",
+    "ajv": "^8.18.0",
+    "ajv-formats": "^3.0.1",
+    "bs58": "^6.0.0",
+    "fastify": "^5.0.0",
+    "nostr-tools": "^2.10.4",
+    "viem": "^2.47.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
+JSON
+RUN npm install --no-audit --no-fund
+
+# Transpile the entrypoint with ALL package imports left external, so the output
+# imports the INSTALLED @toon-protocol/client (+ deps) from /consumer/node_modules
+# at runtime rather than inlining local source.
+RUN cp /app/docker/src/entrypoint-toon-client.ts ./entrypoint-toon-client.ts && \
+    ./node_modules/.bin/esbuild entrypoint-toon-client.ts \
       --bundle \
+      --packages=external \
       --platform=node \
       --target=node20 \
       --format=esm \
-      --minify \
-      --outfile=dist/entrypoint-foreign-pod.js \
-      --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
-      --external:fastify \
-      --external:@fastify/cors \
-      --external:ethers \
-      --external:better-sqlite3 \
-      --external:@ardrive/turbo-sdk \
-      --external:o1js \
-      --external:@solana/kit \
-      --external:@solana-program/token \
-      --external:@toon-protocol/mina-zkapp \
-      --external:@toon-protocol/memvid-node \
-      --external:@toon-protocol/pet-dvm \
-      --external:@toon-protocol/pet-circuit \
-      --external:socks-proxy-agent \
-      --external:@noble/curves
+      --outfile=entrypoint-toon-client.js && \
+    rm entrypoint-toon-client.ts
 
-RUN mkdir -p /runtime/node_modules /runtime/contracts
-RUN cp docker/dist/entrypoint-foreign-pod.js /runtime/
-RUN echo '{"type":"module"}' > /runtime/package.json
-RUN cp packages/townhouse/contracts/foreign-publish.schema.json /runtime/contracts/
-
-RUN cd /tmp && \
-    npm init -y && \
-    npm install --omit=dev \
-      fastify@^5.0.0 \
-      @fastify/cors@^10.0.0 \
-      socks-proxy-agent@^8.0.0 \
-      ws@^8.18.0 \
-      ethers@^6.0.0 \
-      express@^4.0.0 \
-      better-sqlite3@^11.0.0 \
-      @noble/curves@^1.8.1 && \
-    cp -r /tmp/node_modules/* /runtime/node_modules/ && \
-    find /runtime/node_modules -name '*.d.ts' -delete && \
-    find /runtime/node_modules -name '*.d.ts.map' -delete && \
-    find /runtime/node_modules -name '*.js.map' -delete && \
-    find /runtime/node_modules -name '*.d.mts' -delete && \
-    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
+RUN mkdir -p /consumer/contracts && \
+    cp /app/packages/townhouse/contracts/foreign-publish.schema.json /consumer/contracts/ && \
+    rm -rf /consumer/node_modules/.cache
 
 # ── Stage 3: Runtime (debian:bookworm-slim + Node.js + anon) ─────────────────
 # We start from anon-base (which has the anon binary already installed via .deb)
@@ -171,8 +200,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     node --version
 
-WORKDIR /runtime
-COPY --from=builder /runtime /runtime
+WORKDIR /consumer
+COPY --from=builder /consumer /consumer
 
 # Anon data directory. The container runs as root (matches the townhouse
 # ator-sidecar convention — Akash provider Pod Security Policies sometimes
@@ -183,7 +212,7 @@ RUN mkdir -p /var/lib/anon /etc/anon && chown -R root:root /var/lib/anon /etc/an
 ENV NODE_ENV=production
 ENV POD_PORT=8080
 ENV ANON_SOCKS_PORT=9050
-ENV FOREIGN_PUBLISH_SCHEMA_PATH=/runtime/contracts/foreign-publish.schema.json
+ENV FOREIGN_PUBLISH_SCHEMA_PATH=/consumer/contracts/foreign-publish.schema.json
 
 EXPOSE 8080
 
@@ -192,4 +221,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+process.env.POD_PORT+'/healthz').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))" || exit 1
 
-CMD ["node", "/runtime/entrypoint-foreign-pod.js"]
+CMD ["node", "/consumer/entrypoint-toon-client.js"]
