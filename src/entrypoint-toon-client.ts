@@ -148,6 +148,7 @@ interface PodEnv {
   logLevel: string;
   anyoneProxyUrl: string | null; // ator-public mode; null → ator-onion (local anon)
   anonSocksPort: number;
+  fundPollDeadlineMs: number;
   chainKey: string;
   chainId: number;
   tokenAddress: `0x${string}`;
@@ -226,6 +227,22 @@ function parseEnv(): PodEnv {
       `[toon-client] ANON_SOCKS_PORT must be a valid port, got: ${env['ANON_SOCKS_PORT']}`
     );
   }
+
+  // Per-chain native-balance poll window for boot funding. Default 30s keeps the
+  // historical behaviour, but Solana airdrop confirmation on a local validator
+  // can exceed 30s when funding starts at boot (the `ator-public` proxy mode has
+  // no anon-bootstrap buffer ahead of the poll), causing a false "never crossed
+  // 1 lamport by deadline" boot failure even though the address gets funded.
+  // Allow operators / E2E infra to widen it via FUND_POLL_DEADLINE_MS.
+  const fundPollDeadlineMs = parseInt(
+    env['FUND_POLL_DEADLINE_MS'] || '30000',
+    10
+  );
+  if (!Number.isInteger(fundPollDeadlineMs) || fundPollDeadlineMs < 1000) {
+    throw new Error(
+      `[toon-client] FUND_POLL_DEADLINE_MS must be an integer >= 1000, got: ${env['FUND_POLL_DEADLINE_MS']}`
+    );
+  }
   // ator-public mode: take the first URL from the comma-separated list.
   const rawProxy = env['ANYONE_PROXY_URLS']?.split(',')[0]?.trim() || null;
   if (rawProxy && !rawProxy.startsWith('socks5h://')) {
@@ -286,6 +303,7 @@ function parseEnv(): PodEnv {
     logLevel: env['LOG_LEVEL'] || 'info',
     anyoneProxyUrl: rawProxy,
     anonSocksPort,
+    fundPollDeadlineMs,
     chainKey: env['TOON_CHAIN_KEY'] || 'evm:base:31337',
     chainId: parseInt(env['TOON_CHAIN_ID'] || '31337', 10),
     tokenAddress:
@@ -1187,7 +1205,8 @@ async function main(): Promise<void> {
         log(`[anon] using ${socks5ProxyUrl} for outbound BTP`);
       }
 
-      // 6c: faucet drip + native balance polling (each chain gets its own 30s window).
+      // 6c: faucet drip + native balance polling (each chain gets its own
+      // env.fundPollDeadlineMs window; default 30s, override FUND_POLL_DEADLINE_MS).
       //
       // Drip is BEST-EFFORT: if the faucet is unreachable (cross-provider HTTPS
       // can be flaky on Akash — see story 49.4 carry-forward #4), the pod still
@@ -1203,7 +1222,7 @@ async function main(): Promise<void> {
                 `[faucet] EVM drip non-fatal: ${err.message} — relying on out-of-band funding`
               )
           );
-          const deadline = Date.now() + 30_000;
+          const deadline = Date.now() + env.fundPollDeadlineMs;
           const bal = await pollEvmBalance(
             env.evmRpcUrl,
             keys.evmAddress,
@@ -1234,7 +1253,7 @@ async function main(): Promise<void> {
               `[faucet] SOL drip non-fatal: ${err.message} — relying on out-of-band funding`
             )
           );
-          const deadline = Date.now() + 30_000;
+          const deadline = Date.now() + env.fundPollDeadlineMs;
           const bal = await pollSolBalance(
             env.solanaRpcUrl,
             keys.solPublicKeyBase58,
