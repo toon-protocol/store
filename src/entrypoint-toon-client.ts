@@ -81,6 +81,28 @@
  *   SOLANA_DEPOSIT_AMOUNT + SOLANA_PAYER_TOKEN_ACCOUNT (optional, both required
  *                                       to deposit on open; else open w/o deposit).
  *   SOLANA_CHALLENGE_DURATION (default 86400)
+ *
+ * Mina payment (Stage 3 — opt-in; default path stays EVM-only):
+ *   MINA_ZKAPP_ADDRESS                — payment-channel zkApp address (B62 base58).
+ *   TARGET_SETTLEMENT_ADDRESS_MINA    — apex Mina settlement pubkey (B62 base58),
+ *                                       claim recipient / channel peer.
+ *     (Mina payment is ENABLED only when BOTH of the above are set. The pod then
+ *      derives EVM + Mina from a single mnemonic, negotiates MINA_CHAIN_KEY, and
+ *      signs a Mina balance proof.)
+ *   MINA_CHAIN_KEY        (default mina:devnet)
+ *   MINA_GRAPHQL_URL      — Mina GraphQL endpoint (zkApp state reads).
+ *
+ *   ────────────────────────────────────────────────────────────────────────────
+ *   PHASE-2 STAGE-3 GATE (claim-validation divergence — NOT the #88 settle gate):
+ *   This wiring is additive + safely shippable, but a LIVE Mina loop does NOT
+ *   FULFILL: the client's Mina claim does not satisfy connector 3.9.0's
+ *   `MinaClaimMessage` contract (it lacks `tokenId`/`balanceCommitment`/`proof`/
+ *   `salt` and signs the `balanceProofFieldsMina` Schnorr message rather than the
+ *   connector's `Poseidon([balA,balB,salt]) / Poseidon(zkApp.x)` commitment), and
+ *   the client never opens a real on-chain zkApp channel for `getChannelState`.
+ *   So a `mina:*` publish is REJECTED at the connector's `validateClaimMessage`
+ *   (before settlement). See the Stage-3 PR / the gated Mina smoke for the gap.
+ *   ────────────────────────────────────────────────────────────────────────────
  */
 
 import { createConnection } from 'node:net';
@@ -160,6 +182,22 @@ interface PodEnv {
     payerTokenAccount: string | null;
     challengeDuration: number;
   };
+  /**
+   * Mina payment params (Stage 3). When `mina.enabled` is true the pod
+   * negotiates a Mina-denominated claim. Enabled when MINA_ZKAPP_ADDRESS and
+   * TARGET_SETTLEMENT_ADDRESS_MINA are both set. Default EVM path is unchanged
+   * when these are unset. NOTE: a live Mina loop is claim-validation gated (the
+   * client claim diverges from connector 3.9.0's MinaClaimMessage contract); the
+   * wiring is shipped so the negotiation path exists and is exercised by the
+   * gated smoke.
+   */
+  mina: {
+    enabled: boolean;
+    chainKey: string; // e.g. "mina:devnet"
+    graphqlUrl: string;
+    zkAppAddress: string; // deployed payment-channel zkApp (B62 base58)
+    targetSettlementAddress: string; // apex Mina settlement pubkey (B62 base58)
+  };
 }
 
 function parseEnv(): PodEnv {
@@ -226,6 +264,19 @@ function parseEnv(): PodEnv {
     );
   }
 
+  // Mina payment (Stage 3): enabled only when both the zkApp address and the
+  // apex's Mina settlement address are present. Mirrors the Solana enable gate.
+  const minaZkAppAddress = env['MINA_ZKAPP_ADDRESS']?.trim() || '';
+  const minaTargetSettlement =
+    (
+      env['TARGET_SETTLEMENT_ADDRESS_MINA'] ||
+      env['MINA_TARGET_SETTLEMENT_ADDRESS']
+    )?.trim() || '';
+  const minaEnabled = minaZkAppAddress !== '' && minaTargetSettlement !== '';
+  const minaGraphqlUrl =
+    env['MINA_GRAPHQL_URL']?.trim() ||
+    'http://host.docker.internal:28085/graphql';
+
   return {
     faucetUrl: need('FAUCET_URL'),
     evmRpcUrl: need('EVM_RPC_URL'),
@@ -263,6 +314,13 @@ function parseEnv(): PodEnv {
       payerTokenAccount: solanaPayerTokenAccount,
       challengeDuration: solanaChallengeDuration,
     },
+    mina: {
+      enabled: minaEnabled,
+      chainKey: env['MINA_CHAIN_KEY']?.trim() || 'mina:devnet',
+      graphqlUrl: minaGraphqlUrl,
+      zkAppAddress: minaZkAppAddress,
+      targetSettlementAddress: minaTargetSettlement,
+    },
   };
 }
 
@@ -281,6 +339,11 @@ interface EphemeralKeys {
   evmAddress: `0x${string}`;
   solSecretKey: Uint8Array;
   solPublicKeyBase58: string;
+  /**
+   * Mina (Pallas) public key (B62 base58) — present ONLY in mnemonic mode AND
+   * when `mina-signer` is installed (optional dep). Undefined otherwise.
+   */
+  minaAddressBase58?: string;
   nostrPubkey: string; // BTP peer identity (64-char hex secp256k1 x-coord)
 }
 
@@ -326,6 +389,9 @@ async function generateMnemonicKeys(): Promise<EphemeralKeys> {
     evmAddress: identity.evm.address as `0x${string}`,
     solSecretKey: identity.solana.secretKey, // 64-byte keypair (seed||pubkey)
     solPublicKeyBase58: identity.solana.publicKey,
+    // Mina pubkey is present only when mina-signer is installed (optional dep);
+    // deriveFullIdentity leaves it '' otherwise. Normalise '' → undefined.
+    minaAddressBase58: identity.mina.publicKey || undefined,
     nostrPubkey: getPublicKey(identity.nostr.secretKey),
   };
 }
@@ -676,9 +742,10 @@ async function main(): Promise<void> {
   // Solana-payment mode derives EVM + Solana from a single mnemonic so the
   // funded Solana account, the on-chain channel keypair, and the claim-signing
   // key are identical; EVM-only mode keeps the legacy random-key behaviour.
-  const keys = env.solana.enabled
-    ? await generateMnemonicKeys()
-    : generateEphemeralKeys();
+  const keys =
+    env.solana.enabled || env.mina.enabled
+      ? await generateMnemonicKeys()
+      : generateEphemeralKeys();
   log(`[keys] EVM address: ${keys.evmAddress}`);
   log(`[keys] Solana pubkey: ${keys.solPublicKeyBase58}`);
   if (env.solana.enabled) {
@@ -686,6 +753,14 @@ async function main(): Promise<void> {
       `[keys] Solana payment ENABLED — chain=${env.solana.chainKey} ` +
         `program=${env.solana.programId} mint=${env.solana.tokenMint} ` +
         `apexRecipient=${env.solana.targetSettlementAddress}`
+    );
+  }
+  if (env.mina.enabled) {
+    log(
+      `[keys] Mina payment ENABLED — chain=${env.mina.chainKey} ` +
+        `zkApp=${env.mina.zkAppAddress} graphql=${env.mina.graphqlUrl} ` +
+        `apexRecipient=${env.mina.targetSettlementAddress} ` +
+        `(NOTE: live loop is claim-validation gated — see entrypoint header)`
     );
   }
 
@@ -855,12 +930,27 @@ async function main(): Promise<void> {
               tokenNetworks[env.solana.chainKey] = env.solana.programId;
             }
 
+            if (env.mina.enabled) {
+              supportedChains.push(env.mina.chainKey);
+              // Mina reads zkApp state over GraphQL; reuse the rpc-url slot for
+              // the GraphQL endpoint (the Mina channel client reads graphqlUrl
+              // from minaChannel config below, but keeping the map symmetric with
+              // Solana/EVM avoids "no rpc url for chain" surprises elsewhere).
+              chainRpcUrls[env.mina.chainKey] = env.mina.graphqlUrl;
+              settlementAddresses[env.mina.chainKey] =
+                keys.minaAddressBase58 ?? '';
+              // Mina "tokenNetwork" slot carries the zkApp address (the
+              // ChainMetadata.zkAppAddress the connector verifies against).
+              tokenNetworks[env.mina.chainKey] = env.mina.zkAppAddress;
+            }
+
             const client = new ToonClient({
               connectorUrl: 'http://127.0.0.1:1', // required by validateConfig, unused at runtime
-              // Solana mode: drive from a mnemonic so the client derives + registers
-              // a Solana signer (Ed25519) consistent with the funded account and the
-              // on-chain channel keypair. EVM mode: explicit EVM key (legacy).
-              ...(env.solana.enabled
+              // Solana/Mina mode: drive from a mnemonic so the client derives +
+              // registers the corresponding chain signer (Solana Ed25519 / Mina
+              // Pallas) consistent with the funded account and the channel key.
+              // EVM-only mode: explicit EVM key (legacy).
+              ...(env.solana.enabled || env.mina.enabled
                 ? { mnemonic: keys.mnemonic }
                 : { evmPrivateKey: keys.evmPrivateKey }),
               ilpInfo: {
@@ -909,6 +999,19 @@ async function main(): Promise<void> {
                     },
                   }
                 : {}),
+              // Mina payment-channel params (Stage 3) — wired into the on-chain
+              // channel client so negotiating mina:* routes through openMinaChannel
+              // and signs a Mina balance proof. GATE: the resulting claim does not
+              // yet satisfy connector 3.9.0's MinaClaimMessage contract, so a live
+              // loop is claim-validation gated (see the entrypoint header).
+              ...(env.mina.enabled
+                ? {
+                    minaChannel: {
+                      graphqlUrl: env.mina.graphqlUrl,
+                      zkAppAddress: env.mina.zkAppAddress,
+                    },
+                  }
+                : {}),
             });
             await client.start();
 
@@ -932,6 +1035,20 @@ async function main(): Promise<void> {
                 settlementAddress: env.solana.targetSettlementAddress,
                 tokenAddress: env.solana.tokenMint,
                 tokenNetwork: env.solana.programId,
+              });
+            } else if (env.mina.enabled) {
+              // Mina negotiation: chainType 'mina', the zkApp address in the
+              // tokenNetwork slot, apex Mina pubkey as recipient. openChannel()
+              // then routes through openMinaChannel and the balance proof is a
+              // Mina-denominated claim. GATE: claim diverges from connector 3.9.0's
+              // MinaClaimMessage contract → REJECTED at validateClaimMessage.
+              negotiations.set('town', {
+                chain: env.mina.chainKey,
+                chainType: 'mina' as const,
+                chainId: 0,
+                settlementAddress: env.mina.targetSettlementAddress,
+                tokenAddress: env.mina.zkAppAddress,
+                tokenNetwork: env.mina.zkAppAddress,
               });
             } else {
               negotiations.set('town', {
