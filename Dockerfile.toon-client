@@ -89,6 +89,11 @@ COPY packages/sdk/package.json ./packages/sdk/
 COPY packages/town/package.json ./packages/town/
 COPY packages/mill/package.json ./packages/mill/
 COPY packages/townhouse/package.json ./packages/townhouse/
+# mina-zkapp is an OPTIONAL dependency of the client (the on-chain Mina
+# channel-open path imports it lazily). It is NOT published to npm, so the
+# workspace package must be present for `pnpm pack` to resolve the client's
+# `workspace:*` ref and for the runtime `import('@toon-protocol/mina-zkapp')`.
+COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
 COPY docker/package.json ./docker/
 
 RUN pnpm install --frozen-lockfile
@@ -98,6 +103,7 @@ COPY packages/bls/ ./packages/bls/
 COPY packages/client/ ./packages/client/
 COPY packages/core/ ./packages/core/
 COPY packages/relay/ ./packages/relay/
+COPY packages/mina-zkapp/ ./packages/mina-zkapp/
 COPY packages/townhouse/contracts/ ./packages/townhouse/contracts/
 COPY docker/ ./docker/
 
@@ -108,21 +114,27 @@ RUN pnpm -r \
       --filter '@toon-protocol/bls' \
       --filter '@toon-protocol/core' \
       --filter '@toon-protocol/relay' \
+      --filter '@toon-protocol/mina-zkapp' \
       --filter '@toon-protocol/client' \
       build
 
 # `pnpm pack` is not a recursive command (no --filter), so pack from each
 # package dir. `--pack-destination` collects the tarballs in one place.
+# mina-zkapp is packed too so the client's optional `@toon-protocol/mina-zkapp`
+# dep resolves to a sibling file: tarball in the consumer install (it is not on
+# npm) and is present for the runtime on-chain Mina channel-open import.
 RUN mkdir -p /tarballs && \
-    ( cd packages/bls    && pnpm pack --pack-destination /tarballs ) && \
-    ( cd packages/core   && pnpm pack --pack-destination /tarballs ) && \
-    ( cd packages/relay  && pnpm pack --pack-destination /tarballs ) && \
-    ( cd packages/client && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/bls        && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/core       && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/relay      && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/mina-zkapp && pnpm pack --pack-destination /tarballs ) && \
+    ( cd packages/client     && pnpm pack --pack-destination /tarballs ) && \
     ( cd /tarballs && \
-      mv toon-protocol-bls-*.tgz    bls.tgz && \
-      mv toon-protocol-core-*.tgz   core.tgz && \
-      mv toon-protocol-relay-*.tgz  relay.tgz && \
-      mv toon-protocol-client-*.tgz client.tgz )
+      mv toon-protocol-bls-*.tgz        bls.tgz && \
+      mv toon-protocol-core-*.tgz       core.tgz && \
+      mv toon-protocol-relay-*.tgz      relay.tgz && \
+      mv toon-protocol-mina-zkapp-*.tgz mina-zkapp.tgz && \
+      mv toon-protocol-client-*.tgz     client.tgz )
 
 # Clean consumer project: install the packed tarballs (file:) + the entrypoint's
 # own registry deps, exactly like a third-party developer. This `npm install`
@@ -142,6 +154,7 @@ RUN cat > package.json <<'JSON'
     "@toon-protocol/bls": "file:/tarballs/bls.tgz",
     "@toon-protocol/core": "file:/tarballs/core.tgz",
     "@toon-protocol/relay": "file:/tarballs/relay.tgz",
+    "@toon-protocol/mina-zkapp": "file:/tarballs/mina-zkapp.tgz",
     "@toon-protocol/client": "file:/tarballs/client.tgz",
     "@noble/curves": "^2.0.0",
     "ajv": "^8.18.0",
@@ -149,6 +162,7 @@ RUN cat > package.json <<'JSON'
     "bs58": "^6.0.0",
     "fastify": "^5.0.0",
     "nostr-tools": "^2.10.4",
+    "o1js": "2.14.0",
     "viem": "^2.47.0"
   },
   "devDependencies": {
