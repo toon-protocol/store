@@ -198,6 +198,15 @@ interface PodEnv {
     graphqlUrl: string;
     zkAppAddress: string; // deployed payment-channel zkApp (B62 base58)
     targetSettlementAddress: string; // apex Mina settlement pubkey (B62 base58)
+    /**
+     * On-chain MINA deposit (base units) the client deposits into the channel
+     * after `initializeChannel`. REQUIRED for the connector to settle on-chain:
+     * the zkApp `claimFromChannel` enforces conservation
+     * (`newBalanceA + newBalanceB == depositTotal`), so a 0-deposit channel can
+     * only ever settle a 0-value claim. Default 0 (open without deposit — claim
+     * verifies + stores off-chain but cannot land an on-chain claimFromChannel).
+     */
+    depositAmount: bigint;
   };
 }
 
@@ -338,6 +347,10 @@ function parseEnv(): PodEnv {
       graphqlUrl: minaGraphqlUrl,
       zkAppAddress: minaZkAppAddress,
       targetSettlementAddress: minaTargetSettlement,
+      // On-chain channel deposit (base units). Defaults to 1_000_000 (matches
+      // the apex's per-publish USDC-scale fee) so a single publish's claimed
+      // balanceA fully consumes the deposit (balanceB=0) and conservation holds.
+      depositAmount: BigInt(env['MINA_DEPOSIT_AMOUNT']?.trim() || '1000000'),
     },
   };
 }
@@ -829,6 +842,10 @@ async function main(): Promise<void> {
     anyoneReady: anyoneReady && bootComplete,
     evmAddr: keys.evmAddress,
     solAddr: keys.solPublicKeyBase58,
+    // Mina (Pallas) B62 address — present only in mnemonic mode with mina-signer
+    // installed. Surfaced so the e2e harness can fund this address (it must pay
+    // its own on-chain initializeChannel + deposit tx fees on the Mina channel).
+    minaAddr: keys.minaAddressBase58 ?? '',
     balances: { evm: String(evmBalance), sol: solBalance },
     bootedAt: startedAt,
   }));
@@ -836,6 +853,8 @@ async function main(): Promise<void> {
   fastify.get('/signer-info', () => ({
     evm: keys.evmAddress,
     sol: keys.solPublicKeyBase58,
+    // Mina (Pallas) B62 address (see /healthz note). Empty when unavailable.
+    mina: keys.minaAddressBase58 ?? '',
     nostrPubkey: keys.nostrPubkey,
     balances: { evm: String(evmBalance), sol: solBalance },
     bootedAt: startedAt,
@@ -1027,6 +1046,17 @@ async function main(): Promise<void> {
                     minaChannel: {
                       graphqlUrl: env.mina.graphqlUrl,
                       zkAppAddress: env.mina.zkAppAddress,
+                      // On-chain deposit so the zkApp's claimFromChannel
+                      // conservation check (balanceA + balanceB == depositTotal)
+                      // can be satisfied by the client's first claim. Omitted
+                      // when depositAmount=0 (open-only, off-chain-store only).
+                      ...(env.mina.depositAmount > 0n
+                        ? {
+                            deposit: {
+                              amount: env.mina.depositAmount.toString(),
+                            },
+                          }
+                        : {}),
                     },
                   }
                 : {}),
