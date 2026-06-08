@@ -81,22 +81,49 @@ WORKDIR /app
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
 COPY patches/ ./patches/
+# Copy the package.json of EVERY workspace project (not just the handful the
+# client transitively needs). With `--frozen-lockfile`, pnpm prunes any
+# workspace project whose manifest is absent from the install graph, which in
+# turn drops that project's deps from `node_modules/.pnpm` and changes how
+# shared deps' peer variants are hoisted/symlinked. The host always has the
+# full workspace, so a partial manifest set here produces a DIFFERENT, fragile
+# node_modules layout — e.g. the client's `viem` symlink can resolve to a peer
+# variant whose type declarations aren't walkable, breaking the tsup DTS pass
+# with `Cannot find module 'viem'` while the ESM bundle still builds (#138).
+# Copying all manifests makes the Docker install graph identical to the host's,
+# so dependency type resolution in the DTS build is deterministic.
+# mina-zkapp is an OPTIONAL dependency of the client (the on-chain Mina
+# channel-open path imports it lazily) and is NOT published to npm, so its
+# workspace package must also be present for `pnpm pack` to resolve the
+# client's `workspace:*` ref and for the runtime `import()`.
 COPY packages/bls/package.json ./packages/bls/
 COPY packages/client/package.json ./packages/client/
 COPY packages/core/package.json ./packages/core/
+COPY packages/faucet/package.json ./packages/faucet/
+COPY packages/memvid-node/package.json ./packages/memvid-node/
+COPY packages/mill/package.json ./packages/mill/
+COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
+COPY packages/pet-circuit/package.json ./packages/pet-circuit/
+COPY packages/pet-dvm/package.json ./packages/pet-dvm/
 COPY packages/relay/package.json ./packages/relay/
+COPY packages/rig/package.json ./packages/rig/
 COPY packages/sdk/package.json ./packages/sdk/
 COPY packages/town/package.json ./packages/town/
-COPY packages/mill/package.json ./packages/mill/
 COPY packages/townhouse/package.json ./packages/townhouse/
-# mina-zkapp is an OPTIONAL dependency of the client (the on-chain Mina
-# channel-open path imports it lazily). It is NOT published to npm, so the
-# workspace package must be present for `pnpm pack` to resolve the client's
-# `workspace:*` ref and for the runtime `import('@toon-protocol/mina-zkapp')`.
-COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
+COPY packages/townhouse-web/package.json ./packages/townhouse-web/
+COPY examples/client-example/package.json ./examples/client-example/
+COPY examples/sdk-example/package.json ./examples/sdk-example/
+COPY examples/town-example/package.json ./examples/town-example/
 COPY docker/package.json ./docker/
 
-RUN pnpm install --frozen-lockfile
+# `--ignore-scripts` skips native postinstall builds (better-sqlite3, the
+# Rust-backed memvid-node/pet-circuit, etc.) that the now-complete workspace
+# graph would otherwise trigger. None of those native artifacts are needed to
+# build/pack the JS client packages; the runtime image installs its own deps
+# (incl. native better-sqlite3) fresh in the /consumer stage. This keeps the
+# fuller manifest set from slowing the build or failing on toolchain gaps while
+# still giving pnpm the complete graph it needs for deterministic hoisting.
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY tsconfig.json ./
 COPY packages/bls/ ./packages/bls/
