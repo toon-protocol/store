@@ -156,7 +156,7 @@ interface CreateTurboAdapterResult {
   source: 'arweave-jwk-b64' | 'turbo-token-legacy' | 'unauthenticated-free-tier';
   /** Arweave address of the upload-signing key (only set for authenticated paths). */
   arweaveAddress?: string;
-  /** The constructed Turbo client when source !== 'none', for balance probing. */
+  /** The constructed Turbo client (always set — every path builds one), for balance probing. */
   client?: unknown;
 }
 
@@ -165,14 +165,24 @@ export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
   legacyToken: string | undefined
 ): Promise<CreateTurboAdapterResult> {
-  // Lazy-import turbo-sdk so a stub-only path (mode #3) doesn't pull it in.
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
+  // Treat an empty OR whitespace-only env var as ABSENT, not "present but
+  // invalid" (#146). The deployed dvm container sets `TURBO_TOKEN=""` (len 0)
+  // and has no DVM_ARWEAVE_JWK_B64; a bare `if (legacyToken)` already skips ""
+  // (falsy), but a stray-whitespace value (e.g. a trailing newline from a
+  // here-doc env file) would otherwise be truthy and drive us into the JWK
+  // JSON.parse path → a hard throw instead of the free-tier fallback. Normalize
+  // both inputs up front so "no credential" reliably resolves to the
+  // unauthenticated ≤100 KB free tier.
+  const jwkB64 = arweaveJwkB64?.trim() || undefined;
+  const token = legacyToken?.trim() || undefined;
+
   // ── Preferred: DVM_ARWEAVE_JWK_B64 (piped by the host orchestrator) ─────
-  if (arweaveJwkB64) {
+  if (jwkB64) {
     let jwkJson: string;
     try {
-      jwkJson = Buffer.from(arweaveJwkB64, 'base64').toString('utf-8');
+      jwkJson = Buffer.from(jwkB64, 'base64').toString('utf-8');
     } catch (err) {
       throw new Error(
         `DVM_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
@@ -209,10 +219,10 @@ export async function createTurboAdapter(
   }
 
   // ── Legacy: TURBO_TOKEN (raw JWK JSON) ──────────────────────────────────
-  if (legacyToken) {
+  if (token) {
     let jwk: { kty?: string; n?: string; d?: string };
     try {
-      jwk = JSON.parse(legacyToken);
+      jwk = JSON.parse(token);
     } catch {
       throw new Error(
         'TURBO_TOKEN must be a valid JSON JWK. Use Arweave wallet private key (JSON).'
@@ -446,7 +456,10 @@ async function main(): Promise<ToonNode> {
   //   1. DVM_ARWEAVE_JWK_B64 (preferred — piped by host orchestrator from the
   //      operator's BIP-39 wallet via WalletManager.getArweaveJwk('dvm'))
   //   2. TURBO_TOKEN (legacy raw-JWK JSON env var)
-  //   3. Neither → stub adapter that throws with a `townhouse credits buy` CTA
+  //   3. Neither (or empty/whitespace) → unauthenticated ephemeral-JWK FREE
+  //      TIER (≤100 KB uploads, no wallet/deposit). This replaced the old
+  //      throwing stub adapter — see #146: an empty `TURBO_TOKEN=""` must fall
+  //      back to free tier, NOT reject kind:5094 with "Arweave upload failed".
   //
   // The JWK env var is treated as secret material — do NOT log its value.
   const arweaveJwkB64 = process.env['DVM_ARWEAVE_JWK_B64'];
@@ -502,8 +515,6 @@ async function main(): Promise<ToonNode> {
         `[DVM Entrypoint] Could not probe Arweave credit balance: ${err instanceof Error ? err.message : err}`
       );
     }
-  } else if (turboResult.source === 'none') {
-    console.warn(`[DVM Entrypoint] ${buildNoCreditsMessage(undefined)}`);
   }
 
   const chunkManager = new ChunkManager(); // in-memory, v1

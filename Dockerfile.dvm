@@ -39,16 +39,54 @@ RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
 
 WORKDIR /app
 
-# Copy dependency manifests for installation
+# Copy dependency manifests for installation.
+# Copy the package.json of EVERY in-context workspace project (not just bls/
+# core/sdk/docker). With `--frozen-lockfile`, pnpm prunes any workspace project
+# whose manifest is absent from the install graph, which drops that project's
+# deps from `node_modules/.pnpm` and changes how shared deps' peer variants get
+# hoisted/symlinked. The host always has the FULL workspace, so a partial
+# manifest set produces a DIFFERENT, fragile node_modules layout here — e.g. the
+# sdk's `@toon-protocol/connector` symlink resolves to a peer variant whose
+# .d.ts isn't walkable, breaking the tsup DTS pass with `Cannot find module
+# '@toon-protocol/connector'` while the ESM bundle still builds (#143, same
+# class as #138/#141). Copying all manifests makes the Docker install graph
+# identical to the host's so DTS type resolution is deterministic.
+# (packages/examples is excluded by .dockerignore — the only member
+# intentionally omitted, matching the host's tolerance of it.)
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
 COPY patches/ ./patches/
 COPY packages/bls/package.json ./packages/bls/
+COPY packages/client/package.json ./packages/client/
 COPY packages/core/package.json ./packages/core/
+COPY packages/faucet/package.json ./packages/faucet/
+COPY packages/memvid-node/package.json ./packages/memvid-node/
+COPY packages/mill/package.json ./packages/mill/
+COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
+COPY packages/pet-circuit/package.json ./packages/pet-circuit/
+COPY packages/pet-dvm/package.json ./packages/pet-dvm/
+COPY packages/relay/package.json ./packages/relay/
+COPY packages/rig/package.json ./packages/rig/
 COPY packages/sdk/package.json ./packages/sdk/
+COPY packages/town/package.json ./packages/town/
+COPY packages/townhouse/package.json ./packages/townhouse/
+COPY packages/townhouse-web/package.json ./packages/townhouse-web/
+COPY examples/client-example/package.json ./examples/client-example/
+COPY examples/sdk-example/package.json ./examples/sdk-example/
+COPY examples/town-example/package.json ./examples/town-example/
 COPY docker/package.json ./docker/
 
-# Install all dependencies (including devDependencies needed for build)
-RUN pnpm install --frozen-lockfile
+# Install all dependencies (including devDependencies needed for build).
+# `--ignore-scripts` skips native postinstall builds (the Rust-backed
+# memvid-node/pet-circuit, etc.) that the now-complete workspace graph would
+# otherwise trigger — the builder only transpiles JS. The runtime stage installs
+# its own native deps (@libsql/client, libsql, @ardrive/turbo-sdk) fresh.
+#
+# EXCEPTION: better-sqlite3's native `.node` IS cherry-picked from the pnpm store
+# below (it backs the connector's local store on the value-bearing path), so we
+# explicitly `pnpm rebuild` just that one package to produce its prebuilt binary
+# without re-enabling scripts for the whole (heavy) graph.
+RUN pnpm install --frozen-lockfile --ignore-scripts && \
+    pnpm rebuild -r better-sqlite3
 
 # Copy source code (only packages needed for the Arweave DVM)
 COPY tsconfig.json ./

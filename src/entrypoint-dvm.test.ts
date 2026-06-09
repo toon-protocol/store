@@ -319,6 +319,28 @@ describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', 
     ).resolves.toBeDefined();
   });
 
+  it('Empty-string TURBO_TOKEN ("") → free tier, NOT a throwing/invalid-creds path (#146)', async () => {
+    // The deployed dvm container sets TURBO_TOKEN="" (len 0). An empty string
+    // must be treated as ABSENT and resolve to the free-tier uploader, never as
+    // "present but invalid" (which would reject kind:5094 with T00).
+    const result = await createTurboAdapter('', '');
+    expect(result.source).toBe('unauthenticated-free-tier');
+    expect(result.client).toBeDefined();
+    expect(ArweaveSignerCalls).toHaveLength(0);
+    expect(TurboFactoryCalls).toHaveLength(1);
+    await expect(
+      result.adapter.upload({} as Parameters<typeof result.adapter.upload>[0])
+    ).resolves.toBeDefined();
+  });
+
+  it('Whitespace-only creds ("  ") → free tier (trimmed to absent, no JSON.parse throw) (#146)', async () => {
+    const result = await createTurboAdapter('  ', '\n\t ');
+    expect(result.source).toBe('unauthenticated-free-tier');
+    expect(result.client).toBeDefined();
+    expect(ArweaveSignerCalls).toHaveLength(0);
+    expect(TurboFactoryCalls).toHaveLength(1);
+  });
+
   it('DVM AR address is non-empty when JWK source resolves (feed-through for boot-log)', async () => {
     const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
     const result = await createTurboAdapter(b64, undefined);
