@@ -45,7 +45,18 @@
  *   AC #7   No app-layer idempotency (trust Nostr event-id dedup)
  *   AC #9   Rate limit (in-memory windowed counter per source IP, default 30/min)
  *
- * Transport mode (mutually exclusive — ANYONE_PROXY_URLS takes precedence):
+ * Transport mode (mutually exclusive — DIRECT_BTP takes precedence, then ANYONE_PROXY_URLS):
+ *   DIRECT_BTP            (optional)  — truthy (1/true/yes/on) enables direct-BTP
+ *                                        mode: connect straight to the apex over a
+ *                                        plain ws://|wss:// endpoint with
+ *                                        transport:{type:'direct'} and NO SOCKS
+ *                                        proxy (no public ATOR proxy, no local anon
+ *                                        daemon). Requires APEX_BTP_URL. When unset
+ *                                        the legacy HS/SOCKS path is byte-identical.
+ *   APEX_BTP_URL          (required in direct mode) — plain BTP endpoint
+ *                                        (ws://|wss:// host[:port] /btp). Validated
+ *                                        by isValidDirectBtpUrl (NOT the strict
+ *                                        .anon/.anyone HOSTNAME_REGEX).
  *   ANYONE_PROXY_URLS     (optional)  — comma-separated public ATOR proxy URL(s) in
  *                                        socks5h://host:port form.  When set, the pod
  *                                        skips the local anon daemon and routes outbound
@@ -109,7 +120,11 @@ import { createConnection } from 'node:net';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import Fastify from 'fastify';
+// `fastify` is imported dynamically at its use site inside main() (below) so
+// that unit tests importing this module's pure helpers (parseEnv /
+// isValidDirectBtpUrl / resolveBtpWiring) don't pull fastify into their module
+// graph — the root vitest can't resolve the docker-package dep, and main() is
+// VITEST-gated anyway. The type-only import is erased at runtime.
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
@@ -125,6 +140,29 @@ import {
 } from '@toon-protocol/client';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import type { NostrEvent } from 'nostr-tools/pure';
+// Pure env/wiring helpers live in a deps-free sibling module so the unit suite
+// (entrypoint-toon-client.test.ts) can import them without pulling docker-only
+// runtime deps (ajv/viem/@toon-protocol/relay/nostr-tools/fastify) into its
+// module graph — the root vitest can't resolve those from the repo root.
+// Re-exported below for back-compat with any importer that reaches for them on
+// this module.
+import {
+  isTruthy,
+  isValidDirectBtpUrl,
+  parseEnv,
+  resolveBtpWiring,
+  type PodEnv,
+} from './entrypoint-toon-client-helpers.js';
+
+// Back-compat re-exports (the test now targets the helpers module directly, but
+// keep these so existing importers of the entrypoint still resolve the helpers).
+export {
+  isTruthy,
+  isValidDirectBtpUrl,
+  parseEnv,
+  resolveBtpWiring,
+  type PodEnv,
+};
 
 // Schema is loaded at runtime from a known on-image path.
 const SCHEMA_PATH =
@@ -136,224 +174,6 @@ const SCHEMA_PATH =
 // same convention as docker/townhouse-ator-sidecar/Dockerfile.
 const ANON_DATA_DIR = '/var/lib/anon';
 const ANON_TORRC_PATH = '/etc/anon/torrc';
-
-// ---------- Env parsing ----------
-
-interface PodEnv {
-  faucetUrl: string;
-  evmRpcUrl: string;
-  solanaRpcUrl: string;
-  podPort: number;
-  publishRateLimitPerMin: number;
-  logLevel: string;
-  anyoneProxyUrl: string | null; // ator-public mode; null → ator-onion (local anon)
-  anonSocksPort: number;
-  fundPollDeadlineMs: number;
-  chainKey: string;
-  chainId: number;
-  tokenAddress: `0x${string}`;
-  tokenNetworkAddress: `0x${string}`;
-  targetSettlementAddress: `0x${string}`;
-  evmEthThresholdWei: bigint;
-  solLamportThreshold: number;
-  solanaUsdcMint: string;
-  evmUsdcThreshold: bigint;
-  solUsdcThreshold: number;
-  feePerEvent: bigint; // ILP units per publish (0 = free relay)
-  /**
-   * Solana payment params. When `solana.enabled` is true the pod negotiates a
-   * Solana-denominated claim (in ADDITION to the EVM path): it pays the apex on
-   * Solana, opening a real on-chain channel and signing a connector-format
-   * Solana balance proof (client lib post-#105). Enabled when SOLANA_PROGRAM_ID
-   * and TARGET_SETTLEMENT_ADDRESS_SOLANA are both set. Default EVM path is
-   * unchanged when these are unset.
-   */
-  solana: {
-    enabled: boolean;
-    chainKey: string; // e.g. "solana:devnet"
-    programId: string;
-    tokenMint: string; // SPL mint (base58) used for PDA derivation + as the negotiated token
-    targetSettlementAddress: string; // apex Solana settlement pubkey (base58) — claim recipient / channel peer
-    // Optional on-chain deposit when opening the channel: BOTH the amount (base
-    // units) AND the payer's funded SPL token account (ATA, base58) must be set.
-    // When omitted the channel opens without a deposit (connector accepts on
-    // `opened` status + participant membership; deposit is consumed only at
-    // on-chain claim/settle time).
-    depositAmount: string | null;
-    payerTokenAccount: string | null;
-    challengeDuration: number;
-  };
-  /**
-   * Mina payment params (Stage 3). When `mina.enabled` is true the pod
-   * negotiates a Mina-denominated claim. Enabled when MINA_ZKAPP_ADDRESS and
-   * TARGET_SETTLEMENT_ADDRESS_MINA are both set. Default EVM path is unchanged
-   * when these are unset. NOTE: a live Mina loop is claim-validation gated (the
-   * client claim diverges from connector 3.9.0's MinaClaimMessage contract); the
-   * wiring is shipped so the negotiation path exists and is exercised by the
-   * gated smoke.
-   */
-  mina: {
-    enabled: boolean;
-    chainKey: string; // e.g. "mina:devnet"
-    graphqlUrl: string;
-    zkAppAddress: string; // deployed payment-channel zkApp (B62 base58)
-    targetSettlementAddress: string; // apex Mina settlement pubkey (B62 base58)
-    /**
-     * On-chain MINA deposit (base units) the client deposits into the channel
-     * after `initializeChannel`. REQUIRED for the connector to settle on-chain:
-     * the zkApp `claimFromChannel` enforces conservation
-     * (`newBalanceA + newBalanceB == depositTotal`), so a 0-deposit channel can
-     * only ever settle a 0-value claim. Default 0 (open without deposit — claim
-     * verifies + stores off-chain but cannot land an on-chain claimFromChannel).
-     */
-    depositAmount: bigint;
-  };
-}
-
-function parseEnv(): PodEnv {
-  const env = process.env;
-  const need = (k: string): string => {
-    const v = env[k];
-    if (!v) throw new Error(`[toon-client] required env ${k} is unset`);
-    return v;
-  };
-  const rateLimitPerMin = parseInt(
-    env['PUBLISH_RATE_LIMIT_PER_MIN'] || '30',
-    10
-  );
-  if (!Number.isInteger(rateLimitPerMin) || rateLimitPerMin < 1) {
-    throw new Error(
-      `[toon-client] PUBLISH_RATE_LIMIT_PER_MIN must be a positive integer, got: ${env['PUBLISH_RATE_LIMIT_PER_MIN']}`
-    );
-  }
-  const anonSocksPort = parseInt(env['ANON_SOCKS_PORT'] || '9050', 10);
-  if (
-    !Number.isInteger(anonSocksPort) ||
-    anonSocksPort < 1 ||
-    anonSocksPort > 65535
-  ) {
-    throw new Error(
-      `[toon-client] ANON_SOCKS_PORT must be a valid port, got: ${env['ANON_SOCKS_PORT']}`
-    );
-  }
-
-  // Per-chain native-balance poll window for boot funding. Default 30s keeps the
-  // historical behaviour, but Solana airdrop confirmation on a local validator
-  // can exceed 30s when funding starts at boot (the `ator-public` proxy mode has
-  // no anon-bootstrap buffer ahead of the poll), causing a false "never crossed
-  // 1 lamport by deadline" boot failure even though the address gets funded.
-  // Allow operators / E2E infra to widen it via FUND_POLL_DEADLINE_MS.
-  const fundPollDeadlineMs = parseInt(
-    env['FUND_POLL_DEADLINE_MS'] || '30000',
-    10
-  );
-  if (!Number.isInteger(fundPollDeadlineMs) || fundPollDeadlineMs < 1000) {
-    throw new Error(
-      `[toon-client] FUND_POLL_DEADLINE_MS must be an integer >= 1000, got: ${env['FUND_POLL_DEADLINE_MS']}`
-    );
-  }
-  // ator-public mode: take the first URL from the comma-separated list.
-  const rawProxy = env['ANYONE_PROXY_URLS']?.split(',')[0]?.trim() || null;
-  if (rawProxy && !rawProxy.startsWith('socks5h://')) {
-    throw new Error(
-      `[toon-client] ANYONE_PROXY_URLS must use socks5h:// scheme, got: ${rawProxy}`
-    );
-  }
-
-  // Solana payment: enabled only when both the program id and the apex's Solana
-  // settlement address are present (you cannot open a channel / address a claim
-  // without both). Everything else falls back to sensible local-devnet defaults.
-  const solanaProgramId = env['SOLANA_PROGRAM_ID']?.trim() || '';
-  const solanaTargetSettlement =
-    (
-      env['TARGET_SETTLEMENT_ADDRESS_SOLANA'] ||
-      env['SOLANA_TARGET_SETTLEMENT_ADDRESS']
-    )?.trim() || '';
-  const solanaEnabled = solanaProgramId !== '' && solanaTargetSettlement !== '';
-  const solanaTokenMint =
-    env['SOLANA_TOKEN_MINT']?.trim() ||
-    env['SOLANA_USDC_MINT']?.trim() ||
-    '6GbdrVghwNKTz9raga7y3Y4qqX5Zgg3AC4d48Kt7C59Q';
-  const solanaDepositAmount = env['SOLANA_DEPOSIT_AMOUNT']?.trim() || null;
-  const solanaPayerTokenAccount =
-    env['SOLANA_PAYER_TOKEN_ACCOUNT']?.trim() || null;
-  const solanaChallengeDuration = parseInt(
-    env['SOLANA_CHALLENGE_DURATION'] || '86400',
-    10
-  );
-  if (
-    !Number.isInteger(solanaChallengeDuration) ||
-    solanaChallengeDuration < 1
-  ) {
-    throw new Error(
-      `[toon-client] SOLANA_CHALLENGE_DURATION must be a positive integer, got: ${env['SOLANA_CHALLENGE_DURATION']}`
-    );
-  }
-
-  // Mina payment (Stage 3): enabled only when both the zkApp address and the
-  // apex's Mina settlement address are present. Mirrors the Solana enable gate.
-  const minaZkAppAddress = env['MINA_ZKAPP_ADDRESS']?.trim() || '';
-  const minaTargetSettlement =
-    (
-      env['TARGET_SETTLEMENT_ADDRESS_MINA'] ||
-      env['MINA_TARGET_SETTLEMENT_ADDRESS']
-    )?.trim() || '';
-  const minaEnabled = minaZkAppAddress !== '' && minaTargetSettlement !== '';
-  const minaGraphqlUrl =
-    env['MINA_GRAPHQL_URL']?.trim() ||
-    'http://host.docker.internal:28085/graphql';
-
-  return {
-    faucetUrl: need('FAUCET_URL'),
-    evmRpcUrl: need('EVM_RPC_URL'),
-    solanaRpcUrl: need('SOLANA_RPC_URL'),
-    podPort: parseInt(env['POD_PORT'] || '8080', 10),
-    publishRateLimitPerMin: rateLimitPerMin,
-    logLevel: env['LOG_LEVEL'] || 'info',
-    anyoneProxyUrl: rawProxy,
-    anonSocksPort,
-    fundPollDeadlineMs,
-    chainKey: env['TOON_CHAIN_KEY'] || 'evm:base:31337',
-    chainId: parseInt(env['TOON_CHAIN_ID'] || '31337', 10),
-    tokenAddress:
-      (env['TOON_TOKEN_ADDRESS'] as `0x${string}`) ||
-      '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-    tokenNetworkAddress:
-      (env['TOON_TOKEN_NETWORK_ADDRESS'] as `0x${string}`) ||
-      '0xCafac3dD18aC6c6e92c921884f9E4176737C052c',
-    targetSettlementAddress:
-      (env['TARGET_SETTLEMENT_ADDRESS'] as `0x${string}`) ||
-      '0x90F79bf6EB2c4f870365E785982E1f101E93b906',
-    evmEthThresholdWei: 1n,
-    solLamportThreshold: 1,
-    solanaUsdcMint:
-      env['SOLANA_USDC_MINT'] || '6GbdrVghwNKTz9raga7y3Y4qqX5Zgg3AC4d48Kt7C59Q',
-    evmUsdcThreshold: 1_000_000n,
-    solUsdcThreshold: 1_000_000,
-    feePerEvent: BigInt(env['TOON_FEE_PER_EVENT'] || '0'),
-    solana: {
-      enabled: solanaEnabled,
-      chainKey: env['SOLANA_CHAIN_KEY']?.trim() || 'solana:devnet',
-      programId: solanaProgramId,
-      tokenMint: solanaTokenMint,
-      targetSettlementAddress: solanaTargetSettlement,
-      depositAmount: solanaDepositAmount,
-      payerTokenAccount: solanaPayerTokenAccount,
-      challengeDuration: solanaChallengeDuration,
-    },
-    mina: {
-      enabled: minaEnabled,
-      chainKey: env['MINA_CHAIN_KEY']?.trim() || 'mina:devnet',
-      graphqlUrl: minaGraphqlUrl,
-      zkAppAddress: minaZkAppAddress,
-      targetSettlementAddress: minaTargetSettlement,
-      // On-chain channel deposit (base units). Defaults to 1_000_000 (matches
-      // the apex's per-publish USDC-scale fee) so a single publish's claimed
-      // balanceA fully consumes the deposit (balanceB=0) and conservation holds.
-      depositAmount: BigInt(env['MINA_DEPOSIT_AMOUNT']?.trim() || '1000000'),
-    },
-  };
-}
 
 // ---------- Key generation (memory-only) ----------
 
@@ -830,6 +650,7 @@ async function main(): Promise<void> {
 
   // Step 4: start Fastify IMMEDIATELY so /healthz is reachable within ~100ms
   // of pod startup (before the proxy probe + faucet calls complete).
+  const { default: Fastify } = await import('fastify');
   const fastify = Fastify({
     logger: { level: env.logLevel },
     bodyLimit: 64 * 1024,
@@ -858,9 +679,11 @@ async function main(): Promise<void> {
     nostrPubkey: keys.nostrPubkey,
     balances: { evm: String(evmBalance), sol: solBalance },
     bootedAt: startedAt,
-    transport: socks5ProxyUrl
-      ? { type: 'socks5', socksProxy: socks5ProxyUrl }
-      : { type: 'none', socksProxy: '' },
+    transport: env.directBtp
+      ? { type: 'direct', socksProxy: '' }
+      : socks5ProxyUrl
+        ? { type: 'socks5', socksProxy: socks5ProxyUrl }
+        : { type: 'none', socksProxy: '' },
   }));
 
   fastify.post('/publish', async (req: FastifyRequest, reply: FastifyReply) => {
@@ -905,7 +728,10 @@ async function main(): Promise<void> {
         })),
       });
     }
-    if (!isValidHostname(body.targetHostname)) {
+    // In direct-BTP mode routing is env-driven (APEX_BTP_URL); the request's
+    // targetHostname is NOT a .anon hostname and is not used to build the URL,
+    // so skip the strict HS hostname check. The HS path stays strict.
+    if (!env.directBtp && !isValidHostname(body.targetHostname)) {
       return reply.status(400).send({
         error: 'targetHostname must match /^[a-z2-7]+\\.(anyone|anon)$/',
         field: 'targetHostname',
@@ -916,16 +742,25 @@ async function main(): Promise<void> {
     if (!bootComplete) {
       return reply.status(503).send({ error: 'booting', retryable: true });
     }
-    if (!anyoneReady || !socks5ProxyUrl) {
+    // Direct-BTP mode has no SOCKS proxy to wait for — readiness is faucet-only
+    // (bootComplete). The HS/SOCKS path still requires a resolved proxy.
+    if (!env.directBtp && (!anyoneReady || !socks5ProxyUrl)) {
       return reply.status(503).send({
         error: 'anon_not_ready',
         detail: 'local anon daemon SOCKS5 port not bound',
         retryable: true,
       });
     }
-    const resolvedProxy = socks5ProxyUrl;
-
-    const targetHostname = body.targetHostname;
+    // Resolve BTP endpoint + transport + cache key once for this mode. Direct:
+    // plain ws:// apex (cache keyed by URL). HS/SOCKS: ws://<host>:3000/btp over
+    // the resolved proxy (cache keyed by the .anon targetHostname).
+    const wiring = resolveBtpWiring({
+      directBtp: env.directBtp,
+      apexBtpUrl: env.apexBtpUrl,
+      targetHostname: body.targetHostname,
+      resolvedProxy: socks5ProxyUrl,
+    });
+    const targetHostname = wiring.cacheKey;
     const event = body.event;
     const startMs = Date.now();
 
@@ -981,6 +816,10 @@ async function main(): Promise<void> {
               tokenNetworks[env.mina.chainKey] = env.mina.zkAppAddress;
             }
 
+            // BTP endpoint + transport resolved above (resolveBtpWiring): direct
+            // ws:// apex + {type:'direct'} OR ws://<host>:3000/btp + socks5.
+            const { btpUrl, transport } = wiring;
+
             const client = new ToonClient({
               connectorUrl: 'http://127.0.0.1:1', // required by validateConfig, unused at runtime
               // Solana/Mina mode: drive from a mnemonic so the client derives +
@@ -993,16 +832,16 @@ async function main(): Promise<void> {
               ilpInfo: {
                 pubkey: '00'.repeat(32),
                 ilpAddress: `g.toon.client.${keys.evmAddress.slice(2, 18).toLowerCase()}`,
-                btpEndpoint: `ws://${targetHostname}:3000/btp`,
+                btpEndpoint: btpUrl,
                 assetCode: 'USD',
                 assetScale: 6,
               },
               toonEncoder: encodeEventToToon,
               toonDecoder: decodeEventFromToon,
-              btpUrl: `ws://${targetHostname}:3000/btp`,
+              btpUrl,
               btpPeerId: keys.evmAddress,
               btpAuthToken: '',
-              transport: { type: 'socks5', socksProxy: resolvedProxy },
+              transport,
               destinationAddress: 'g.townhouse.town',
               knownPeers: [],
               relayUrl: '',
@@ -1206,7 +1045,13 @@ async function main(): Promise<void> {
   // /healthz returns anyoneReady:false until transport is ready AND boot completes.
   void (async () => {
     try {
-      if (env.anyoneProxyUrl) {
+      if (env.directBtp) {
+        // direct-BTP mode (Phase 1): plain ws:// apex, no SOCKS proxy. No public
+        // ATOR proxy is resolved and no local anon daemon is spawned. The pod
+        // dials the apex BTP endpoint directly; readiness gates on faucet funding
+        // only (socks5ProxyUrl stays null and is unused on the direct path).
+        log(`[transport] direct-BTP mode — apex ${env.apexBtpUrl}`);
+      } else if (env.anyoneProxyUrl) {
         // ator-public mode: the smoke test's beforeAll SOCKS5 probe confirms the
         // public proxy can reach the local apex .anon HS BEFORE /publish runs.
         // No local anon daemon needed — faster boot, simpler operation.
@@ -1348,9 +1193,13 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
 }
 
-main().catch((err: unknown) => {
-  console.error(
-    `[toon-client] fatal: ${err instanceof Error ? err.stack || err.message : String(err)}`
-  );
-  process.exit(1);
-});
+// Gated so importing this module from a test (Vitest sets VITEST=true) does NOT
+// trigger main() — tests drive parseEnv/isValidDirectBtpUrl directly.
+if (!process.env['VITEST']) {
+  main().catch((err: unknown) => {
+    console.error(
+      `[toon-client] fatal: ${err instanceof Error ? err.stack || err.message : String(err)}`
+    );
+    process.exit(1);
+  });
+}
