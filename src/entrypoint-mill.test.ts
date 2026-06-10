@@ -368,3 +368,90 @@ describe('applyEnvOverlay (regression sanity)', () => {
     expect((out as { btpServerPort?: number }).btpServerPort).toBe(3000);
   });
 });
+
+// ===========================================================================
+// Issue #157: unprefixed ILP_ADDRESS / NODE_ID env mapping
+//
+// The townhouse compose mill service sets the UNPREFIXED `ILP_ADDRESS:
+// g.townhouse.mill` (mirroring the town service). Without mapping it, the
+// mill's embedded connector self-routes on `g.toon.mill.<pubkey>`, the
+// apex-forwarded swap PREPARE (`g.townhouse.mill`) misses the self-route, falls
+// through to the up-to-parent route, and T00-rejects in the per-packet-claim
+// service. These tests pin the env → MillConfig mapping that keeps the swap
+// local.
+// ===========================================================================
+
+describe('Issue #157: ILP_ADDRESS / NODE_ID env mapping', () => {
+  const KEYS = ['ILP_ADDRESS', 'NODE_ID', 'TOON_ILP_ADDRESS', 'TOON_NODE_ID'];
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = {};
+    for (const k of KEYS) {
+      saved[k] = process.env[k];
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) {
+        // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+        delete process.env[k];
+      } else {
+        process.env[k] = saved[k];
+      }
+    }
+  });
+
+  const baseConfig = () =>
+    ({
+      swapPairs: [],
+      chains: [],
+      channels: {},
+      inventory: {},
+      relayUrls: [],
+    }) as never;
+
+  it('maps unprefixed ILP_ADDRESS → config.ilpAddress (the swap self-route)', () => {
+    process.env['ILP_ADDRESS'] = 'g.townhouse.mill';
+    const out = applyEnvOverlay(baseConfig());
+    expect((out as { ilpAddress?: string }).ilpAddress).toBe(
+      'g.townhouse.mill'
+    );
+  });
+
+  it('maps unprefixed NODE_ID → config.nodeId', () => {
+    process.env['NODE_ID'] = 'mill';
+    const out = applyEnvOverlay(baseConfig());
+    expect((out as { nodeId?: string }).nodeId).toBe('mill');
+  });
+
+  it('prefers the TOON_-prefixed alias over the unprefixed env var', () => {
+    process.env['ILP_ADDRESS'] = 'g.townhouse.mill';
+    process.env['TOON_ILP_ADDRESS'] = 'g.townhouse.mill.toon';
+    process.env['NODE_ID'] = 'mill';
+    process.env['TOON_NODE_ID'] = 'mill-toon';
+    const out = applyEnvOverlay(baseConfig());
+    expect((out as { ilpAddress?: string }).ilpAddress).toBe(
+      'g.townhouse.mill.toon'
+    );
+    expect((out as { nodeId?: string }).nodeId).toBe('mill-toon');
+  });
+
+  it('JSON config ilpAddress wins over env (env is a fallback only)', () => {
+    process.env['ILP_ADDRESS'] = 'g.townhouse.mill';
+    const out = applyEnvOverlay({
+      swapPairs: [],
+      chains: [],
+      channels: {},
+      inventory: {},
+      relayUrls: [],
+      ilpAddress: 'g.explicit.from.json',
+    } as never);
+    expect((out as { ilpAddress?: string }).ilpAddress).toBe(
+      'g.explicit.from.json'
+    );
+  });
+});

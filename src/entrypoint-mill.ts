@@ -413,11 +413,24 @@ export function applyEnvOverlay(cfg: MillConfig): MillConfig {
   ) {
     out.connectorUrl = env['CONNECTOR_URL'] ?? env['TOON_CONNECTOR_URL'];
   }
-  if (!out.ilpAddress && env['TOON_ILP_ADDRESS']) {
-    out.ilpAddress = env['TOON_ILP_ADDRESS'];
+  // Accept the unprefixed `ILP_ADDRESS` / `NODE_ID` the townhouse compose
+  // templates set on the mill service (mirroring entrypoint-town's mapping),
+  // alongside the `TOON_`-prefixed aliases. The `ILP_ADDRESS` mapping is
+  // load-bearing (issue #157): without it the mill's embedded connector
+  // defaults its self-route to `g.toon.mill.<pubkey>`, which does NOT match the
+  // address the apex forwards swaps to (`g.townhouse.mill`). The mismatch makes
+  // the inbound swap PREPARE miss the self-route and fall through to the
+  // default-up-to-parent route, where the per-packet-claim-service tries (and
+  // fails) to open an OUTBOUND channel back to the parent `g.townhouse`,
+  // rejecting with `T00 No payment channel available for peer`. Setting
+  // `ilpAddress = g.townhouse.mill` keeps the swap on the local self-route so it
+  // reaches the swap-handler (fee-zeroed local delivery). JSON config /
+  // TOON_-prefixed env win when both are set.
+  if (!out.ilpAddress && (env['TOON_ILP_ADDRESS'] || env['ILP_ADDRESS'])) {
+    out.ilpAddress = env['TOON_ILP_ADDRESS'] ?? env['ILP_ADDRESS'];
   }
-  if (!out.nodeId && env['TOON_NODE_ID']) {
-    out.nodeId = env['TOON_NODE_ID'];
+  if (!out.nodeId && (env['TOON_NODE_ID'] || env['NODE_ID'])) {
+    out.nodeId = env['TOON_NODE_ID'] ?? env['NODE_ID'];
   }
   if (!out.parentPeerId && env['TOON_PARENT_PEER_ID']) {
     out.parentPeerId = env['TOON_PARENT_PEER_ID'];
