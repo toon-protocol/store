@@ -148,7 +148,16 @@ RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-s
 # Install ethers + express (dynamically required by connector) and @ardrive/turbo-sdk
 # (lazy-imported by Arweave DVM handler) with all transitive deps.
 # Copy entire npm flat node_modules — more robust than cherry-picking individual packages.
-RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive/turbo-sdk socks-proxy-agent@8 && \
+#
+# @libsql/client + libsql (toon-protocol/connector#79): connector 3.8.0 moved its
+# local settlement/claim SQLite store off better-sqlite3 to libsql, lazy-required
+# at runtime. From connector 3.10.x this is HARD-required — without it the embedded
+# connector aborts at startup ("libsql is required for per-packet claims persistence
+# … Payment channel native dependency missing — connector startup aborted"), so the
+# sdk-e2e peers never become healthy and every SDK E2E (EVM/Solana/Mina) fails.
+# Pinned to the same versions as Dockerfile.mill. libsql ships a prebuilt
+# linux-x64-musl NAPI binding that loads on node:20-alpine (verified).
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 @ardrive/turbo-sdk socks-proxy-agent@8 @libsql/client@0.14.0 libsql@0.4.7 && \
     cp -r /tmp/node_modules/* /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
