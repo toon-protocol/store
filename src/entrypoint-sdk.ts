@@ -38,6 +38,7 @@ import {
   TEE_ATTESTATION_KIND,
   parseAttestation,
   buildAttestationEvent,
+  resolveChainConfig,
 } from '@toon-protocol/core';
 import type {
   BootstrapEvent,
@@ -132,7 +133,11 @@ function buildChainProviders(
   if (connectorEnv.settlementRpcUrl && connectorEnv.settlementRegistryAddress) {
     providers.push({
       chainType: 'evm' as const,
-      chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
+      // Numeric chain id (e.g. evm:84532 Base Sepolia) so the provider matches
+      // the `evm:<id>` peer relations and `evm:base:<id>` settlement keys.
+      // TOON_CHAIN is a name preset; resolveChainConfig maps it to the number
+      // (anvil→31337 when unset), preserving local-mode evm:31337.
+      chainId: `evm:${resolveChainConfig(process.env['TOON_CHAIN']).chainId}`,
       rpcUrl: connectorEnv.settlementRpcUrl,
       registryAddress: connectorEnv.settlementRegistryAddress,
       tokenAddress: connectorEnv.settlementTokenAddress ?? '',
@@ -340,7 +345,13 @@ async function main(): Promise<void> {
               chainProviders: [
                 {
                   chainType: 'evm' as const,
-                  chainId: `evm:${process.env['TOON_CHAIN'] || '31337'}`,
+                  // Register the EVM provider under its NUMERIC chain id (e.g.
+          // evm:84532 for Base Sepolia) so it matches the `evm:<id>` peer
+          // relations in BTP_PEERS and the `evm:base:<id>` settlement keys.
+          // TOON_CHAIN is a chain-name preset (anvil / base-sepolia / …);
+          // resolveChainConfig maps it to the numeric id (anvil→31337 when
+          // unset), keeping local mode (evm:31337) unchanged.
+          chainId: `evm:${resolveChainConfig(process.env['TOON_CHAIN']).chainId}`,
                   rpcUrl: connectorEnv.settlementRpcUrl,
                   registryAddress: connectorEnv.settlementRegistryAddress,
                   tokenAddress: connectorEnv.settlementTokenAddress ?? '',
