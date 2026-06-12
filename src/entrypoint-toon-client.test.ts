@@ -6,7 +6,7 @@
  *   (a) parseEnv populates directBtp/apexBtpUrl and throws when DIRECT_BTP=1 but
  *       APEX_BTP_URL is missing (or malformed).
  *   (b) isValidDirectBtpUrl accepts ws://host[:port]/btp + wss://, rejects junk
- *       / .anon hostnames; the HS HOSTNAME_REGEX still rejects plain hosts/URLs.
+ *       / .anyone hostnames; the HS HOSTNAME_REGEX still rejects plain hosts/URLs.
  *   (c) resolveBtpWiring returns transport:{type:'direct'} + the plain apex URL
  *       in direct mode, and the legacy socks5 + ws://<host>:3000/btp otherwise.
  *
@@ -151,11 +151,14 @@ describe('isValidDirectBtpUrl', () => {
   });
 });
 
-describe('HS HOSTNAME_REGEX (still strict)', () => {
-  const HOSTNAME_REGEX = /^[a-z2-7]+\.(anyone|anon)$/;
-  it('accepts .anon / .anyone but rejects plain hosts and direct URLs', () => {
-    expect(HOSTNAME_REGEX.test('abcdef234567.anon')).toBe(true);
+describe('HS HOSTNAME_REGEX (.anyone TLD only — issue #201)', () => {
+  // Mirrors @toon-protocol/client's HS_HOSTNAME_REGEX, which the entrypoint now
+  // uses via isRoutableHsHostname. The legacy `.anon` TLD is NOT routable.
+  const HOSTNAME_REGEX = /^[a-z2-7]+\.anyone$/;
+  it('accepts .anyone but rejects .anon, plain hosts, and direct URLs', () => {
     expect(HOSTNAME_REGEX.test('abcdef234567.anyone')).toBe(true);
+    // .anon is no longer routable — anon only resolves hidden services on .anyone
+    expect(HOSTNAME_REGEX.test('abcdef234567.anon')).toBe(false);
     // plain hosts / URLs must NOT match the HS regex
     expect(HOSTNAME_REGEX.test('apex.local')).toBe(false);
     expect(HOSTNAME_REGEX.test('localhost')).toBe(false);
@@ -170,7 +173,7 @@ describe('resolveBtpWiring', () => {
     const w = resolveBtpWiring({
       directBtp: true,
       apexBtpUrl: 'ws://apex.local:3000/btp',
-      targetHostname: 'ignored.anon',
+      targetHostname: 'ignored.anyone',
       resolvedProxy: null,
     });
     expect(w.transport).toEqual({ type: 'direct' });
@@ -181,22 +184,22 @@ describe('resolveBtpWiring', () => {
   it('HS mode → transport:{type:socks5} + ws://<host>:3000/btp, keyed by hostname', () => {
     const w = resolveBtpWiring({
       directBtp: false,
-      targetHostname: 'abcdef234567.anon',
+      targetHostname: 'abcdef234567.anyone',
       resolvedProxy: 'socks5h://127.0.0.1:9050',
     });
     expect(w.transport).toEqual({
       type: 'socks5',
       socksProxy: 'socks5h://127.0.0.1:9050',
     });
-    expect(w.btpUrl).toBe('ws://abcdef234567.anon:3000/btp');
-    expect(w.cacheKey).toBe('abcdef234567.anon');
+    expect(w.btpUrl).toBe('ws://abcdef234567.anyone:3000/btp');
+    expect(w.cacheKey).toBe('abcdef234567.anyone');
   });
 
   it('throws in direct mode when apexBtpUrl missing', () => {
     expect(() =>
       resolveBtpWiring({
         directBtp: true,
-        targetHostname: 'x.anon',
+        targetHostname: 'x.anyone',
         resolvedProxy: null,
       })
     ).toThrow(/requires apexBtpUrl/);
@@ -206,7 +209,7 @@ describe('resolveBtpWiring', () => {
     expect(() =>
       resolveBtpWiring({
         directBtp: false,
-        targetHostname: 'x.anon',
+        targetHostname: 'x.anyone',
         resolvedProxy: null,
       })
     ).toThrow(/requires a resolved proxy/);

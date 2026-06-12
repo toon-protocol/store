@@ -56,7 +56,7 @@
  *   APEX_BTP_URL          (required in direct mode) — plain BTP endpoint
  *                                        (ws://|wss:// host[:port] /btp). Validated
  *                                        by isValidDirectBtpUrl (NOT the strict
- *                                        .anon/.anyone HOSTNAME_REGEX).
+ *                                        .anyone HOSTNAME_REGEX).
  *   ANYONE_PROXY_URLS     (optional)  — comma-separated public ATOR proxy URL(s) in
  *                                        socks5h://host:port form.  When set, the pod
  *                                        skips the local anon daemon and routes outbound
@@ -137,6 +137,7 @@ import {
   ToonClient,
   generateMnemonic,
   deriveFullIdentity,
+  isRoutableHsHostname,
 } from '@toon-protocol/client';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import type { NostrEvent } from 'nostr-tools/pure';
@@ -571,10 +572,10 @@ interface ClientCacheEntry {
   createdAt: number;
 }
 
-const HOSTNAME_REGEX = /^[a-z2-7]+\.(anyone|anon)$/;
-function isValidHostname(s: unknown): s is string {
-  return typeof s === 'string' && s.length <= 80 && HOSTNAME_REGEX.test(s);
-}
+// HS hostnames are validated by the shared client helper, which accepts the
+// `.anyone` TLD ONLY. The legacy `.anon` TLD is NOT routable — anon treats it as
+// a clearnet name and fails (HostUnreachable). See issue #201.
+const isValidHostname = isRoutableHsHostname;
 
 interface PublishRequestBody {
   event: NostrEvent;
@@ -729,11 +730,13 @@ async function main(): Promise<void> {
       });
     }
     // In direct-BTP mode routing is env-driven (APEX_BTP_URL); the request's
-    // targetHostname is NOT a .anon hostname and is not used to build the URL,
+    // targetHostname is NOT a .anyone hostname and is not used to build the URL,
     // so skip the strict HS hostname check. The HS path stays strict.
     if (!env.directBtp && !isValidHostname(body.targetHostname)) {
       return reply.status(400).send({
-        error: 'targetHostname must match /^[a-z2-7]+\\.(anyone|anon)$/',
+        error:
+          'targetHostname must be a routable .anyone hidden-service address ' +
+          'matching /^[a-z2-7]+\\.anyone$/ (the .anon TLD is not routable — use .anyone)',
         field: 'targetHostname',
       });
     }
@@ -753,7 +756,7 @@ async function main(): Promise<void> {
     }
     // Resolve BTP endpoint + transport + cache key once for this mode. Direct:
     // plain ws:// apex (cache keyed by URL). HS/SOCKS: ws://<host>:3000/btp over
-    // the resolved proxy (cache keyed by the .anon targetHostname).
+    // the resolved proxy (cache keyed by the .anyone targetHostname).
     const wiring = resolveBtpWiring({
       directBtp: env.directBtp,
       apexBtpUrl: env.apexBtpUrl,
@@ -1053,7 +1056,7 @@ async function main(): Promise<void> {
         log(`[transport] direct-BTP mode — apex ${env.apexBtpUrl}`);
       } else if (env.anyoneProxyUrl) {
         // ator-public mode: the smoke test's beforeAll SOCKS5 probe confirms the
-        // public proxy can reach the local apex .anon HS BEFORE /publish runs.
+        // public proxy can reach the local apex .anyone HS BEFORE /publish runs.
         // No local anon daemon needed — faster boot, simpler operation.
         socks5ProxyUrl = env.anyoneProxyUrl;
         log(`[proxy] ator-public mode — ${socks5ProxyUrl}`);

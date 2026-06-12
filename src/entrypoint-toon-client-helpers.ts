@@ -117,9 +117,9 @@ export function isTruthy(v: string | undefined): boolean {
  *   path === '/btp' (no query/fragment),
  *   sane length cap.
  *
- * This is SEPARATE from HOSTNAME_REGEX on purpose — the .anon/.anyone HS path
+ * This is SEPARATE from HOSTNAME_REGEX on purpose — the .anyone HS path
  * stays strict (a plain host like `apex` or `localhost` must NOT pass the HS
- * validator). Conversely the HS targetHostname (e.g. `abc.anon`) is NOT a URL
+ * validator). Conversely the HS targetHostname (e.g. `abc.anyone`) is NOT a URL
  * and must NOT pass this one.
  */
 export function isValidDirectBtpUrl(url: unknown): url is string {
@@ -314,7 +314,7 @@ export function parseEnv(): PodEnv {
  * Direct-BTP: plain ws:// apex from APEX_BTP_URL + transport:{type:'direct'}
  *             (no SOCKS proxy). `cacheKey` is the apex URL.
  * HS/SOCKS:   ws://<targetHostname>:3000/btp + transport:{type:'socks5'} over
- *             the resolved proxy. `cacheKey` is the .anon targetHostname.
+ *             the resolved proxy. `cacheKey` is the .anyone targetHostname.
  *
  * Exported for unit coverage (deterministic; no network).
  */
