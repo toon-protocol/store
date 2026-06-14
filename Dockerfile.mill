@@ -79,6 +79,7 @@ COPY packages/bls/ ./packages/bls/
 COPY packages/core/ ./packages/core/
 COPY packages/sdk/ ./packages/sdk/
 COPY packages/mill/ ./packages/mill/
+COPY packages/mina-zkapp/ ./packages/mina-zkapp/
 COPY docker/ ./docker/
 
 # Build workspace packages needed by Mill, then bundle the entrypoint.
@@ -88,6 +89,7 @@ RUN pnpm -r \
       --filter '@toon-protocol/core' \
       --filter '@toon-protocol/sdk' \
       --filter '@toon-protocol/bls' \
+      --filter '@toon-protocol/mina-zkapp' \
       --filter '@toon-protocol/mill' \
       build && \
     cd docker && \
@@ -109,6 +111,15 @@ RUN pnpm -r \
       --external:@solana/kit \
       --external:@solana-program/token \
       --external:@toon-protocol/mina-zkapp
+
+# Pack the built mina-zkapp workspace package into a tarball so the runtime
+# stage can `npm install` it (it is not published to npm). Required for the
+# embedded connector's Mina payment-channel zkApp pre-compile — without it a
+# mill configured with a Mina chainProvider logs `zkapp_compile_error:
+# @toon-protocol/mina-zkapp is required ... but is not installed` (#240).
+RUN mkdir -p /tarballs && \
+    ( cd packages/mina-zkapp && pnpm pack --pack-destination /tarballs ) && \
+    mv /tarballs/toon-protocol-mina-zkapp-*.tgz /tarballs/mina-zkapp.tgz
 
 # -- Assemble minimal runtime directory --------------------------------------
 RUN mkdir -p /runtime/node_modules
@@ -151,7 +162,13 @@ RUN mkdir -p /runtime/node_modules/@solana /runtime/node_modules/@solana-program
 # per-packet claim subsystem (incl. the relation-aware InboundClaimValidator from
 # connector#78). libsql ships a prebuilt linux-x64-musl NAPI binding that loads
 # on node:20-alpine (verified).
-RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 @libsql/client@0.14.0 libsql@0.4.7 && \
+# mina-zkapp (packed tarball) + o1js + mina-signer back the Mina payment-channel
+# leg (#240). All three are `--external` in the esbuild bundle above, so they
+# MUST be present in node_modules at runtime. o1js/mina-signer pinned to the
+# workspace-resolved versions so the runtime circuit matches what mill was built
+# against. npm resolves o1js's transitive deps cleanly (flat), avoiding the
+# pnpm-store symlink-cherry-pick fragility.
+RUN cd /tmp && npm init -y && npm install --omit=dev ethers@6 express@4 socks-proxy-agent@8 @libsql/client@0.14.0 libsql@0.4.7 /tarballs/mina-zkapp.tgz o1js@2.14.0 mina-signer@3.1.0 && \
     cp -r /tmp/node_modules/* /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
