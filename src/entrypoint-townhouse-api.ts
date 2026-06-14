@@ -6,7 +6,10 @@
  *
  * Environment variables:
  *   TOWNHOUSE_CONFIG           — path to config.yaml (default: /config/config.yaml)
- *   TOWNHOUSE_WALLET_PASSWORD  — wallet decryption password
+ *   TOWNHOUSE_MNEMONIC         — operator wallet seed; loaded directly (no
+ *                                encrypted file / password). Takes precedence.
+ *   TOWNHOUSE_WALLET_PASSWORD  — wallet decryption password (used when
+ *                                TOWNHOUSE_MNEMONIC is unset)
  *   TOWNHOUSE_API_HOST         — override bind host (default: 0.0.0.0 in container)
  *   TOWNHOUSE_API_PORT         — override bind port (default: 28090)
  *   TOON_RPC_URL               — EVM RPC endpoint (passed to viem chain config)
@@ -31,13 +34,17 @@ import {
   createApiServer,
 } from '@toon-protocol/townhouse';
 
-const configPath =
-  process.env['TOWNHOUSE_CONFIG'] ?? '/config/config.yaml';
+const configPath = process.env['TOWNHOUSE_CONFIG'] ?? '/config/config.yaml';
 
+// P1b — operator/agent wallet mode: TOWNHOUSE_MNEMONIC loads the operator
+// wallet DIRECTLY (no encrypted file, no password). Otherwise fall back to the
+// encrypted wallet + TOWNHOUSE_WALLET_PASSWORD. Mirrors the CLI's
+// tryEnvMnemonicWallet (P1). See docs/townhouse-mcp-design.md §3.
+const envMnemonic = process.env['TOWNHOUSE_MNEMONIC']?.trim();
 const password = process.env['TOWNHOUSE_WALLET_PASSWORD'];
-if (!password) {
+if (!envMnemonic && !password) {
   console.error(
-    '[townhouse-api] TOWNHOUSE_WALLET_PASSWORD is required in container mode'
+    '[townhouse-api] TOWNHOUSE_MNEMONIC or TOWNHOUSE_WALLET_PASSWORD is required in container mode'
   );
   process.exit(1);
 }
@@ -56,21 +63,24 @@ try {
 }
 
 const walletPath = config.wallet.encrypted_path;
-console.log(`[townhouse-api] wallet: ${walletPath}`);
-
-const loaded = await loadWallet(walletPath);
-if (!loaded) {
-  console.error(`[townhouse-api] No wallet at ${walletPath}.`);
-  process.exit(1);
-}
-if (loaded.permissionsWarning) {
-  console.warn(loaded.permissionsWarning);
-}
-
-const mnemonic = decryptWallet(loaded.wallet, password);
 const walletManager = new WalletManager({ encryptedPath: walletPath });
-await walletManager.fromMnemonic(mnemonic);
-console.log('[townhouse-api] wallet decrypted');
+if (envMnemonic) {
+  await walletManager.fromMnemonic(envMnemonic);
+  console.log('[townhouse-api] wallet loaded from TOWNHOUSE_MNEMONIC');
+} else {
+  console.log(`[townhouse-api] wallet: ${walletPath}`);
+  const loaded = await loadWallet(walletPath);
+  if (!loaded) {
+    console.error(`[townhouse-api] No wallet at ${walletPath}.`);
+    process.exit(1);
+  }
+  if (loaded.permissionsWarning) {
+    console.warn(loaded.permissionsWarning);
+  }
+  const mnemonic = decryptWallet(loaded.wallet, password as string);
+  await walletManager.fromMnemonic(mnemonic);
+  console.log('[townhouse-api] wallet decrypted');
+}
 
 const docker = new Docker();
 
@@ -92,8 +102,7 @@ const orchestrator = new DockerOrchestrator(docker, config, walletManager, {
 // has `hostname: connector` per the compose template, so Docker DNS resolves
 // the right peer. Discovered by Story 46.4 live gate run (Finding G,
 // 2026-05-11). Override via env var for non-default deployments.
-const connectorHost =
-  process.env['TOWNHOUSE_CONNECTOR_HOST'] ?? 'connector';
+const connectorHost = process.env['TOWNHOUSE_CONNECTOR_HOST'] ?? 'connector';
 const connectorAdmin = new ConnectorAdminClient(
   `http://${connectorHost}:${config.connector.adminPort}`
 );
@@ -104,7 +113,7 @@ console.log(
 const transportProbe = new TransportProbe({
   proxyUrl:
     config.transport.mode === 'ator'
-      ? config.transport.socksProxy ?? DEFAULT_ATOR_PROXY
+      ? (config.transport.socksProxy ?? DEFAULT_ATOR_PROXY)
       : '',
 });
 if (config.transport.mode === 'ator') {
@@ -113,9 +122,10 @@ if (config.transport.mode === 'ator') {
 
 // Override host to 0.0.0.0 for container (the default 127.0.0.1 blocks
 // external access from Docker networking). Operators can override via env var.
-const host =
-  process.env['TOWNHOUSE_API_HOST'] ?? config.api.host ?? '0.0.0.0';
-const port = Number(process.env['TOWNHOUSE_API_PORT'] ?? config.api.port ?? 28090);
+const host = process.env['TOWNHOUSE_API_HOST'] ?? config.api.host ?? '0.0.0.0';
+const port = Number(
+  process.env['TOWNHOUSE_API_PORT'] ?? config.api.port ?? 28090
+);
 
 const apiServer = await createApiServer({
   configPath,
@@ -136,10 +146,14 @@ const shutdown = async (sig: string): Promise<void> => {
   console.log(`\n[townhouse-api] ${sig} — closing...`);
   try {
     transportProbe.stop();
-  } catch (_) { /* ignore stop errors on shutdown */ }
+  } catch (_) {
+    /* ignore stop errors on shutdown */
+  }
   try {
     await apiServer.app.close();
-  } catch (_) { /* ignore close errors on shutdown */ }
+  } catch (_) {
+    /* ignore close errors on shutdown */
+  }
   process.exit(0);
 };
 process.on('SIGINT', () => void shutdown('SIGINT'));
