@@ -75,6 +75,13 @@ if (process.env['PUBLIC_BTP_URL']) {
   process.env['TOON_BTP_ENDPOINT'] = process.env['PUBLIC_BTP_URL'];
 }
 
+// Public Nostr relay READ URL advertised in this town's kind:10032 (`relayUrl`)
+// and kind:10166 seed entry, so clients discover where to subscribe for free
+// reads. Set by the orchestrator (HS .anyone relay URL or direct public URL).
+if (process.env['PUBLIC_RELAY_URL']) {
+  process.env['TOON_EXTERNAL_RELAY_URL'] = process.env['PUBLIC_RELAY_URL'];
+}
+
 // Settlement asset advertised in kind:10032 (operator-configurable token). When
 // unset the town defaults to USD/scale-6.
 if (process.env['ASSET_CODE']) {
