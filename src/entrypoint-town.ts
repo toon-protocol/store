@@ -66,6 +66,24 @@ if (process.env['PARENT_EVM_ADDRESS']) {
   process.env['TOON_PARENT_EVM_ADDRESS'] = process.env['PARENT_EVM_ADDRESS'];
 }
 
+// Public BTP endpoint the apex exposes to external clients (HS .anyone URL or
+// direct ws://host:3000/btp). Advertised in this town's kind:10032 so clients
+// learn where to route packets destined for g.townhouse.town. Without it the
+// town would fall back to the internal `ws://localhost:3000` default, which is
+// unreachable from outside the Docker network.
+if (process.env['PUBLIC_BTP_URL']) {
+  process.env['TOON_BTP_ENDPOINT'] = process.env['PUBLIC_BTP_URL'];
+}
+
+// Settlement asset advertised in kind:10032 (operator-configurable token). When
+// unset the town defaults to USD/scale-6.
+if (process.env['ASSET_CODE']) {
+  process.env['TOON_ASSET_CODE'] = process.env['ASSET_CODE'];
+}
+if (process.env['ASSET_SCALE']) {
+  process.env['TOON_ASSET_SCALE'] = process.env['ASSET_SCALE'];
+}
+
 process.env['TOON_BLS_PORT'] = process.env['BLS_PORT'] ?? '3100';
 process.env['TOON_RELAY_PORT'] = process.env['WS_PORT'] ?? '7100';
 process.env['TOON_DATA_DIR'] = '/data';
