@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.2/.schema/devbox.schema.json",
+  "packages": [
+    "nodejs@22.11.0",
+    "foundry-bin@1.7.1",
+    "solana-cli@2.3.3",
+    "jq@1.7.1"
+  ],
+  "shell": {
+    "scripts": {
+      "build": "npm run build",
+      "test": "npm test",
+      "typecheck": "npm run typecheck"
+    }
+  }
+}

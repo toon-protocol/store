@@ -8,3 +8,20 @@ TOON Protocol **Arweave DVM node** — NIP-90 kind:5094 blob storage. The node a
 - Publishes no npm package (it's a container); kept `private`.
 
 > Extracted from the TOON monorepo with full git history preserved.
+
+## Development
+
+### Getting started with Devbox
+
+[Devbox](https://www.jetify.com/devbox) pins the exact versions of Node, foundry, the Solana CLI, and jq used in CI so your local shell matches the CI toolchain automatically.
+
+**Prerequisites:** [install Devbox](https://www.jetify.com/devbox/docs/installing_devbox/) (requires Nix; the installer sets it up).
+
+```sh
+devbox shell        # enter the pinned environment (installs tools on first run)
+npm install         # install Node dependencies
+npm run build       # bundle with esbuild
+npm test            # run tests
+```
+
+All `devbox shell` sessions use the versions declared in `devbox.json`. The `devbox.lock` is committed by the `devbox-validate` CI job on the first PR run to pin exact Nix hashes.
