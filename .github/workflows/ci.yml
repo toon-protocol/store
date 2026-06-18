@@ -23,6 +23,7 @@ jobs:
       - name: Resolve and pin devbox.lock
         run: devbox install
       - name: Commit devbox.lock if it changed
+        if: github.event_name == 'pull_request'
         run: |
           if ! git diff --quiet -- devbox.lock; then
             git config user.name  "github-actions[bot]"
