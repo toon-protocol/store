@@ -65,11 +65,11 @@ RUN mkdir -p /runtime/node_modules && \
 # back the connector's claim SQLite store; better-sqlite3 backs the relay store.
 RUN cd /tmp && npm init -y && \
     npm install --omit=dev \
-      better-sqlite3 \
-      @ardrive/turbo-sdk \
-      arweave \
-      @libsql/client \
-      libsql && \
+      better-sqlite3@9.6.0 \
+      @ardrive/turbo-sdk@1.40.2 \
+      arweave@1.15.7 \
+      @libsql/client@0.14.0 \
+      libsql@0.4.7 && \
     cp -rL /tmp/node_modules/. /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
