@@ -120,5 +120,6 @@ jobs:
       - name: Sign image digest
         env:
           COSIGN_YES: 'true'
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          cosign sign ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          cosign sign "${IMAGE}@${DIGEST}"
