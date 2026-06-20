@@ -505,7 +505,8 @@ async function main(): Promise<ToonNode> {
         );
         if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
           console.warn(
-            `[DVM Entrypoint] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`
+            `[DVM Entrypoint] WARNING: Arweave wallet has 0 winc credits — uploads will fail until the wallet is funded.` +
+            (turboResult.arweaveAddress ? ` Fund address: ${turboResult.arweaveAddress}` : '')
           );
         }
       }
