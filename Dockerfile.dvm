@@ -1,245 +1,90 @@
-# TOON DVM Node Container (esbuild-bundled Multi-Stage Build)
+# TOON DVM Node Container (standalone, esbuild-bundled)
 #
 # Purpose:
-#   Production-grade DVM compute-node container for Townhouse orchestration.
-#   Runs Arweave blob storage DVM (kind:5094) and Dungeon run DVM (kind:5250).
-#
-# Consumers:
-#   - `docker-compose-townhouse.yml` — dvm service references `image: toon:dvm`
-#   - `packages/townhouse` DockerOrchestrator — builds and runs this image
+#   Production-grade DVM compute node for Arweave blob storage (kind:5094).
+#   Accepts a paid claim, uploads the blob to Arweave via Turbo, returns tx id.
 #
 # Build from repo root:
-#   docker build -f docker/Dockerfile.dvm \
-#     --build-context memvid=../memvid \
-#     -t toon:dvm .
+#   npm install && npm run build   # local dev
+#   docker build -f Dockerfile.dvm -t toon-store .
 #
-# The `--build-context memvid=...` flag points BuildKit at the sibling
-# memvid repo (clone https://github.com/ALLiDoizCode/memvid into ../memvid
-# adjacent to this town/ checkout). packages/memvid-node/Cargo.toml has
-# `memvid-core = { path = "../../../memvid" }`, which from the in-image
-# location /app/packages/memvid-node/ resolves to /memvid — so we COPY the
-# context to that exact path below.
-#
-# Pattern follows docker/Dockerfile.mill (multi-stage, esbuild, native modules, non-root).
-# Key differences: standalone HTTP mode on port 3300 (vs embedded BTP on 3000).
+# All dependencies are fetched from npm — no monorepo paths required.
 
 # -- Stage 1: Builder -------------------------------------------------------
 FROM node:20-alpine AS builder
 
-# Metadata
 LABEL maintainer="toon-protocol"
 LABEL version="1.0.0"
-LABEL description="TOON DVM Node - Compute-for-hire (Arweave storage + Dungeon runs)"
+LABEL description="TOON DVM Node - Arweave blob storage (kind:5094)"
 
-# Install build dependencies for native modules
-RUN apk add --no-cache python3 py3-setuptools make g++ rust cargo
-
-# Install pnpm (pinned for deterministic builds)
-RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+# Build deps for native modules (better-sqlite3, libsql)
+RUN apk add --no-cache python3 py3-setuptools make g++
 
 WORKDIR /app
 
-# Copy dependency manifests for installation.
-# Copy the package.json of EVERY in-context workspace project (not just bls/
-# core/sdk/docker). With `--frozen-lockfile`, pnpm prunes any workspace project
-# whose manifest is absent from the install graph, which drops that project's
-# deps from `node_modules/.pnpm` and changes how shared deps' peer variants get
-# hoisted/symlinked. The host always has the FULL workspace, so a partial
-# manifest set produces a DIFFERENT, fragile node_modules layout here — e.g. the
-# sdk's `@toon-protocol/connector` symlink resolves to a peer variant whose
-# .d.ts isn't walkable, breaking the tsup DTS pass with `Cannot find module
-# '@toon-protocol/connector'` while the ESM bundle still builds (#143, same
-# class as #138/#141). Copying all manifests makes the Docker install graph
-# identical to the host's so DTS type resolution is deterministic.
-# (packages/examples is excluded by .dockerignore — the only member
-# intentionally omitted, matching the host's tolerance of it.)
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
-COPY patches/ ./patches/
-COPY packages/bls/package.json ./packages/bls/
-COPY packages/client/package.json ./packages/client/
-COPY packages/core/package.json ./packages/core/
-COPY packages/faucet/package.json ./packages/faucet/
-COPY packages/memvid-node/package.json ./packages/memvid-node/
-COPY packages/mill/package.json ./packages/mill/
-COPY packages/mina-zkapp/package.json ./packages/mina-zkapp/
-COPY packages/pet-circuit/package.json ./packages/pet-circuit/
-COPY packages/pet-dvm/package.json ./packages/pet-dvm/
-COPY packages/relay/package.json ./packages/relay/
-COPY packages/rig/package.json ./packages/rig/
-COPY packages/sdk/package.json ./packages/sdk/
-COPY packages/town/package.json ./packages/town/
-COPY packages/townhouse/package.json ./packages/townhouse/
-COPY packages/townhouse-web/package.json ./packages/townhouse-web/
-COPY examples/client-example/package.json ./examples/client-example/
-COPY examples/sdk-example/package.json ./examples/sdk-example/
-COPY examples/town-example/package.json ./examples/town-example/
-COPY docker/package.json ./docker/
+# Install all dependencies from npm registry.
+# --ignore-scripts skips native postinstall builds; native modules rebuilt below.
+COPY package.json ./
+RUN npm install --ignore-scripts && npm rebuild better-sqlite3
 
-# Install all dependencies (including devDependencies needed for build).
-# `--ignore-scripts` skips native postinstall builds (the Rust-backed
-# memvid-node/pet-circuit, etc.) that the now-complete workspace graph would
-# otherwise trigger — the builder only transpiles JS. The runtime stage installs
-# its own native deps (@libsql/client, libsql, @ardrive/turbo-sdk) fresh.
-#
-# EXCEPTION: better-sqlite3's native `.node` IS cherry-picked from the pnpm store
-# below (it backs the connector's local store on the value-bearing path), so we
-# explicitly `pnpm rebuild` just that one package to produce its prebuilt binary
-# without re-enabling scripts for the whole (heavy) graph.
-RUN pnpm install --frozen-lockfile --ignore-scripts && \
-    pnpm rebuild -r better-sqlite3
+# Copy source for esbuild bundling
+COPY tsconfig.json esbuild.config.mjs ./
+COPY src/ ./src/
 
-# Copy source code (only packages needed for the Arweave DVM)
-COPY tsconfig.json ./
-COPY packages/bls/ ./packages/bls/
-COPY packages/core/ ./packages/core/
-COPY packages/sdk/ ./packages/sdk/
-COPY docker/ ./docker/
-
-# Build only the workspace packages this DVM needs. pet-dvm / memvid-node /
-# pet-circuit (kind:5250 Dungeon DVM) were removed — operator decision: this
-# image is an Arweave-only DVM provider. Drops the o1js / mina-signer / Rust
-# memvid-core dependency chain entirely (~700 MB of transitive deps gone).
-RUN pnpm -r \
-      --filter '@toon-protocol/core' \
-      --filter '@toon-protocol/sdk' \
-      --filter '@toon-protocol/bls' \
-      build && \
-    cd docker && \
-    pnpm exec esbuild src/entrypoint-dvm.ts \
+# Bundle src/entrypoint-dvm.ts into a single ESM file.
+# Externals: @ardrive/turbo-sdk and arweave are lazy-imported at runtime;
+# better-sqlite3 / @libsql/client / libsql are native modules that cannot
+# be statically bundled; ethers / express / @solana/* / @toon-protocol/mina-zkapp
+# are pulled in by connector's requireOptional() via dynamic require(packageName).
+RUN node_modules/.bin/esbuild src/entrypoint-dvm.ts \
       --bundle \
       --platform=node \
       --target=node20 \
       --format=esm \
       --minify \
       --outfile=dist/entrypoint-dvm.js \
-      --banner:js="import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
+      "--banner:js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);" \
       --external:better-sqlite3 \
+      --external:@ardrive/turbo-sdk \
+      --external:arweave \
       --external:@libsql/client \
       --external:libsql \
       --external:ethers \
       --external:express \
       --external:@solana/kit \
       --external:@solana-program/token \
-      --external:@ardrive/turbo-sdk \
-      # Lazy-required by @toon-protocol/connector's mina-payment-channel
-      # settlement code via Promise.resolve().then(__importStar(require(...))).
-      # That code path is dead for Arweave-only DVM (kind:5094 doesn't
-      # touch Mina settlement) but esbuild still needs to resolve the
-      # require at build time. Mark external so the unresolved import is
-      # left in the bundle; runtime never reaches it.
       --external:@toon-protocol/mina-zkapp
 
-# -- Assemble minimal runtime directory --------------------------------------
-RUN mkdir -p /runtime/node_modules
+# Assemble minimal runtime directory
+RUN mkdir -p /runtime/node_modules && \
+    cp dist/entrypoint-dvm.js /runtime/ && \
+    printf '{"type":"module"}' > /runtime/package.json
 
-# Copy esbuild bundle
-RUN cp docker/dist/entrypoint-dvm.js /runtime/
-
-# ESM package.json (bundle uses import.meta.url via banner)
-RUN echo '{"type":"module"}' > /runtime/package.json
-
-# Stub for the memvid-node Rust NAPI addon. The bundler emits a relative
-# require('./index.cjs') for PetBrain (used by kind:5250 Dungeon DVM, NOT
-# kind:5094 Arweave). The path resolves against /app/, so we drop a stub
-# there. PetBrain throws only if actually invoked — so the kind:5094
-# Arweave path is unaffected, and operators who want kind:5250 know to
-# build a memvid-node-included image variant.
-RUN cat > /runtime/index.cjs <<'STUB'
-// Stub for /app/index.cjs — referenced by the bundled require('./index.cjs').
-// Real PetBrain (memvid-node Rust NAPI) isn't shipped in the Arweave-only
-// build to keep the runtime lean. If the kind:5250 Dungeon DVM tries to
-// instantiate PetBrain, this throws — kind:5094 Arweave never touches it.
-class PetBrain {
-  constructor() {
-    throw new Error('PetBrain (memvid-node) not in this DVM build — kind:5094 Arweave is supported, kind:5250 Dungeon needs the full image variant.');
-  }
-}
-module.exports = { PetBrain };
-STUB
-
-# Cherry-pick better-sqlite3 (native module) + its runtime deps (bindings, file-uri-to-path)
-RUN SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3) && \
-    BINDINGS_DIR=$(ls -d node_modules/.pnpm/bindings@*/node_modules/bindings) && \
-    FUTP_DIR=$(ls -d node_modules/.pnpm/file-uri-to-path@*/node_modules/file-uri-to-path) && \
-    mkdir -p /runtime/node_modules/better-sqlite3/build/Release && \
-    cp -r "$SQLITE_DIR/lib" /runtime/node_modules/better-sqlite3/ && \
-    cp "$SQLITE_DIR/build/Release/better_sqlite3.node" \
-       /runtime/node_modules/better-sqlite3/build/Release/ || { echo 'ERROR: better-sqlite3.node not found'; exit 1; } && \
-    cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/ && \
-    cp -r "$BINDINGS_DIR" /runtime/node_modules/ && \
-    cp -r "$FUTP_DIR" /runtime/node_modules/ || { echo 'ERROR: Failed to copy native module deps'; exit 1; }
-
-# Cherry-pick the remaining esbuild --external:* modules. Without Dungeon
-# DVM (kind:5250) the external list shrinks to: @ardrive/turbo-sdk (Arweave
-# bundler), @solana/kit + @solana-program/token (transitive from sdk), and
-# ethers/express (HTTP/RPC plumbing). All resolvable cleanly from pnpm's
-# hoist trees — no flat-store copy needed.
-RUN set -eux; \
-    mkdir -p /runtime/node_modules; \
-    for pkg in ethers express; do \
-      hoist=$(ls -d node_modules/.pnpm/${pkg}@*/node_modules 2>/dev/null | head -1); \
-      [ -n "$hoist" ] && cp -rL "$hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
-    done; \
-    # @ardrive/turbo-sdk hoist tree includes its transitive deps as siblings
-    ardrive_hoist=$(ls -d node_modules/.pnpm/@ardrive+turbo-sdk@*/node_modules 2>/dev/null | head -1); \
-    [ -n "$ardrive_hoist" ] && cp -rL "$ardrive_hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
-    # Turbo-sdk transitive deps in separate pnpm flat-store entries: copy
-    # the scoped-org hoist dirs that @ardrive/turbo-sdk 1.40.x needs.
-    for org in @cosmjs @ethersproject @ecies @dha-team @metamask @walletconnect @protobufjs @permaweb; do \
-      for store_dir in $(ls -d node_modules/.pnpm/${org}+*@*/node_modules 2>/dev/null); do \
-        cp -rL "$store_dir"/. /runtime/node_modules/ 2>/dev/null || true; \
-      done; \
-    done; \
-    # Unscoped transitive deps of turbo-sdk (and their transitive deps)
-    for pkg in arweave base64url base-x bs58 axios axios-retry avsc long protobufjs \
-                follow-redirects eventemitter3 lru-cache mnemonist pako hash-wasm \
-                warp-arbundles warp-contracts; do \
-      for hoist in $(ls -d node_modules/.pnpm/${pkg}@*/node_modules 2>/dev/null); do \
-        cp -rL "$hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
-      done; \
-    done; \
-    # @solana v3 packages
-    for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules 2>/dev/null); do \
-      cp -rL "$store_dir"/. /runtime/node_modules/ 2>/dev/null || true; \
-    done; \
-    sol_hoist=$(ls -d node_modules/.pnpm/@solana-program+token@*/node_modules 2>/dev/null | head -1); \
-    [ -n "$sol_hoist" ] && cp -rL "$sol_hoist"/. /runtime/node_modules/ 2>/dev/null || true
-
-# @libsql/client + libsql (toon-protocol/connector#79): connector 3.8.0 moved its
-# local settlement/claim SQLite store off better-sqlite3 to libsql, lazy-required
-# at runtime. The Arweave-only DVM reaches the connector's settlement path only
-# if value-bearing packets are claim-gated; install libsql via npm (robust
-# platform-binding resolution) so the subsystem initializes instead of silently
-# degrading. libsql ships a prebuilt linux-x64-musl NAPI binding for node:20-alpine.
-#
-# @ardrive/turbo-sdk (the Arweave upload SDK, externalized in esbuild): connector
-# 3.8.0's lockfile shift broke the manual pnpm-store cherry-pick of turbo-sdk's
-# deep transitive closure with a CASCADE of version mismatches —
-# `abitype` (viem) → `x402` (x402-fetch) → `mnemonist/lru-map.js` exports
-# (@permaweb/aoconnect) → `viem/chains eduChain` (wagmi needs viem ≥2.28 while a
-# pinned viem 2.23.2 didn't). Rather than chase each, install the WHOLE turbo-sdk
-# closure via npm at the ONE self-consistent version set turbo-sdk requires (its
-# viem carries both abitype AND eduChain; its mnemonist exports lru-map; x402 is
-# present), and let `cp` overwrite the mismatched cherry-picked copies — incl. the
-# viem that the externalized @solana/kit also resolves against. This is what makes
-# the in-container kind:5094 Turbo upload work (verified standalone: ephemeral-JWK
-# uploadFile → real Arweave txid). No explicit viem pin — turbo-sdk owns it.
-RUN cd /tmp && npm init -y && npm install --omit=dev @libsql/client@0.14.0 libsql@0.4.7 @ardrive/turbo-sdk@1.40.2 && \
+# Install runtime externals via npm (native build tools available in this stage).
+# @ardrive/turbo-sdk brings arweave as a transitive dep; @libsql/client + libsql
+# back the connector's claim SQLite store; better-sqlite3 backs the relay store.
+RUN cd /tmp && npm init -y && \
+    npm install --omit=dev \
+      better-sqlite3 \
+      @ardrive/turbo-sdk \
+      arweave \
+      @libsql/client \
+      libsql && \
     cp -rL /tmp/node_modules/. /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
     find /runtime/node_modules -name '*.js.map' -delete && \
     rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
 
-# -- Stage 2: Runtime --------------------------------------------------------
+# -- Stage 2: Runtime -------------------------------------------------------
 FROM node:20-alpine
 
-# Install runtime deps for native modules ONLY.
+# libstdc++ for native modules (better-sqlite3, libsql)
 RUN apk add --no-cache libstdc++
 
 WORKDIR /app
 
-# Create non-root user for security BEFORE copying files.
+# Non-root user for security, created before copying files
 RUN addgroup -g 1001 toon && \
     adduser -D -u 1001 -G toon toon && \
     mkdir -p /data && \
@@ -248,23 +93,19 @@ RUN addgroup -g 1001 toon && \
 # Copy minimal runtime from builder stage
 COPY --from=builder --chown=toon:toon /runtime ./
 
-# Environment variables (with defaults)
 ENV NODE_ENV=production
 ENV BLS_PORT=3400
 ENV HANDLER_PORT=3300
 
-# Expose ports:
-#   3300 - HTTP ILP handler (standalone mode: connector sends HTTP POST)
-#   3400 - BLS HTTP API (health endpoint)
+# 3300 — HTTP ILP handler (connector sends HTTP POST)
+# 3400 — BLS HTTP API (health endpoint)
 EXPOSE 3300 3400
 
-# Volume for persistent data (pet state SQLite database)
+# Volume for persistent data (claim SQLite database)
 VOLUME /data
 
-# Health check targets BLS port (3400)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 
-# Run as non-root user
 USER toon
 CMD ["node", "/app/entrypoint-dvm.js"]

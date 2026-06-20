@@ -4,8 +4,6 @@ The TOON Protocol **Arweave DVM node** — NIP-90 **kind:5094** blob storage. Bu
 
 Part of the **TOON Protocol** — pay-to-write Nostr over Interledger (ILP), split into per-team repos.
 
-> **Follow-ups:** this repo was carved from the monorepo `docker/` aggregator and still contains the other images' build contexts — trim to dvm-only (keep `Dockerfile.dvm` + `src/entrypoint-dvm.ts` + shared helpers). Add the image-publish workflow (carve the dvm job from `publish-townhouse-images.yml`).
-
 ## Build
 This builds a Docker image, not an npm package:
 ```
