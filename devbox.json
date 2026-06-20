@@ -1,0 +1,6 @@
+{
+  "packages": ["nodejs@20"],
+  "shell": {
+    "init_hook": ["corepack enable && corepack prepare pnpm@8.15.0 --activate"]
+  }
+}
