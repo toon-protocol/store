@@ -74,7 +74,35 @@ jobs:
             type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
             type=sha,prefix=sha-
 
-      - name: Build and push
+      # Pass 1: build only — load into local daemon for smoke test (no push yet)
+      - name: Build (no push)
+        id: build-local
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: Dockerfile.dvm
+          platforms: linux/amd64
+          load: true
+          tags: smoke-test-local:latest
+          cache-from: type=gha,scope=store-linux-amd64
+          cache-to: type=gha,mode=max,scope=store-linux-amd64
+
+      - name: Smoke-test DVM image (pre-push)
+        run: |
+          set -euo pipefail
+          IMG="smoke-test-local:latest"
+          docker run --rm --entrypoint sh "${IMG}" -c \
+            "test -s '/app/entrypoint-dvm.js'" \
+            || { echo "FAIL: /app/entrypoint-dvm.js missing or empty"; exit 1; }
+          NODE_VERSION=$(docker run --rm --entrypoint node "${IMG}" --version)
+          case "${NODE_VERSION}" in
+            v20.*) ;;
+            *) echo "FAIL: expected node v20.x, got ${NODE_VERSION}"; exit 1 ;;
+          esac
+          echo "/app/entrypoint-dvm.js present + ${NODE_VERSION}"
+
+      # Pass 2: push only — BuildKit GHA cache makes this near-instant (no rebuild)
+      - name: Push
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
@@ -85,7 +113,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=store-linux-amd64
-          cache-to: type=gha,mode=max,scope=store-linux-amd64
 
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3.9.1
@@ -95,19 +122,3 @@ jobs:
           COSIGN_YES: 'true'
         run: |
           cosign sign ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
-
-      - name: Smoke-test DVM image (entrypoint + node binary)
-        run: |
-          set -euo pipefail
-          IMG="${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
-          echo "Verifying DVM image: ${IMG}"
-          docker run --rm --entrypoint sh "${IMG}" -c \
-            "test -s '/app/entrypoint-dvm.js'" \
-            || { echo "FAIL: /app/entrypoint-dvm.js missing or empty"; exit 1; }
-          NODE_VERSION=$(docker run --rm --entrypoint node "${IMG}" --version)
-          echo "node --version: ${NODE_VERSION}"
-          case "${NODE_VERSION}" in
-            v20.*) ;;
-            *) echo "FAIL: expected node v20.x, got ${NODE_VERSION}"; exit 1 ;;
-          esac
-          echo "✅ /app/entrypoint-dvm.js present + ${NODE_VERSION}"
