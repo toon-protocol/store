@@ -12,10 +12,6 @@ import type * as SdkModule from '@toon-protocol/sdk';
 
 // ── Mock heavy deps that would pull in WASM/native modules ──────────────────
 
-vi.mock('@toon-protocol/pet-dvm', () => ({
-  createDungeonDvmHandler: vi.fn(() => vi.fn()),
-}));
-
 vi.mock('@toon-protocol/sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof SdkModule>();
   // Use a constructable class for TurboUploadAdapter so `new` works in tests.
