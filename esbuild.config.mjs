@@ -1,10 +1,9 @@
 /**
- * esbuild configuration for TOON Docker entrypoints.
+ * esbuild configuration for the Arweave DVM entrypoint.
  *
- * Bundles entrypoint-sdk.ts and attestation-server.ts into self-contained ESM
- * files. Native modules (better-sqlite3) and dynamically-required packages
- * (ethers, express) are marked external since they use variable `require()`
- * calls in the connector's `requireOptional()` that esbuild can't resolve.
+ * Bundles entrypoint-dvm.ts into a self-contained ESM file.
+ * @ardrive/turbo-sdk is marked external because the DVM dynamically imports
+ * it (import('@ardrive/turbo-sdk/node')) at runtime.
  *
  * Usage: node esbuild.config.mjs
  */
@@ -13,8 +12,6 @@ import * as esbuild from 'esbuild';
 
 const result = await esbuild.build({
   entryPoints: [
-    'src/entrypoint-sdk.ts',
-    'src/attestation-server.ts',
     'src/entrypoint-dvm.ts',
   ],
   bundle: true,
@@ -26,20 +23,12 @@ const result = await esbuild.build({
   sourcemap: false,
   metafile: true,
 
-  // Packages that cannot be statically bundled:
-  // - better-sqlite3: native .node binary (used by relay SqliteEventStore + connector claims)
-  // - ethers: dynamic require(packageName) in connector's requireOptional()
-  // - express: dynamic require(packageName) in connector's AdminServer/HealthServer
-  // - fastify: deep dynamic-require graph (avvio, find-my-way); ship as flat
-  //   node_modules so the toon-client entrypoint can require() it at runtime
-  // - @noble/curves: dynamic import inside packages/client/dist causes esbuild
-  //   to fail resolving the subpath export in Docker's pnpm store layout
-  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'o1js', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves'],
+  // @ardrive/turbo-sdk and arweave are dynamically imported at runtime;
+  // better-sqlite3 is a native binary that cannot be statically bundled.
+  external: ['@ardrive/turbo-sdk', 'arweave', 'better-sqlite3'],
 
-  // The connector (@crosstown/connector) is CJS and its requireOptional() uses
-  // require(packageName). When esbuild bundles CJS into ESM output, these
-  // dynamic require() calls need a working require function. This banner
-  // provides one via Node's createRequire().
+  // Some CJS modules in the dependency graph need a working require() in ESM
+  // output. This banner provides one via Node's createRequire().
   banner: {
     js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url);`,
   },

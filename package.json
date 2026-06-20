@@ -2,39 +2,21 @@
   "name": "@toon-protocol/store",
   "version": "0.2.0",
   "private": true,
-  "description": "Docker entrypoint for toon containers",
+  "description": "Arweave DVM container for the TOON Protocol (kind:5094 blob storage)",
   "type": "module",
-  "main": "dist/entrypoint-sdk.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/entrypoint-sdk.js",
     "test": "vitest run"
   },
   "dependencies": {
-    "@fastify/cors": "^10.0.0",
     "@hono/node-server": "^1.13.7",
-    "@noble/curves": "^1.8.1",
-    "@toon-protocol/bls": "^1.2.1",
-    "@toon-protocol/client": "^0.9.1",
-    "@toon-protocol/connector": "^3.10.0",
     "@toon-protocol/core": "^1.4.1",
-    "@toon-protocol/mill": "^0.1.0",
-    "@toon-protocol/relay": "^1.3.1",
     "@toon-protocol/sdk": "^0.5.0",
-    "ajv": "^8.18.0",
-    "ajv-formats": "^3.0.1",
-    "bs58": "^6.0.0",
-    "fastify": "^5.0.0",
-    "hono": "^4.11.10",
-    "nostr-tools": "^2.10.4",
-    "viem": "^2.47.0",
-    "ws": "^8.18.0"
+    "hono": "^4.11.10"
   },
   "devDependencies": {
-    "@types/dockerode": "^3.3.0",
     "@types/node": "^20.11.0",
-    "@types/ws": "^8.5.10",
     "esbuild": "^0.24.0",
     "typescript": "^5.3.0",
     "vitest": "^1.0.0"

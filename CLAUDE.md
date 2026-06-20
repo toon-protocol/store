@@ -4,7 +4,7 @@ The TOON Protocol **Arweave DVM node** — NIP-90 **kind:5094** blob storage. Bu
 
 Part of the **TOON Protocol** — pay-to-write Nostr over Interledger (ILP), split into per-team repos.
 
-> **Follow-ups:** this repo was carved from the monorepo `docker/` aggregator and still contains the other images' build contexts — trim to dvm-only (keep `Dockerfile.dvm` + `src/entrypoint-dvm.ts` + shared helpers). Add the image-publish workflow (carve the dvm job from `publish-townhouse-images.yml`).
+> **Follow-ups:** Add the image-publish workflow (carve the dvm job from `publish-townhouse-images.yml`). Fix `Dockerfile.dvm` to build standalone (it still references monorepo paths that don't exist here).
 
 ## Build
 This builds a Docker image, not an npm package:
@@ -23,5 +23,5 @@ Cross-cutting agent skills, docs, and the canonical project context live in **[t
 Canonical rules/decisions: `toon-meta` → `_bmad-output/project-context.md`.
 
 ## Cross-repo dependencies
-- Consumes `@toon-protocol/{core,sdk,bls}` from **npm** (pinned semver) — the Arweave handler lives in `sdk`.
+- Consumes `@toon-protocol/{core,sdk}` from **npm** (pinned semver) — the Arweave handler lives in `sdk`.
 - The ILP payment engine is the separate **[toon-protocol/connector](https://github.com/toon-protocol/connector)** repo. The DVM receives ILP packets from the connector via HTTP and trusts they were already validated; **claim validation lives ONLY in the connector.**
