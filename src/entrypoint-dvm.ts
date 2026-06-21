@@ -40,7 +40,7 @@
 import { readFileSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
-import { createNode, type ToonNode } from '@toon-protocol/sdk';
+import { createNode, type ServiceNode } from '@toon-protocol/sdk';
 import type { DvmHealthResponse } from '@toon-protocol/sdk';
 import {
   createArweaveDvmHandler,
@@ -50,7 +50,6 @@ import {
   ChunkManager,
 } from '@toon-protocol/sdk';
 import type { NodeConfig } from '@toon-protocol/sdk';
-import type { UnsignedEvent } from '@toon-protocol/core';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -165,6 +164,7 @@ export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
   legacyToken: string | undefined
 ): Promise<CreateTurboAdapterResult> {
+  // @ts-expect-error — @ardrive/turbo-sdk is a transitive peer dep; types not resolvable as a phantom dep
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
   // Treat an empty OR whitespace-only env var as ABSENT, not "present but
@@ -229,9 +229,8 @@ export async function createTurboAdapter(
       );
     }
     const { TurboFactory } = await importTurbo();
-    const client = TurboFactory.authenticated({
-      privateKey: jwk as Parameters<typeof TurboFactory.authenticated>[0]['privateKey'],
-    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = TurboFactory.authenticated({ privateKey: jwk as any });
     const arweaveAddress = await arweaveAddressFromJwk(jwk);
     return {
       adapter: new TurboUploadAdapter(client),
@@ -257,6 +256,9 @@ export async function createTurboAdapter(
   };
 }
 
+// --- DVM config extends NodeConfig with DVM-managed fields not in the SDK ---
+type DvmConfig = Partial<NodeConfig> & { blsPort?: number };
+
 // --- Raw config shape ---
 interface DvmRawConfig {
   secretKey?: string; // hex
@@ -271,8 +273,8 @@ interface DvmRawConfig {
 }
 
 // --- Parse and normalize config ---
-function parseRawConfig(raw: DvmRawConfig): Partial<NodeConfig> {
-  const cfg: Partial<NodeConfig> = {};
+function parseRawConfig(raw: DvmRawConfig): DvmConfig {
+  const cfg: DvmConfig = {};
 
   if (raw.secretKey) {
     if (!/^[0-9a-fA-F]{64}$/.test(raw.secretKey)) {
@@ -340,8 +342,8 @@ function loadDvmConfig(): DvmRawConfig {
 }
 
 // --- Apply env var overlays to config ---
-export function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
-  const out = { ...cfg };
+export function applyEnvOverlay(cfg: DvmConfig): DvmConfig {
+  const out: DvmConfig = { ...cfg };
   const env = process.env;
 
   // Secret key (from NODE_NOSTR_SECRET_KEY env var)
@@ -423,7 +425,7 @@ export function applyEnvOverlay(cfg: Partial<NodeConfig>): Partial<NodeConfig> {
 }
 
 // --- Publish event callback (no-op for standalone DVM) ---
-async function _noopPublish(event: UnsignedEvent): Promise<void> {
+async function _noopPublish(event: { kind?: number; id?: string }): Promise<void> {
   // In standalone mode, there's no relay WebSocket connection.
   // Events are either:
   // - Not published (Arweave DVM returns txId directly)
@@ -433,8 +435,16 @@ async function _noopPublish(event: UnsignedEvent): Promise<void> {
   );
 }
 
+function buildNoCreditsMessage(address: string | undefined): string {
+  const addr = address ?? 'unknown';
+  return (
+    `Arweave wallet ${addr} has zero credits. Uploads will fail until credits are added. ` +
+    `Fund at https://turbo.ardrive.io/ (arweave address: ${addr})`
+  );
+}
+
 // --- Main entrypoint ---
-async function main(): Promise<ToonNode> {
+async function main(): Promise<ServiceNode> {
   console.log('[DVM Entrypoint] Starting DVM node...');
 
   // Load JSON config from env or file, then overlay env vars
@@ -535,7 +545,6 @@ async function main(): Promise<ToonNode> {
     secretKey: config.secretKey,
     connectorUrl: config.connectorUrl,
     handlerPort: config.handlerPort,
-    blsPort: config.blsPort,
     basePricePerByte: config.basePricePerByte,
     kindPricing: config.kindPricing,
     devMode: process.env['NODE_ENV'] !== 'production',
@@ -555,7 +564,7 @@ async function main(): Promise<ToonNode> {
   await node.start();
 
   // BLS health server on blsPort (3400 default) — started after node.start()
-  const pubkey = node.identity?.pubkey;
+  const pubkey = node.pubkey;
   const safePubkey = typeof pubkey === 'string' ? pubkey : 'unknown';
   const startedAt = Date.now();
   const blsPort = config.blsPort ?? 3400;
