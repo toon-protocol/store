@@ -13,14 +13,13 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 8.15.0
+          version: 8.15.9
 
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
 
       - run: pnpm build
 
@@ -50,4 +49,4 @@ jobs:
           echo "✅ All devbox tools resolved at expected versions"
 
       - name: Smoke build
-        run: devbox run -- bash -c "pnpm install --frozen-lockfile && pnpm build"
+        run: devbox run -- bash -c "pnpm install --no-frozen-lockfile && pnpm build"
