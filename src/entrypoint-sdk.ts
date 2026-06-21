@@ -15,13 +15,10 @@
  * - SETTLEMENT_TOKEN_ADDRESS: ERC-20 token contract address
  */
 
-import { createHash } from 'node:crypto';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import {
   createNode,
-  createSwapHandler,
-  base58Encode,
   type ServiceNode,
 } from '@toon-protocol/sdk';
 import { createEventStorageHandler } from '@toon-protocol/town';
@@ -44,7 +41,6 @@ import type {
   BootstrapEvent,
   IlpPeerInfo,
   EmbeddableConnectorLike,
-  SwapPair,
   ChainProviderConfigEntry,
 } from '@toon-protocol/core';
 import {
@@ -59,19 +55,6 @@ import {
   TurboUploadAdapter,
   ChunkManager,
 } from '@toon-protocol/sdk';
-import {
-  deriveMillKeys,
-  MillInventory,
-  MillChannelState,
-  MultiChainClaimIssuer,
-  EvmPaymentChannelSigner,
-  SolanaPaymentChannelSigner,
-  MinaPaymentChannelSigner,
-} from '@toon-protocol/mill';
-import type {
-  PaymentChannelSigner,
-  MillChainKind,
-} from '@toon-protocol/mill';
 import { parseConfig } from './shared.js';
 
 // ---------- Connector Config from Env ----------
@@ -91,9 +74,6 @@ interface ConnectorEnv {
   minaKeyId: string | undefined;
   // NIP-59 env vars
   nip59Enabled: boolean;
-  // Mill swap handler env vars
-  millEnabled: boolean;
-  millMnemonic: string | undefined;
 }
 
 function parseConnectorEnv(): ConnectorEnv {
@@ -114,9 +94,6 @@ function parseConnectorEnv(): ConnectorEnv {
     minaKeyId: env['MINA_KEY_ID'] || undefined,
     // NIP-59
     nip59Enabled: env['NIP59_ENABLED'] === 'true',
-    // Mill swap handler
-    millEnabled: env['MILL_ENABLED'] === 'true',
-    millMnemonic: env['MILL_MNEMONIC'] || undefined,
   };
 }
 
@@ -536,249 +513,6 @@ async function main(): Promise<void> {
     console.log('[Setup] Arweave DVM handler registered for kind:5094');
   }
 
-  // --- Mill swap handler (kind:1059 gift-wrapped swap packets) ---
-  // Story 12.10: Wire swap handler support when MILL_ENABLED=true and
-  // MILL_MNEMONIC is set. This enables Docker peers to act as Mills,
-  // processing NIP-59 gift-wrapped swap requests and issuing signed
-  // payment-channel claims. References packages/mill/src/mill.ts
-  // startMill() for the wiring pattern.
-  let millSwapPairs: SwapPair[] | undefined;
-  if (connectorEnv.millEnabled && connectorEnv.millMnemonic) {
-    try {
-      // 1. Parse supported chains from settlement info
-      const supportedChains = config.settlementInfo?.supportedChains ?? [];
-      if (supportedChains.length === 0) {
-        console.warn('[Mill] MILL_ENABLED=true but no SUPPORTED_CHAINS configured; skipping swap handler');
-      } else {
-        // 2. Determine chain families needed for key derivation
-        const chainFamilies = new Set<MillChainKind>();
-        for (const chain of supportedChains) {
-          if (chain.startsWith('evm:')) chainFamilies.add('evm');
-          else if (chain.startsWith('solana:')) chainFamilies.add('solana');
-          else if (chain.startsWith('mina:')) chainFamilies.add('mina');
-        }
-
-        // 3. Derive Mill keys via BIP-44 (same pattern as startMill())
-        const millKeys = await deriveMillKeys({
-          mnemonic: connectorEnv.millMnemonic,
-          chains: [...chainFamilies],
-        });
-        console.log(`[Mill] Derived keys for chain families: ${[...chainFamilies].join(', ')}`);
-
-        // 4. Build swap pairs — all permutations of supported chains (1:1 rate)
-        millSwapPairs = [];
-        for (const fromChain of supportedChains) {
-          for (const toChain of supportedChains) {
-            millSwapPairs.push({
-              from: { assetCode: config.assetCode, assetScale: config.assetScale, chain: fromChain },
-              to: { assetCode: config.assetCode, assetScale: config.assetScale, chain: toChain },
-              rate: '1',
-            });
-          }
-        }
-
-        // 5. Build payment-channel signers per chain family (shared across chains
-        //    of the same family, per startMill() AC-4 phase 4 pattern)
-        const signers: Record<string, PaymentChannelSigner> = {};
-        const signerAddresses: Record<string, string> = {};
-        let sharedEvmSigner: EvmPaymentChannelSigner | undefined;
-        let sharedSolanaSigner: SolanaPaymentChannelSigner | undefined;
-        let sharedMinaSigner: MinaPaymentChannelSigner | undefined;
-
-        for (const chain of supportedChains) {
-          if (chain.startsWith('evm:') && millKeys.evm) {
-            sharedEvmSigner ??= new EvmPaymentChannelSigner({
-              chain,
-              privateKey: millKeys.evm.privateKey,
-            });
-            signers[chain] = sharedEvmSigner;
-            signerAddresses[chain] = millKeys.evm.address.toLowerCase();
-          } else if (chain.startsWith('solana:') && millKeys.solana) {
-            sharedSolanaSigner ??= new SolanaPaymentChannelSigner({
-              chain,
-              privateKey: millKeys.solana.privateKey,
-            });
-            signers[chain] = sharedSolanaSigner;
-            signerAddresses[chain] = base58Encode(millKeys.solana.publicKey);
-          } else if (chain.startsWith('mina:') && millKeys.mina) {
-            sharedMinaSigner ??= new MinaPaymentChannelSigner({
-              chain,
-              privateKey: millKeys.mina.privateKey,
-              publicKey: millKeys.mina.publicKey,
-            });
-            signers[chain] = sharedMinaSigner;
-            signerAddresses[chain] = millKeys.mina.publicKey;
-          }
-        }
-
-        // 6. Initialize inventory (bootstrap with zero balance — E2E tests
-        //    fund channels explicitly)
-        const inventoryInit: Record<string, { available: bigint; total: bigint }> = {};
-        for (const pair of millSwapPairs) {
-          const key = `${pair.to.assetCode}:${pair.to.chain}`;
-          if (!inventoryInit[key]) {
-            inventoryInit[key] = { available: 1_000_000_000n, total: 1_000_000_000n };
-          }
-        }
-        const inventory = new MillInventory({ balances: inventoryInit });
-
-        // 7. Initialize channel state (empty — channels are established dynamically)
-        const channelState = new MillChannelState({
-          channels: {},
-          logger: { warn: console.warn },
-        });
-
-        // 8. Create MultiChainClaimIssuer
-        const claimIssuer = new MultiChainClaimIssuer({
-          inventory,
-          signers,
-          channelState,
-          signerAddresses,
-          logger: {
-            debug: console.debug,
-            info: console.info,
-            warn: console.warn,
-            error: console.error,
-          },
-        });
-
-        // 9. Create swap handler and register on kind:1059 (NIP-59 gift-wrap)
-        const swapHandler = createSwapHandler({
-          recipientSecretKey: config.secretKey,
-          swapPairs: millSwapPairs,
-          claimIssuer,
-          logger: {
-            debug: console.debug,
-            info: console.info,
-            warn: console.warn,
-            error: console.error,
-          },
-        });
-        node.on(1059, swapHandler);
-        console.log(`[Mill] Swap handler registered for kind:1059 (${millSwapPairs.length} swap pairs across ${supportedChains.length} chains)`);
-
-        // Story 12.10 — sync the connector's payment channels into the Mill's
-        // channel state so the swap handler can issue claims on dynamically
-        // established channels (sender opens channel via BTP claim handshake;
-        // Mill must learn about it before it can `reserve()`).
-        //
-        // We poll the connector's channelManager every 250ms during the test
-        // window — packets arrive within ~30ms of channel registration so
-        // longer intervals miss the initial PREPAREs. Sync is idempotent —
-        // `provisionChannel` no-ops if `(assetCode, chain, channelId)` is
-        // already tracked, so concurrent reserve()/poll() is safe.
-        //
-        // Chain-id mapping: the connector identifies EVM chains as
-        // `evm:${chainId}` (e.g. `evm:31337`) while swap pairs use the more
-        // specific `evm:${family}:${chainId}` (e.g. `evm:base:31337`). We
-        // register each connector channel under EVERY swap-pair chain string
-        // whose `evm:`-suffix matches — that way the swap handler's
-        // `(asset, chain, sender)` lookup hits regardless of which precise
-        // chain alias the streamSwap pair declared.
-        const swapPairChains = new Set<string>(supportedChains);
-        function mapConnectorChainToSwapChains(connectorChain: string): string[] {
-          if (swapPairChains.has(connectorChain)) return [connectorChain];
-          const matches: string[] = [];
-          for (const c of swapPairChains) {
-            // Match by trailing chain-id segment (e.g., 31337) and family
-            // prefix (e.g., 'evm:'). 'evm:31337' should match 'evm:base:31337'.
-            if (
-              connectorChain &&
-              c.split(':')[0] === connectorChain.split(':')[0] &&
-              c.endsWith(`:${connectorChain.split(':').pop()}`)
-            ) {
-              matches.push(c);
-            }
-          }
-          return matches;
-        }
-
-        const channelSyncInterval = setInterval(() => {
-          try {
-            const cm = (
-              connector as unknown as {
-                channelManager: { getAllChannels(): {
-                  channelId: string;
-                  chain: string;
-                  status: string;
-                }[] } | null;
-              }
-            ).channelManager;
-            if (!cm) return;
-            for (const meta of cm.getAllChannels()) {
-              if (meta.status !== 'open') continue;
-              const targetChains = mapConnectorChainToSwapChains(meta.chain);
-              for (const chain of targetChains) {
-                channelState.provisionChannel({
-                  assetCode: config.assetCode,
-                  chain,
-                  channelId: meta.channelId,
-                });
-              }
-            }
-          } catch (err) {
-            console.warn('[Mill] channel-sync error:', err instanceof Error ? err.message : err);
-          }
-        }, 250);
-        // Best-effort: do not block shutdown on the interval; node will exit
-        // when the BLS server closes regardless.
-        channelSyncInterval.unref?.();
-
-        // Story 12.10 AC-7 — seed synthetic outbound Solana channels into
-        // Mill's channel state. Unlike EVM (where the connector's
-        // channelManager tracks channels established via BTP claim handshake),
-        // outbound Solana channels are not auto-discovered by the connector
-        // in the SDK E2E topology — there's no real cross-chain settlement
-        // path between peer1 and an arbitrary Solana recipient. Without a
-        // provisioned channel, the swap handler hits MillChannelState.reserve()
-        // for `solana:devnet` and throws UNSUPPORTED_CHAIN.
-        //
-        // The synthetic channelId is the Mill's Solana public key encoded as
-        // base58 — it decodes to exactly 32 bytes, which buildSettlementTx()
-        // requires (`Solana channelId must decode to 32 bytes`). Real Solana
-        // channels would derive a PDA via [b"channel", min, max, mint], but
-        // the E2E settlement-bundle test runs with `verifySignatures: false`
-        // so the synthetic ID flows through without on-chain validation.
-        //
-        // Mina is intentionally skipped: `buildMinaSettlementTx()` is still
-        // a stub that throws UNSUPPORTED_CHAIN unconditionally (Story 12.6
-        // AC-9 deferral), so seeding a Mina channel here would only let the
-        // swap-handler get further before hitting the same stub. Re-enable
-        // when the Mina settlement path lands.
-        // Seed a POOL of unbound channels. Each test run uses a new mill
-        // instance with a unique sender pubkey, and MillChannelState binds a
-        // sender stickily on first use. With one seeded channel and N test
-        // senders against a long-running peer (full mill e2e suite has ≥6),
-        // sender 2..N starve. Pool size 20 is generous headroom for
-        // pair-matrix + standalone tests in one container lifetime.
-        const SYNTHETIC_SOLANA_POOL_SIZE = 20;
-        for (const chain of supportedChains) {
-          if (!chain.startsWith('solana:')) continue;
-          if (!millKeys.solana) continue;
-          for (let i = 0; i < SYNTHETIC_SOLANA_POOL_SIZE; i++) {
-            const indexBuf = Buffer.alloc(4);
-            indexBuf.writeUInt32BE(i, 0);
-            const channelIdBytes = createHash('sha256')
-              .update(millKeys.solana.publicKey)
-              .update(indexBuf)
-              .digest();
-            const channelId = base58Encode(channelIdBytes);
-            channelState.provisionChannel({
-              assetCode: config.assetCode,
-              chain,
-              channelId,
-            });
-          }
-          console.log(
-            `[Mill] Seeded ${SYNTHETIC_SOLANA_POOL_SIZE} synthetic outbound Solana channels for ${chain}`
-          );
-        }
-      }
-    } catch (error) {
-      console.error('[Mill] Failed to initialize swap handler:', error);
-    }
-  }
-
   // --- Bootstrap lifecycle ---
   const bootstrapService = new BootstrapService(
     {
@@ -1012,10 +746,6 @@ async function main(): Promise<void> {
       ...(config.settlementInfo?.tokenNetworks && {
         tokenNetworks: config.settlementInfo.tokenNetworks,
       }),
-      // Story 12.10: include swap pairs in kind:10032 announcement when Mill is enabled
-      ...(millSwapPairs && millSwapPairs.length > 0 && {
-        swapPairs: millSwapPairs,
-      }),
     };
 
     // Publish own ILP info to local relay
@@ -1023,9 +753,6 @@ async function main(): Promise<void> {
       const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
       eventStore.store(ilpInfoEvent);
       console.log('[Bootstrap] Published own ILP info to local relay');
-      if (millSwapPairs && millSwapPairs.length > 0) {
-        console.log(`[Bootstrap] kind:10032 includes ${millSwapPairs.length} swap pairs`);
-      }
     } catch (error) {
       console.warn('[Bootstrap] Failed to publish ILP info:', error);
     }
