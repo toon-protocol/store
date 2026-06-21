@@ -1,17 +1,17 @@
-# Connector config for townhouse dev stack (Story 21.8.0 / 21.10)
+# Connector config for hub dev stack (Story 21.8.0 / 21.10)
 #
 # Serves as the standalone ILP connector hub for the dev topology:
-#   connector ← town-01, town-02, mill-01, mill-02, dvm-01
+#   connector ← hub-01, hub-02, swap-01, swap-02, dvm-01
 #
 # Child nodes connect TO this connector's BTP server on port 3000.
 # No-auth mode is enabled (BTP_ALLOW_NOAUTH default = true) for dev.
 #
-# Admin API on port 9401 is used by Townhouse's ConnectorAdminClient.
+# Admin API on port 9401 is used by the hub's ConnectorAdminClient.
 # Health check on port 9401 (admin server exposes /health).
 #
 # DEV ONLY — not for production use.
 
-nodeId: g.townhouse.dev
+nodeId: g.hub.dev
 btpServerPort: 3000
 healthCheckPort: 8080
 environment: development
