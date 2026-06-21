@@ -26,7 +26,7 @@ node --version    # v22.x
 pnpm --version    # 8.15.x
 
 # Run the standard targets (defined as devbox scripts)
-devbox run build     # pnpm install --no-frozen-lockfile && pnpm build
+devbox run build     # pnpm install --frozen-lockfile && pnpm build
 devbox run typecheck # pnpm typecheck
 devbox run test      # pnpm test
 ```
