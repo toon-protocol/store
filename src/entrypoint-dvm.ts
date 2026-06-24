@@ -56,7 +56,7 @@ import type { NodeConfig } from '@toon-protocol/sdk';
 // kind:10032 builder (signs the peer-info event). Published as a PAID write to
 // the relay so clients can discover + pay g.proxy.store — the relay rejects
 // unpaid WS writes, so this rides the connector and the store pays the fee.
-import { buildIlpPeerInfoEvent, encodeEventToToon, type IlpPeerInfo } from '@toon-protocol/core';
+import { buildIlpPeerInfoEvent, type IlpPeerInfo } from '@toon-protocol/core';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -647,7 +647,17 @@ async function main(): Promise<ServiceNode> {
     const publishPeerInfo = async (): Promise<void> => {
       try {
         const evt = buildIlpPeerInfoEvent(ilpInfo, config.secretKey!, { ttlSeconds });
-        const dataB64 = Buffer.from(encodeEventToToon(evt)).toString('base64');
+        // The relay is an HTTP app (POST /write {event}) fronted by the connector
+        // payment-proxy (HttpProxyHandler), which replays a LITERAL HTTP request.
+        // So the packet data is that request — not a raw TOON event.
+        const writeBody = JSON.stringify({ event: evt });
+        const httpReq =
+          'POST /write HTTP/1.1\r\n' +
+          'Content-Type: application/json\r\n' +
+          `Content-Length: ${Buffer.byteLength(writeBody, 'utf8')}\r\n` +
+          '\r\n' +
+          writeBody;
+        const dataB64 = Buffer.from(httpReq, 'utf8').toString('base64');
         const resp = await fetch(`${adminUrl}/admin/ilp/send`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
