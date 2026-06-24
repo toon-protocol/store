@@ -1,49 +1,37 @@
 /**
- * DVM Node Entrypoint Adapter (Story 21.7 + 21.12)
+ * Store entrypoint — NIP-90 kind:5094 Arweave blob storage, deployed BEHIND the
+ * connector (the connector is the front-of-app payment proxy).
  *
- * Maps Townhouse orchestrator environment variables to DVM Node config,
- * loads JSON config from DVM_CONFIG_JSON or DVM_CONFIG_PATH,
- * registers the Arweave DVM handler (kind:5094),
- * and invokes createNode() in standalone HTTP mode.
+ * Loads config from STORE_CONFIG_JSON / STORE_CONFIG_PATH (or env vars), builds
+ * the Arweave upload adapter, and serves the payment-oblivious `POST /store`
+ * backend (see ./store-backend) that the connector reverse-proxies to via
+ * RouteTermination. The store contains NO ILP / connector-dialing / settlement
+ * logic — payment is enforced upstream by the connector.
  *
- * Story 21.12 additions:
- *   - Hono BLS health server on blsPort (3400) exposing DvmHealthResponse
- *   - Job-counter shim wrapping handlers (5-minute sliding window)
- *   - KIND_PRICING_<kind>=<value> env-var support
- *
- * This is compiled via esbuild into a single ESM bundle for the Docker
- * runtime stage.
+ * This is compiled via esbuild into a single ESM bundle for the Docker runtime.
  *
  * Environment variable mapping:
- *   DVM_CONFIG_JSON       -> JSON config (mutually exclusive with DVM_CONFIG_PATH)
- *   DVM_CONFIG_PATH      -> Path to JSON config file
+ *   STORE_CONFIG_JSON     -> JSON config (mutually exclusive with STORE_CONFIG_PATH)
+ *   STORE_CONFIG_PATH     -> Path to JSON config file
  *   NODE_NOSTR_SECRET_KEY -> config.secretKey (64-char hex)
- *   BLS_PORT             -> config.blsPort (default: 3400)
- *   HANDLER_PORT         -> config.handlerPort (default: 3300)
- *   CONNECTOR_URL        -> config.connectorUrl (standalone connector HTTP URL)
- *   ILP_ADDRESS          -> config.ilpAddress (advertised kind:10032 address;
- *                          MUST match the connector route's ilpAddress, e.g.
- *                          g.proxy.store — else discovery and routing disagree)
- *   FEE_PER_JOB         -> config.basePricePerByte (per-job pricing)
- *   KIND_PRICING_<kind>  -> config.kindPricing[kind] (per-kind override)
- *   DVM_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of derived RSA JWK (Phase 4)
- *                          Piped in by the host orchestrator via WalletManager.
- *                          Treated as secret — never logged.
- *   TURBO_TOKEN         -> Legacy fallback: raw JSON JWK for Arweave DVM
- *                          uploads. Still honored for backward compat.
+ *   BLS_PORT              -> config.blsPort (default: 3400; health endpoint)
+ *   HANDLER_PORT          -> config.handlerPort (default: 3300; POST /store backend)
+ *   FEE_PER_JOB           -> config.basePricePerByte (informational; the connector
+ *                            enforces the flat route price)
+ *   KIND_PRICING_<kind>   -> config.kindPricing[kind] (per-kind override)
+ *   STORE_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of an RSA JWK Arweave wallet.
+ *                            Treated as secret — never logged.
+ *   TURBO_TOKEN           -> Legacy fallback: raw JSON JWK for Arweave uploads.
  *
- * Key differences from Town/Mill entries:
- * - Uses standalone HTTP mode (connectorUrl + handlerPort) NOT embedded BTP
- * - Registers ONLY kind:5094 Arweave DVM. kind:5250 Dungeon DVM was removed
- *   from this image (operator decision: this DVM is Arweave-only) so the
- *   bundle no longer pulls in pet-dvm / memvid-node / o1js / mina-signer.
- * - Creates ArweaveUploadAdapter from TURBO_TOKEN for blob storage DVM
+ * Registers ONLY kind:5094 Arweave blob storage. kind:5250 Dungeon DVM was
+ * removed from this image (Arweave-only) so the bundle no longer pulls in
+ * pet-dvm / memvid-node / o1js / mina-signer.
  */
 
 import { readFileSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
-import { createNode, type ServiceNode } from '@toon-protocol/sdk';
+import { getPublicKey } from 'nostr-tools/pure';
 import type { DvmHealthResponse } from '@toon-protocol/sdk';
 import {
   createArweaveDvmHandler,
@@ -53,10 +41,7 @@ import {
   ChunkManager,
 } from '@toon-protocol/sdk';
 import type { NodeConfig } from '@toon-protocol/sdk';
-// kind:10032 builder (signs the peer-info event). Published as a PAID write to
-// the relay so clients can discover + pay g.proxy.store — the relay rejects
-// unpaid WS writes, so this rides the connector and the store pays the fee.
-import { buildIlpPeerInfoEvent, type IlpPeerInfo } from '@toon-protocol/core';
+import { startStoreBackend, type StoreBackend, type StoreHandler } from './store-backend.js';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -176,7 +161,7 @@ export async function createTurboAdapter(
 
   // Treat an empty OR whitespace-only env var as ABSENT, not "present but
   // invalid" (#146). The deployed dvm container sets `TURBO_TOKEN=""` (len 0)
-  // and has no DVM_ARWEAVE_JWK_B64; a bare `if (legacyToken)` already skips ""
+  // and has no STORE_ARWEAVE_JWK_B64; a bare `if (legacyToken)` already skips ""
   // (falsy), but a stray-whitespace value (e.g. a trailing newline from a
   // here-doc env file) would otherwise be truthy and drive us into the JWK
   // JSON.parse path → a hard throw instead of the free-tier fallback. Normalize
@@ -185,14 +170,14 @@ export async function createTurboAdapter(
   const jwkB64 = arweaveJwkB64?.trim() || undefined;
   const token = legacyToken?.trim() || undefined;
 
-  // ── Preferred: DVM_ARWEAVE_JWK_B64 (piped by the host orchestrator) ─────
+  // ── Preferred: STORE_ARWEAVE_JWK_B64 (piped by the host orchestrator) ─────
   if (jwkB64) {
     let jwkJson: string;
     try {
       jwkJson = Buffer.from(jwkB64, 'base64').toString('utf-8');
     } catch (err) {
       throw new Error(
-        `DVM_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
+        `STORE_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
       );
     }
     let jwk: { kty?: string; n?: string; d?: string };
@@ -200,12 +185,12 @@ export async function createTurboAdapter(
       jwk = JSON.parse(jwkJson);
     } catch (err) {
       throw new Error(
-        `DVM_ARWEAVE_JWK_B64 does not decode to valid JSON: ${err instanceof Error ? err.message : err}`
+        `STORE_ARWEAVE_JWK_B64 does not decode to valid JSON: ${err instanceof Error ? err.message : err}`
       );
     }
     if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'RSA' || !jwk.n || !jwk.d) {
       throw new Error(
-        'DVM_ARWEAVE_JWK_B64 is missing required RSA JWK fields (kty=RSA, n, d).'
+        'STORE_ARWEAVE_JWK_B64 is missing required RSA JWK fields (kty=RSA, n, d).'
       );
     }
     const { TurboFactory, ArweaveSigner } = await importTurbo();
@@ -263,26 +248,24 @@ export async function createTurboAdapter(
   };
 }
 
-// --- DVM config extends NodeConfig with DVM-managed fields not in the SDK ---
-type DvmConfig = Partial<NodeConfig> & { blsPort?: number };
+// --- store config extends NodeConfig with store-managed fields not in the SDK ---
+type StoreConfig = Partial<NodeConfig> & { blsPort?: number };
 
 // --- Raw config shape ---
-interface DvmRawConfig {
+interface StoreRawConfig {
   secretKey?: string; // hex
   blsPort?: number;
   handlerPort?: number;
-  connectorUrl?: string;
-  ilpAddress?: string;
   basePricePerByte?: string | number;
   kindPricing?: Record<string, string | number>;
-  // Arweave DVM config
+  // Arweave upload config
   turboToken?: string;
   arweaveTags?: Record<string, string>;
 }
 
 // --- Parse and normalize config ---
-function parseRawConfig(raw: DvmRawConfig): DvmConfig {
-  const cfg: DvmConfig = {};
+function parseRawConfig(raw: StoreRawConfig): StoreConfig {
+  const cfg: StoreConfig = {};
 
   if (raw.secretKey) {
     if (!/^[0-9a-fA-F]{64}$/.test(raw.secretKey)) {
@@ -296,12 +279,6 @@ function parseRawConfig(raw: DvmRawConfig): DvmConfig {
   }
   if (raw.handlerPort !== undefined) {
     cfg.handlerPort = raw.handlerPort;
-  }
-  if (raw.connectorUrl) {
-    cfg.connectorUrl = raw.connectorUrl;
-  }
-  if (raw.ilpAddress) {
-    cfg.ilpAddress = raw.ilpAddress;
   }
   if (raw.basePricePerByte) {
     cfg.basePricePerByte = BigInt(String(raw.basePricePerByte));
@@ -318,30 +295,30 @@ function parseRawConfig(raw: DvmRawConfig): DvmConfig {
 }
 
 // --- Load config from env or file ---
-function loadDvmConfig(): DvmRawConfig {
+function loadStoreConfig(): StoreRawConfig {
   const env = process.env;
-  let rawConfig: DvmRawConfig;
+  let rawConfig: StoreRawConfig;
 
-  // Priority: DVM_CONFIG_JSON > DVM_CONFIG_PATH > env vars
-  if (env['DVM_CONFIG_JSON']) {
+  // Priority: STORE_CONFIG_JSON > STORE_CONFIG_PATH > env vars
+  if (env['STORE_CONFIG_JSON']) {
     try {
-      rawConfig = JSON.parse(env['DVM_CONFIG_JSON']);
+      rawConfig = JSON.parse(env['STORE_CONFIG_JSON']);
     } catch (err) {
       throw new Error(
-        `Failed to parse DVM_CONFIG_JSON: ${err instanceof Error ? err.message : err}`
+        `Failed to parse STORE_CONFIG_JSON: ${err instanceof Error ? err.message : err}`
       );
     }
-  } else if (env['DVM_CONFIG_PATH']) {
-    const configPath = env['DVM_CONFIG_PATH'];
+  } else if (env['STORE_CONFIG_PATH']) {
+    const configPath = env['STORE_CONFIG_PATH'];
     try {
       const content = readFileSync(configPath, 'utf-8');
       if (!content.trim()) {
-        throw new Error('DVM_CONFIG_PATH file is empty');
+        throw new Error('STORE_CONFIG_PATH file is empty');
       }
       rawConfig = JSON.parse(content);
     } catch (err) {
       throw new Error(
-        `Failed to read DVM_CONFIG_PATH (${configPath}): ${err instanceof Error ? err.message : err}`
+        `Failed to read STORE_CONFIG_PATH (${configPath}): ${err instanceof Error ? err.message : err}`
       );
     }
   } else {
@@ -353,8 +330,8 @@ function loadDvmConfig(): DvmRawConfig {
 }
 
 // --- Apply env var overlays to config ---
-export function applyEnvOverlay(cfg: DvmConfig): DvmConfig {
-  const out: DvmConfig = { ...cfg };
+export function applyEnvOverlay(cfg: StoreConfig): StoreConfig {
+  const out: StoreConfig = { ...cfg };
   const env = process.env;
 
   // Secret key (from NODE_NOSTR_SECRET_KEY env var)
@@ -393,28 +370,9 @@ export function applyEnvOverlay(cfg: DvmConfig): DvmConfig {
     throw new Error('HANDLER_PORT and BLS_PORT must differ');
   }
 
-  // Connector URL (standalone mode — REQUIRED)
-  // CONNECTOR_URL is injected by orchestrator: ws://townhouse-connector:3000
-  // For HTTP mode, we use the admin URL (8081 or equivalent)
-  if (env['CONNECTOR_URL']) {
-    // Convert ws:// to http:// or wss:// to https:// for REST API
-    const wsUrl = env['CONNECTOR_URL'];
-    out.connectorUrl = wsUrl.replace(/^ws(s)?:/, (match, s) => s ? 'https:' : 'http:').replace(/\/ws(\?.*)?$/, (match, query) => query || '');
-  } else if (!out.connectorUrl) {
-    throw new Error('CONNECTOR_URL must be provided for standalone DVM mode');
-  }
-
-  // Advertised ILP address (kind:10032). MUST match the connector route's
-  // ilpAddress (e.g. g.proxy.store) — without it the SDK self-derives
-  // g.connector.dvm.<pubkey-hash>, so clients discover an address the connector
-  // won't route. Optional only when the connector route is configured to accept
-  // the self-derived default instead.
-  if (env['ILP_ADDRESS']) {
-    out.ilpAddress = env['ILP_ADDRESS'];
-  }
-
-  // Base price per byte (default 10n = $0.00001/byte). Applies to the
-  // Arweave DVM (kind:5094) as per-byte pricing.
+  // Base price per byte (default 10n). Informational only: the connector is the
+  // front payment proxy and enforces the FLAT route price; this is surfaced on
+  // the BLS /health endpoint for operators.
   if (env['FEE_PER_JOB']) {
     out.basePricePerByte = BigInt(env['FEE_PER_JOB']);
   } else if (out.basePricePerByte === undefined) {
@@ -436,23 +394,12 @@ export function applyEnvOverlay(cfg: DvmConfig): DvmConfig {
       // Surface bad config: log a warning so operators can see why the env
       // var didn't take effect. Do not throw — keeps startup resilient.
       console.warn(
-        `[DVM Entrypoint] Ignoring ${key}: value ${JSON.stringify(value)} is not a valid bigint`
+        `[store] Ignoring ${key}: value ${JSON.stringify(value)} is not a valid bigint`
       );
     }
   }
 
   return out;
-}
-
-// --- Publish event callback (no-op for standalone DVM) ---
-async function _noopPublish(event: { kind?: number; id?: string }): Promise<void> {
-  // In standalone mode, there's no relay WebSocket connection.
-  // Events are either:
-  // - Not published (Arweave DVM returns txId directly)
-  // - Published via separate relay connection (future enhancement)
-  console.log(
-    `[DVM] Would publish event kind:${event.kind} id:${event.id?.slice(0, 12)}...`
-  );
 }
 
 function buildNoCreditsMessage(address: string | undefined): string {
@@ -464,11 +411,11 @@ function buildNoCreditsMessage(address: string | undefined): string {
 }
 
 // --- Main entrypoint ---
-async function main(): Promise<ServiceNode> {
-  console.log('[DVM Entrypoint] Starting DVM node...');
+async function main(): Promise<void> {
+  console.log('[store] Starting store node...');
 
   // Load JSON config from env or file, then overlay env vars
-  const rawConfig = loadDvmConfig();
+  const rawConfig = loadStoreConfig();
   const jsonConfig = parseRawConfig(rawConfig);
   const config = applyEnvOverlay(jsonConfig);
 
@@ -476,46 +423,41 @@ async function main(): Promise<ServiceNode> {
   if (!config.secretKey) {
     throw new Error('NODE_NOSTR_SECRET_KEY is required');
   }
-  if (!config.connectorUrl) {
-    throw new Error('CONNECTOR_URL is required for standalone DVM mode');
-  }
 
-  // Build Arweave DVM components.
+  // Build the Arweave upload adapter.
   //
-  // Resolution order (Phase 4):
-  //   1. DVM_ARWEAVE_JWK_B64 (preferred — piped by host orchestrator from the
-  //      operator's BIP-39 wallet via WalletManager.getArweaveJwk('dvm'))
+  // Resolution order:
+  //   1. STORE_ARWEAVE_JWK_B64 (preferred — base64(JSON) of a funded RSA JWK)
   //   2. TURBO_TOKEN (legacy raw-JWK JSON env var)
   //   3. Neither (or empty/whitespace) → unauthenticated ephemeral-JWK FREE
-  //      TIER (≤100 KB uploads, no wallet/deposit). This replaced the old
-  //      throwing stub adapter — see #146: an empty `TURBO_TOKEN=""` must fall
-  //      back to free tier, NOT reject kind:5094 with "Arweave upload failed".
+  //      TIER (≤100 KB uploads, no wallet/deposit). An empty `TURBO_TOKEN=""`
+  //      must fall back to free tier, NOT reject kind:5094 (#146).
   //
   // The JWK env var is treated as secret material — do NOT log its value.
-  const arweaveJwkB64 = process.env['DVM_ARWEAVE_JWK_B64'];
+  const arweaveJwkB64 = process.env['STORE_ARWEAVE_JWK_B64'];
   const legacyTurboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
   const turboResult = await createTurboAdapter(arweaveJwkB64, legacyTurboToken);
 
   const sourceLabel =
     turboResult.source === 'arweave-jwk-b64'
-      ? 'DVM_ARWEAVE_JWK_B64 (wallet-derived)'
+      ? 'STORE_ARWEAVE_JWK_B64 (wallet-derived)'
       : turboResult.source === 'turbo-token-legacy'
         ? 'TURBO_TOKEN (legacy)'
         : 'unauthenticated (free tier, ≤100KB)';
-  console.log(`[DVM Entrypoint] Arweave credit source: ${sourceLabel}`);
+  console.log(`[store] Arweave credit source: ${sourceLabel}`);
   if (turboResult.source === 'unauthenticated-free-tier') {
     console.warn(
-      '[DVM Entrypoint] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
-      ' Set DVM_ARWEAVE_JWK_B64 with a funded wallet to lift the size limit.' +
-      " Do NOT fund the ephemeral address — it rotates on every DVM restart."
+      '[store] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
+      ' Set STORE_ARWEAVE_JWK_B64 with a funded wallet to lift the size limit.' +
+      ' Do NOT fund the ephemeral address — it rotates on every restart.'
     );
   }
   if (turboResult.arweaveAddress) {
-    console.log(`[DVM Entrypoint] Arweave address: ${turboResult.arweaveAddress}`);
+    console.log(`[store] Arweave address: ${turboResult.arweaveAddress}`);
   }
 
   // Best-effort boot-time credit balance probe (warning-only — do not refuse
-  // to start, operators may want the DVM running while they fund).
+  // to start; operators may want the store running while they fund).
   if (turboResult.client && typeof turboResult.client === 'object') {
     try {
       const probe = turboResult.client as { getBalance?: () => Promise<{ winc: string | bigint }> };
@@ -531,18 +473,16 @@ async function main(): Promise<ServiceNode> {
           wincBig = 0n;
         }
         console.log(
-          `[DVM Entrypoint] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
+          `[store] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
         );
         if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
-          console.warn(
-            `[DVM Entrypoint] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`
-          );
+          console.warn(`[store] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`);
         }
       }
     } catch (err) {
       // Probe failure must not block boot — log and continue.
       console.warn(
-        `[DVM Entrypoint] Could not probe Arweave credit balance: ${err instanceof Error ? err.message : err}`
+        `[store] Could not probe Arweave credit balance: ${err instanceof Error ? err.message : err}`
       );
     }
   }
@@ -555,38 +495,27 @@ async function main(): Promise<ServiceNode> {
     arweaveTags: rawConfig.arweaveTags,
   };
 
-  // Create node in standalone mode (HTTP handler, NOT embedded connector)
-  console.log('[DVM Entrypoint] Creating node in standalone HTTP mode...');
-  console.log(`  connectorUrl: ${config.connectorUrl}`);
-  console.log(`  handlerPort: ${config.handlerPort}`);
-  console.log(`  ilpAddress: ${config.ilpAddress ?? '(self-derived g.connector.dvm.<hash>)'}`);
-  console.log(`  blsPort: ${config.blsPort}`);
+  const devMode = process.env['NODE_ENV'] !== 'production';
 
-  const node = await createNode({
-    secretKey: config.secretKey,
-    connectorUrl: config.connectorUrl,
-    handlerPort: config.handlerPort,
-    ilpAddress: config.ilpAddress,
-    basePricePerByte: config.basePricePerByte,
-    kindPricing: config.kindPricing,
-    devMode: process.env['NODE_ENV'] !== 'production',
+  // Job counter shim — wraps the handler to track byKind + byStatus counters
+  // (surfaced by the BLS /health endpoint).
+  const counter = createJobCounter();
+  const arweaveHandler = counter.wrap(5094, createArweaveDvmHandler(arweaveConfig));
+
+  // The connector is the front-of-app payment proxy: it terminates payment and
+  // reverse-proxies a plain HTTP request to POST /store (RouteTermination). This
+  // process contains NO ILP/BTP/connector-dialing logic.
+  console.log('[store] Starting payment-oblivious POST /store backend (connector is the front payment proxy)...');
+  console.log(`  handlerPort: ${config.handlerPort} (POST /store)`);
+  console.log(`  blsPort: ${config.blsPort}`);
+  const pubkey = getPublicKey(config.secretKey);
+  const storeBackend: StoreBackend = startStoreBackend({
+    handle: arweaveHandler as unknown as StoreHandler,
+    handlerPort: config.handlerPort ?? 3300,
+    devMode,
   });
 
-  // Job counter shim — wraps each handler to track byKind + byStatus counters
-  const counter = createJobCounter();
-
-  // Register DVM handlers (wrapped with counter shim)
-  // kind:5094 — Arweave blob storage DVM
-  console.log('[DVM Entrypoint] Registering Arweave DVM handler (kind:5094)...');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  node.on(5094, counter.wrap(5094, createArweaveDvmHandler(arweaveConfig)) as any);
-
-  // Start the node
-  console.log('[DVM Entrypoint] Starting DVM node...');
-  await node.start();
-
-  // BLS health server on blsPort (3400 default) — started after node.start()
-  const pubkey = node.pubkey;
+  // BLS health server on blsPort (3400 default) — started after the backend.
   const safePubkey = typeof pubkey === 'string' ? pubkey : 'unknown';
   const startedAt = Date.now();
   const blsPort = config.blsPort ?? 3400;
@@ -611,80 +540,15 @@ async function main(): Promise<ServiceNode> {
   const blsServer = serve({ fetch: blsApp.fetch, port: blsPort }) as unknown as {
     close: (cb?: (err?: Error) => void) => void;
   };
-  console.log(`[DVM Entrypoint] BLS health server on port ${blsPort}`);
-
-  // ── Advertise on the relay (PAID write through the connector) ───────────────
-  // Publish our kind:10032 to the toon node's relay so clients can DISCOVER and
-  // pay this DVM. TOON relays reject unpaid WS writes ("writes require ILP
-  // payment"), so publishEvent() routes store -> apex -> relay and the store pays
-  // the fee. We build the event ourselves so it carries the connector's
-  // settlement addresses + supported chains (the SDK's auto-built event omits
-  // them). Non-fatal + re-published before NIP-40 expiry to stay live.
-  const relayDest = process.env['RELAY_PUBLISH_DEST']; // e.g. g.proxy.relay
-  if (relayDest && config.ilpAddress && config.secretKey) {
-    const settlementAddresses: Record<string, string> = {};
-    if (process.env['SETTLE_EVM']) settlementAddresses['evm:31337'] = process.env['SETTLE_EVM'];
-    if (process.env['SETTLE_SOL']) settlementAddresses['solana:devnet'] = process.env['SETTLE_SOL'];
-    if (process.env['SETTLE_MINA']) settlementAddresses['mina:devnet'] = process.env['SETTLE_MINA'];
-    const ilpInfo: IlpPeerInfo = {
-      ilpAddress: config.ilpAddress,
-      btpEndpoint: process.env['PUBLIC_BTP_ENDPOINT'] ?? '',
-      assetCode: 'USDC',
-      assetScale: 6,
-      supportedChains: Object.keys(settlementAddresses),
-      settlementAddresses,
-      feePerByte: String(config.basePricePerByte ?? 10n),
-    };
-    const ttlSeconds = 3600;
-    // POST the TOON-encoded event straight to the connector's admin inject
-    // endpoint /admin/ilp/send. (node.publishEvent uses the SDK's http-ilp-client
-    // which targets /send-packet — absent on connector 3.25.x; the connector's
-    // outbound contract is /admin/ilp/send.) The packet routes store -> apex ->
-    // relay; the store pays the write fee. Admin port is reachable container-to-
-    // container on the docker net (allowedIPs covers 172.16/12).
-    const adminUrl = (process.env['CONNECTOR_ADMIN_URL'] ?? 'http://connector:8081').replace(/\/+$/, '');
-    const amount = process.env['RELAY_PUBLISH_AMOUNT'] ?? '50000'; // base units; covers relay write + apex hop
-    const publishPeerInfo = async (): Promise<void> => {
-      try {
-        const evt = buildIlpPeerInfoEvent(ilpInfo, config.secretKey!, { ttlSeconds });
-        // The relay is an HTTP app (POST /write {event}) fronted by the connector
-        // payment-proxy (HttpProxyHandler), which replays a LITERAL HTTP request.
-        // So the packet data is that request — not a raw TOON event.
-        const writeBody = JSON.stringify({ event: evt });
-        const httpReq =
-          'POST /write HTTP/1.1\r\n' +
-          'Content-Type: application/json\r\n' +
-          `Content-Length: ${Buffer.byteLength(writeBody, 'utf8')}\r\n` +
-          '\r\n' +
-          writeBody;
-        const dataB64 = Buffer.from(httpReq, 'utf8').toString('base64');
-        const resp = await fetch(`${adminUrl}/admin/ilp/send`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ destination: relayDest, amount, data: dataB64 }),
-        });
-        const body = await resp.text();
-        console.log(
-          `[DVM] kind:10032 -> ${relayDest} via ${adminUrl}/admin/ilp/send: HTTP ${resp.status} ${body.slice(0, 160)}`
-        );
-      } catch (e) {
-        console.warn(`[DVM] kind:10032 publish failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    };
-    await publishPeerInfo();
-    // Re-publish before the NIP-40 expiry (replaceable kind, so it just refreshes).
-    setInterval(() => void publishPeerInfo(), Math.floor(ttlSeconds * 0.8) * 1000);
-  } else {
-    console.log('[DVM] RELAY_PUBLISH_DEST/ilpAddress unset — skipping kind:10032 relay advertisement');
-  }
+  console.log(`[store] BLS health server on port ${blsPort}`);
 
   // Log startup banner
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║                     DVM Ready                          ║
+║                     store ready                        ║
 ╠═══════════════════════════════════════════════════════════╣
 ║ Pubkey:        ${safePubkey.slice(0, 32)}... ║
-║ Handler Port:   ${config.handlerPort} (HTTP ILP)                          ║
+║ Handler Port:   ${config.handlerPort} (POST /store)                       ║
 ║ BLS Port:      ${blsPort} (health endpoint)                       ║
 ║ Handler Kinds: 5094 (Arweave only)                    ║
 ╚═══════════════════════════════════════════════════════════╝
@@ -698,17 +562,19 @@ async function main(): Promise<ServiceNode> {
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[DVM Entrypoint] Received ${signal}, shutting down...`);
+    console.log(`[store] Received ${signal}, shutting down...`);
     try {
       // serve() returns a Node http.Server whose close() takes a callback.
-      // Wrap to actually wait for sockets to drain before stopping the node.
+      // Wait for sockets to drain on both servers before exiting.
       await new Promise<void>((resolve, reject) => {
         blsServer.close((err) => (err ? reject(err) : resolve()));
       });
-      await node.stop();
-      console.log('[DVM Entrypoint] DVM stopped gracefully');
+      await new Promise<void>((resolve, reject) => {
+        storeBackend.close((err) => (err ? reject(err) : resolve()));
+      });
+      console.log('[store] stopped gracefully');
     } catch (err) {
-      console.error('[DVM Entrypoint] Error during shutdown:', err);
+      console.error('[store] Error during shutdown:', err);
     } finally {
       process.exit(0);
     }
@@ -719,15 +585,13 @@ async function main(): Promise<ServiceNode> {
   process.off('SIGINT', shutdown);
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
-
-  return node;
 }
 
 // Gated so importing this module from a test (Vitest sets VITEST=true) does
-// not spin up an actual DVM node — tests drive exported functions directly.
+// not spin up an actual store node — tests drive exported functions directly.
 if (!process.env['VITEST']) {
   main().catch((err) => {
-    console.error(`[DVM Entrypoint] [Fatal] ${err instanceof Error ? err.message : err}`);
+    console.error(`[store] [Fatal] ${err instanceof Error ? err.message : err}`);
     if (err instanceof Error && err.stack) {
       console.error(err.stack);
     }
