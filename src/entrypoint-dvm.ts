@@ -21,6 +21,9 @@
  *   BLS_PORT             -> config.blsPort (default: 3400)
  *   HANDLER_PORT         -> config.handlerPort (default: 3300)
  *   CONNECTOR_URL        -> config.connectorUrl (standalone connector HTTP URL)
+ *   ILP_ADDRESS          -> config.ilpAddress (advertised kind:10032 address;
+ *                          MUST match the connector route's ilpAddress, e.g.
+ *                          g.proxy.store — else discovery and routing disagree)
  *   FEE_PER_JOB         -> config.basePricePerByte (per-job pricing)
  *   KIND_PRICING_<kind>  -> config.kindPricing[kind] (per-kind override)
  *   DVM_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of derived RSA JWK (Phase 4)
@@ -265,6 +268,7 @@ interface DvmRawConfig {
   blsPort?: number;
   handlerPort?: number;
   connectorUrl?: string;
+  ilpAddress?: string;
   basePricePerByte?: string | number;
   kindPricing?: Record<string, string | number>;
   // Arweave DVM config
@@ -291,6 +295,9 @@ function parseRawConfig(raw: DvmRawConfig): DvmConfig {
   }
   if (raw.connectorUrl) {
     cfg.connectorUrl = raw.connectorUrl;
+  }
+  if (raw.ilpAddress) {
+    cfg.ilpAddress = raw.ilpAddress;
   }
   if (raw.basePricePerByte) {
     cfg.basePricePerByte = BigInt(String(raw.basePricePerByte));
@@ -391,6 +398,15 @@ export function applyEnvOverlay(cfg: DvmConfig): DvmConfig {
     out.connectorUrl = wsUrl.replace(/^ws(s)?:/, (match, s) => s ? 'https:' : 'http:').replace(/\/ws(\?.*)?$/, (match, query) => query || '');
   } else if (!out.connectorUrl) {
     throw new Error('CONNECTOR_URL must be provided for standalone DVM mode');
+  }
+
+  // Advertised ILP address (kind:10032). MUST match the connector route's
+  // ilpAddress (e.g. g.proxy.store) — without it the SDK self-derives
+  // g.connector.dvm.<pubkey-hash>, so clients discover an address the connector
+  // won't route. Optional only when the connector route is configured to accept
+  // the self-derived default instead.
+  if (env['ILP_ADDRESS']) {
+    out.ilpAddress = env['ILP_ADDRESS'];
   }
 
   // Base price per byte (default 10n = $0.00001/byte). Applies to the
@@ -539,12 +555,14 @@ async function main(): Promise<ServiceNode> {
   console.log('[DVM Entrypoint] Creating node in standalone HTTP mode...');
   console.log(`  connectorUrl: ${config.connectorUrl}`);
   console.log(`  handlerPort: ${config.handlerPort}`);
+  console.log(`  ilpAddress: ${config.ilpAddress ?? '(self-derived g.connector.dvm.<hash>)'}`);
   console.log(`  blsPort: ${config.blsPort}`);
 
   const node = await createNode({
     secretKey: config.secretKey,
     connectorUrl: config.connectorUrl,
     handlerPort: config.handlerPort,
+    ilpAddress: config.ilpAddress,
     basePricePerByte: config.basePricePerByte,
     kindPricing: config.kindPricing,
     devMode: process.env['NODE_ENV'] !== 'production',
