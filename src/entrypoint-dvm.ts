@@ -56,7 +56,7 @@ import type { NodeConfig } from '@toon-protocol/sdk';
 // kind:10032 builder (signs the peer-info event). Published as a PAID write to
 // the relay so clients can discover + pay g.proxy.store — the relay rejects
 // unpaid WS writes, so this rides the connector and the store pays the fee.
-import { buildIlpPeerInfoEvent, type IlpPeerInfo } from '@toon-protocol/core';
+import { buildIlpPeerInfoEvent, encodeEventToToon, type IlpPeerInfo } from '@toon-protocol/core';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -636,16 +636,26 @@ async function main(): Promise<ServiceNode> {
       feePerByte: String(config.basePricePerByte ?? 10n),
     };
     const ttlSeconds = 3600;
-    const amtEnv = process.env['RELAY_PUBLISH_AMOUNT']; // optional override (base units)
+    // POST the TOON-encoded event straight to the connector's admin inject
+    // endpoint /admin/ilp/send. (node.publishEvent uses the SDK's http-ilp-client
+    // which targets /send-packet — absent on connector 3.25.x; the connector's
+    // outbound contract is /admin/ilp/send.) The packet routes store -> apex ->
+    // relay; the store pays the write fee. Admin port is reachable container-to-
+    // container on the docker net (allowedIPs covers 172.16/12).
+    const adminUrl = (process.env['CONNECTOR_ADMIN_URL'] ?? 'http://connector:8081').replace(/\/+$/, '');
+    const amount = process.env['RELAY_PUBLISH_AMOUNT'] ?? '50000'; // base units; covers relay write + apex hop
     const publishPeerInfo = async (): Promise<void> => {
       try {
         const evt = buildIlpPeerInfoEvent(ilpInfo, config.secretKey!, { ttlSeconds });
-        const opts = amtEnv
-          ? { destination: relayDest, amount: BigInt(amtEnv) }
-          : { destination: relayDest };
-        const r = await node.publishEvent(evt, opts);
+        const dataB64 = Buffer.from(encodeEventToToon(evt)).toString('base64');
+        const resp = await fetch(`${adminUrl}/admin/ilp/send`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ destination: relayDest, amount, data: dataB64 }),
+        });
+        const body = await resp.text();
         console.log(
-          `[DVM] kind:10032 -> ${relayDest}: success=${r.success} id=${r.eventId?.slice(0, 12)}… ${r.code ?? ''} ${r.message ?? ''}`
+          `[DVM] kind:10032 -> ${relayDest} via ${adminUrl}/admin/ilp/send: HTTP ${resp.status} ${body.slice(0, 160)}`
         );
       } catch (e) {
         console.warn(`[DVM] kind:10032 publish failed: ${e instanceof Error ? e.message : String(e)}`);
