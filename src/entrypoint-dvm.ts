@@ -21,6 +21,9 @@
  *   BLS_PORT             -> config.blsPort (default: 3400)
  *   HANDLER_PORT         -> config.handlerPort (default: 3300)
  *   CONNECTOR_URL        -> config.connectorUrl (standalone connector HTTP URL)
+ *   ILP_ADDRESS          -> config.ilpAddress (advertised kind:10032 address;
+ *                          MUST match the connector route's ilpAddress, e.g.
+ *                          g.proxy.store — else discovery and routing disagree)
  *   FEE_PER_JOB         -> config.basePricePerByte (per-job pricing)
  *   KIND_PRICING_<kind>  -> config.kindPricing[kind] (per-kind override)
  *   DVM_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of derived RSA JWK (Phase 4)
@@ -50,6 +53,10 @@ import {
   ChunkManager,
 } from '@toon-protocol/sdk';
 import type { NodeConfig } from '@toon-protocol/sdk';
+// kind:10032 builder (signs the peer-info event). Published as a PAID write to
+// the relay so clients can discover + pay g.proxy.store — the relay rejects
+// unpaid WS writes, so this rides the connector and the store pays the fee.
+import { buildIlpPeerInfoEvent, type IlpPeerInfo } from '@toon-protocol/core';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -265,6 +272,7 @@ interface DvmRawConfig {
   blsPort?: number;
   handlerPort?: number;
   connectorUrl?: string;
+  ilpAddress?: string;
   basePricePerByte?: string | number;
   kindPricing?: Record<string, string | number>;
   // Arweave DVM config
@@ -291,6 +299,9 @@ function parseRawConfig(raw: DvmRawConfig): DvmConfig {
   }
   if (raw.connectorUrl) {
     cfg.connectorUrl = raw.connectorUrl;
+  }
+  if (raw.ilpAddress) {
+    cfg.ilpAddress = raw.ilpAddress;
   }
   if (raw.basePricePerByte) {
     cfg.basePricePerByte = BigInt(String(raw.basePricePerByte));
@@ -391,6 +402,15 @@ export function applyEnvOverlay(cfg: DvmConfig): DvmConfig {
     out.connectorUrl = wsUrl.replace(/^ws(s)?:/, (match, s) => s ? 'https:' : 'http:').replace(/\/ws(\?.*)?$/, (match, query) => query || '');
   } else if (!out.connectorUrl) {
     throw new Error('CONNECTOR_URL must be provided for standalone DVM mode');
+  }
+
+  // Advertised ILP address (kind:10032). MUST match the connector route's
+  // ilpAddress (e.g. g.proxy.store) — without it the SDK self-derives
+  // g.connector.dvm.<pubkey-hash>, so clients discover an address the connector
+  // won't route. Optional only when the connector route is configured to accept
+  // the self-derived default instead.
+  if (env['ILP_ADDRESS']) {
+    out.ilpAddress = env['ILP_ADDRESS'];
   }
 
   // Base price per byte (default 10n = $0.00001/byte). Applies to the
@@ -539,12 +559,14 @@ async function main(): Promise<ServiceNode> {
   console.log('[DVM Entrypoint] Creating node in standalone HTTP mode...');
   console.log(`  connectorUrl: ${config.connectorUrl}`);
   console.log(`  handlerPort: ${config.handlerPort}`);
+  console.log(`  ilpAddress: ${config.ilpAddress ?? '(self-derived g.connector.dvm.<hash>)'}`);
   console.log(`  blsPort: ${config.blsPort}`);
 
   const node = await createNode({
     secretKey: config.secretKey,
     connectorUrl: config.connectorUrl,
     handlerPort: config.handlerPort,
+    ilpAddress: config.ilpAddress,
     basePricePerByte: config.basePricePerByte,
     kindPricing: config.kindPricing,
     devMode: process.env['NODE_ENV'] !== 'production',
@@ -590,6 +612,71 @@ async function main(): Promise<ServiceNode> {
     close: (cb?: (err?: Error) => void) => void;
   };
   console.log(`[DVM Entrypoint] BLS health server on port ${blsPort}`);
+
+  // ── Advertise on the relay (PAID write through the connector) ───────────────
+  // Publish our kind:10032 to the toon node's relay so clients can DISCOVER and
+  // pay this DVM. TOON relays reject unpaid WS writes ("writes require ILP
+  // payment"), so publishEvent() routes store -> apex -> relay and the store pays
+  // the fee. We build the event ourselves so it carries the connector's
+  // settlement addresses + supported chains (the SDK's auto-built event omits
+  // them). Non-fatal + re-published before NIP-40 expiry to stay live.
+  const relayDest = process.env['RELAY_PUBLISH_DEST']; // e.g. g.proxy.relay
+  if (relayDest && config.ilpAddress && config.secretKey) {
+    const settlementAddresses: Record<string, string> = {};
+    if (process.env['SETTLE_EVM']) settlementAddresses['evm:31337'] = process.env['SETTLE_EVM'];
+    if (process.env['SETTLE_SOL']) settlementAddresses['solana:devnet'] = process.env['SETTLE_SOL'];
+    if (process.env['SETTLE_MINA']) settlementAddresses['mina:devnet'] = process.env['SETTLE_MINA'];
+    const ilpInfo: IlpPeerInfo = {
+      ilpAddress: config.ilpAddress,
+      btpEndpoint: process.env['PUBLIC_BTP_ENDPOINT'] ?? '',
+      assetCode: 'USDC',
+      assetScale: 6,
+      supportedChains: Object.keys(settlementAddresses),
+      settlementAddresses,
+      feePerByte: String(config.basePricePerByte ?? 10n),
+    };
+    const ttlSeconds = 3600;
+    // POST the TOON-encoded event straight to the connector's admin inject
+    // endpoint /admin/ilp/send. (node.publishEvent uses the SDK's http-ilp-client
+    // which targets /send-packet — absent on connector 3.25.x; the connector's
+    // outbound contract is /admin/ilp/send.) The packet routes store -> apex ->
+    // relay; the store pays the write fee. Admin port is reachable container-to-
+    // container on the docker net (allowedIPs covers 172.16/12).
+    const adminUrl = (process.env['CONNECTOR_ADMIN_URL'] ?? 'http://connector:8081').replace(/\/+$/, '');
+    const amount = process.env['RELAY_PUBLISH_AMOUNT'] ?? '50000'; // base units; covers relay write + apex hop
+    const publishPeerInfo = async (): Promise<void> => {
+      try {
+        const evt = buildIlpPeerInfoEvent(ilpInfo, config.secretKey!, { ttlSeconds });
+        // The relay is an HTTP app (POST /write {event}) fronted by the connector
+        // payment-proxy (HttpProxyHandler), which replays a LITERAL HTTP request.
+        // So the packet data is that request — not a raw TOON event.
+        const writeBody = JSON.stringify({ event: evt });
+        const httpReq =
+          'POST /write HTTP/1.1\r\n' +
+          'Content-Type: application/json\r\n' +
+          `Content-Length: ${Buffer.byteLength(writeBody, 'utf8')}\r\n` +
+          '\r\n' +
+          writeBody;
+        const dataB64 = Buffer.from(httpReq, 'utf8').toString('base64');
+        const resp = await fetch(`${adminUrl}/admin/ilp/send`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ destination: relayDest, amount, data: dataB64 }),
+        });
+        const body = await resp.text();
+        console.log(
+          `[DVM] kind:10032 -> ${relayDest} via ${adminUrl}/admin/ilp/send: HTTP ${resp.status} ${body.slice(0, 160)}`
+        );
+      } catch (e) {
+        console.warn(`[DVM] kind:10032 publish failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    await publishPeerInfo();
+    // Re-publish before the NIP-40 expiry (replaceable kind, so it just refreshes).
+    setInterval(() => void publishPeerInfo(), Math.floor(ttlSeconds * 0.8) * 1000);
+  } else {
+    console.log('[DVM] RELAY_PUBLISH_DEST/ilpAddress unset — skipping kind:10032 relay advertisement');
+  }
 
   // Log startup banner
   console.log(`
