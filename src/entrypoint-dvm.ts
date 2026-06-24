@@ -53,6 +53,10 @@ import {
   ChunkManager,
 } from '@toon-protocol/sdk';
 import type { NodeConfig } from '@toon-protocol/sdk';
+// kind:10032 builder (signs the peer-info event). Published as a PAID write to
+// the relay so clients can discover + pay g.proxy.store — the relay rejects
+// unpaid WS writes, so this rides the connector and the store pays the fee.
+import { buildIlpPeerInfoEvent, type IlpPeerInfo } from '@toon-protocol/core';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -608,6 +612,51 @@ async function main(): Promise<ServiceNode> {
     close: (cb?: (err?: Error) => void) => void;
   };
   console.log(`[DVM Entrypoint] BLS health server on port ${blsPort}`);
+
+  // ── Advertise on the relay (PAID write through the connector) ───────────────
+  // Publish our kind:10032 to the toon node's relay so clients can DISCOVER and
+  // pay this DVM. TOON relays reject unpaid WS writes ("writes require ILP
+  // payment"), so publishEvent() routes store -> apex -> relay and the store pays
+  // the fee. We build the event ourselves so it carries the connector's
+  // settlement addresses + supported chains (the SDK's auto-built event omits
+  // them). Non-fatal + re-published before NIP-40 expiry to stay live.
+  const relayDest = process.env['RELAY_PUBLISH_DEST']; // e.g. g.proxy.relay
+  if (relayDest && config.ilpAddress && config.secretKey) {
+    const settlementAddresses: Record<string, string> = {};
+    if (process.env['SETTLE_EVM']) settlementAddresses['evm:31337'] = process.env['SETTLE_EVM'];
+    if (process.env['SETTLE_SOL']) settlementAddresses['solana:devnet'] = process.env['SETTLE_SOL'];
+    if (process.env['SETTLE_MINA']) settlementAddresses['mina:devnet'] = process.env['SETTLE_MINA'];
+    const ilpInfo: IlpPeerInfo = {
+      ilpAddress: config.ilpAddress,
+      btpEndpoint: process.env['PUBLIC_BTP_ENDPOINT'] ?? '',
+      assetCode: 'USDC',
+      assetScale: 6,
+      supportedChains: Object.keys(settlementAddresses),
+      settlementAddresses,
+      feePerByte: String(config.basePricePerByte ?? 10n),
+    };
+    const ttlSeconds = 3600;
+    const amtEnv = process.env['RELAY_PUBLISH_AMOUNT']; // optional override (base units)
+    const publishPeerInfo = async (): Promise<void> => {
+      try {
+        const evt = buildIlpPeerInfoEvent(ilpInfo, config.secretKey!, { ttlSeconds });
+        const opts = amtEnv
+          ? { destination: relayDest, amount: BigInt(amtEnv) }
+          : { destination: relayDest };
+        const r = await node.publishEvent(evt, opts);
+        console.log(
+          `[DVM] kind:10032 -> ${relayDest}: success=${r.success} id=${r.eventId?.slice(0, 12)}… ${r.code ?? ''} ${r.message ?? ''}`
+        );
+      } catch (e) {
+        console.warn(`[DVM] kind:10032 publish failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    await publishPeerInfo();
+    // Re-publish before the NIP-40 expiry (replaceable kind, so it just refreshes).
+    setInterval(() => void publishPeerInfo(), Math.floor(ttlSeconds * 0.8) * 1000);
+  } else {
+    console.log('[DVM] RELAY_PUBLISH_DEST/ilpAddress unset — skipping kind:10032 relay advertisement');
+  }
 
   // Log startup banner
   console.log(`
