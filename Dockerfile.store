@@ -1,10 +1,12 @@
-# TOON DVM Node Container (esbuild-bundled Multi-Stage Build)
+# TOON store Container (esbuild-bundled Multi-Stage Build)
 #
 # Purpose:
-#   Production-grade Arweave-only NIP-90 DVM (kind:5094 blob storage).
-#   Accepts a paid claim, uploads the blob to Arweave via Turbo, returns the
-#   tx id in the FULFILL. Built over src/entrypoint-dvm.ts, which wraps
-#   @toon-protocol/sdk's createArweaveDvmHandler in standalone HTTP mode.
+#   Production-grade Arweave-only blob storage (NIP-90 kind:5094), the "store".
+#   Uploads the blob to Arweave via Turbo and returns the tx id. Built over
+#   src/entrypoint-store.ts, which wraps @toon-protocol/sdk's
+#   createArweaveDvmHandler and serves the payment-oblivious POST /store backend
+#   (3300). The connector runs in FRONT as the payment proxy and reverse-proxies
+#   to it (RouteTermination); this process has no ILP/connector logic.
 #
 # Layout note:
 #   This image is built against the carved single-package `store` repo
@@ -13,17 +15,17 @@
 #   Deps are consumed from npm (pinned semver), not workspace links.
 #
 # Build from repo root:
-#   docker build -f Dockerfile.dvm -t ghcr.io/toon-protocol/dvm:latest .
+#   docker build -f Dockerfile.store -t ghcr.io/toon-protocol/store:latest .
 #
 # Ports:
-#   3300 - HTTP ILP handler (standalone mode: connector free-forwards paid packets)
+#   3300 - HTTP job port (http mode: POST /store; standalone: HTTP ILP handler)
 #   3400 - BLS / health endpoint (Hono)
 
 # -- Stage 1: Builder -------------------------------------------------------
 FROM node:20-alpine AS builder
 
 LABEL maintainer="toon-protocol"
-LABEL description="TOON DVM Node - Arweave-only blob storage (kind:5094)"
+LABEL description="TOON store - Arweave-only blob storage (NIP-90 kind:5094)"
 
 # Build deps for native modules (better-sqlite3 prebuild via node-gyp).
 RUN apk add --no-cache python3 py3-setuptools make g++
@@ -50,8 +52,8 @@ COPY tsconfig.json esbuild.config.mjs ./
 COPY src/ ./src/
 
 # Bundle the entrypoints via the repo's own esbuild config. This emits
-# dist/entrypoint-dvm.js (ESM, minified) alongside the sdk/attestation
-# bundles; only the dvm bundle is shipped to the runtime stage. esbuild
+# dist/entrypoint-store.js (ESM, minified) alongside the sdk/attestation
+# bundles; only the store bundle is shipped to the runtime stage. esbuild
 # externalizes native + dynamic-require deps (better-sqlite3, ethers, express,
 # @ardrive/turbo-sdk, arweave, @solana/kit, @solana-program/token, fastify,
 # @noble/curves, etc.) — see esbuild.config.mjs.
@@ -60,9 +62,9 @@ RUN pnpm build
 # -- Assemble minimal runtime directory --------------------------------------
 RUN mkdir -p /runtime/node_modules
 
-# esbuild bundle (entrypoint-dvm.js) + ESM marker so the import.meta.url banner
+# esbuild bundle (entrypoint-store.js) + ESM marker so the import.meta.url banner
 # (createRequire) resolves.
-RUN cp dist/entrypoint-dvm.js /runtime/ && \
+RUN cp dist/entrypoint-store.js /runtime/ && \
     echo '{"type":"module"}' > /runtime/package.json
 
 # Cherry-pick better-sqlite3 (native .node) + its runtime deps (bindings,
@@ -79,7 +81,7 @@ RUN set -eux; \
     cp -r "$BINDINGS_DIR" /runtime/node_modules/; \
     cp -r "$FUTP_DIR" /runtime/node_modules/
 
-# Cherry-pick the remaining esbuild --external:* modules that the dvm bundle
+# Cherry-pick the remaining esbuild --external:* modules that the store bundle
 # can reach at runtime, resolved from pnpm's hoist trees. ethers/express are
 # the connector's dynamic-require HTTP/RPC plumbing; @solana/* come in
 # transitively from the sdk; fastify/@fastify/cors/@noble/curves/nostr-tools
@@ -155,4 +157,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 
 USER toon
-CMD ["node", "/app/entrypoint-dvm.js"]
+CMD ["node", "/app/entrypoint-store.js"]

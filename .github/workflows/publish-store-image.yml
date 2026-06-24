@@ -1,14 +1,18 @@
-name: Publish DVM image
+name: Publish store image
 
-# Builds the Arweave DVM image (Dockerfile.dvm — kind:5094 blob storage) and
-# pushes it to GHCR. Unblocks the connector devnet `toon-devnet-store` node:
-# its docker-compose points at ghcr.io/toon-protocol/dvm:latest behind the
-# connector apex (route g.proxy.store -> store:3300).
+# Builds the store image (Dockerfile.store — Arweave blob storage, NIP-90
+# kind:5094) and pushes it to GHCR as ghcr.io/toon-protocol/store. This is the
+# normal store APP image; the connector-with-config payment-proxy image is
+# published separately by publish-store-connector-image.yml.
+#
+# (Renamed from the former `dvm` image — consumers pinning .../dvm must move to
+# .../store.) The store is a payment-oblivious POST /store backend; the connector
+# runs in FRONT as the payment proxy and reverse-proxies to it (RouteTermination).
 #
 # `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
 # publish semver tags for pinning, plus an immutable sha tag.
 #
-# Single-arch (amd64): the devnet Linode boxes are x86, and Dockerfile.dvm
+# Single-arch (amd64): the devnet Linode boxes are x86, and Dockerfile.store
 # cherry-picks prebuilt linux-x64-musl NAPI bindings (better-sqlite3, libsql).
 # No --build-context memvid is needed — this is the Arweave-only variant, which
 # drops the kind:5250 Dungeon/pet-circuit/memvid-node dependency chain.
@@ -19,7 +23,7 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-concurrency: publish-dvm-image-${{ github.ref }}
+concurrency: publish-store-image-${{ github.ref }}
 
 jobs:
   build-push:
@@ -43,7 +47,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/dvm
+          images: ghcr.io/${{ github.repository_owner }}/store
           # `latest` tracks main; semver tags publish on vX.Y.Z; sha tags give
           # an immutable handle.
           tags: |
@@ -56,7 +60,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.dvm
+          file: Dockerfile.store
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

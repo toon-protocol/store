@@ -1,17 +1,17 @@
 # store
 
-The TOON Protocol **Arweave DVM node** — NIP-90 **kind:5094** blob storage. Built from `Dockerfile.dvm` over `src/entrypoint-dvm.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`: accept a paid claim, upload the blob to Arweave via Turbo, return the tx id in the FULFILL. This is a **container, not an npm package** (`@toon-protocol/store`, kept private).
+The TOON Protocol **store** — NIP-90 **kind:5094** Arweave blob storage. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`: upload the blob to Arweave via Turbo, return the tx id. This is a **container, not an npm package** (`@toon-protocol/store`, kept private). It runs as a payment-oblivious `POST /store` backend (`src/store-backend.ts`) behind the connector, which is the front-of-app payment proxy and reverse-proxies to it (RouteTermination — see `deploy/`).
 
 Part of the **TOON Protocol** — pay-to-write Nostr over Interledger (ILP), split into per-team repos.
 
-> **Follow-ups:** this repo was carved from the monorepo `docker/` aggregator and still contains the other images' build contexts — trim to dvm-only (keep `Dockerfile.dvm` + `src/entrypoint-dvm.ts` + shared helpers). Add the image-publish workflow (carve the dvm job from `publish-townhouse-images.yml`).
+> **Follow-ups:** this repo was carved from the monorepo `docker/` aggregator and still contains the other images' build contexts — trim to store-only (keep `Dockerfile.store` + `src/entrypoint-store.ts` + `src/store-backend.ts` + shared helpers). The image-publish workflows now exist: `publish-store-image.yml` (the store app) and `publish-store-connector-image.yml` (the connector-with-config payment proxy).
 
 ## Build
 This builds a Docker image, not an npm package:
 ```
 pnpm install
 pnpm build            # esbuild bundle of the entrypoint
-docker build -f Dockerfile.dvm -t toon-store .
+docker build -f Dockerfile.store -t toon-store .
 ```
 
 ## Shared skills, docs & project context → toon-protocol/toon-meta

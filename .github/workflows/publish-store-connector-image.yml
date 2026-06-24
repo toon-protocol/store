@@ -1,0 +1,63 @@
+name: Publish store-connector image
+
+# Builds the store-connector image (deploy/Dockerfile: the published TOON
+# connector with this repo's deploy/connector.yaml baked in) and pushes it to
+# GHCR. This is the payment-proxy image that runs in front of the store app
+# (RouteTermination: route g.connector.store -> http://store:3300).
+#
+# The store app image is published separately (publish-store-image.yml ->
+# ghcr.io/toon-protocol/store). This image bakes a PINNED connector
+# (CONNECTOR_TAG); bump it deliberately to adopt a newer connector.
+#
+# `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
+# publish semver tags for pinning, plus an immutable sha tag.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency: publish-store-connector-image-${{ github.ref }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/store-connector
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy
+          file: deploy/Dockerfile
+          build-args: |
+            CONNECTOR_TAG=3.24.2
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,5 +1,5 @@
 /**
- * Unit tests for entrypoint-dvm.ts (Story 21.12)
+ * Unit tests for entrypoint-store.ts
  *
  * Covers:
  *   - createJobCounter: wrap, success/error increment/decrement, window eviction
@@ -74,7 +74,7 @@ vi.mock('@ardrive/turbo-sdk/node', () => {
 });
 
 // After mocks, import the functions under test
-import { createJobCounter, applyEnvOverlay, createTurboAdapter } from './entrypoint-dvm.js';
+import { createJobCounter, applyEnvOverlay, createTurboAdapter } from './entrypoint-store.js';
 
 // ── Job counter tests ────────────────────────────────────────────────────────
 
@@ -153,7 +153,6 @@ const ENV_KEYS_TO_RESTORE = [
   'KIND_PRICING_abc',
   'FEE_PER_JOB',
   'NODE_NOSTR_SECRET_KEY',
-  'CONNECTOR_URL',
   'BLS_PORT',
   'HANDLER_PORT',
 ];
@@ -167,9 +166,8 @@ beforeEach(() => {
     // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
     delete process.env[key];
   }
-  // Provide mandatory env vars so applyEnvOverlay doesn't throw
+  // The store identity key (applyEnvOverlay validates its hex format if present).
   process.env['NODE_NOSTR_SECRET_KEY'] = SECRET_HEX;
-  process.env['CONNECTOR_URL'] = 'ws://localhost:3000';
 });
 
 afterEach(() => {
@@ -226,9 +224,9 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ── createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution (Phase 4) ──
+// ── createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution (Phase 4) ──
 
-describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', () => {
+describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', () => {
   // A minimum-viable RSA JWK shape. We don't care about cryptographic validity
   // — the mocked ArweaveSigner just records what it received.
   const FAKE_JWK = {
@@ -249,7 +247,7 @@ describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', 
     TurboFactoryUnauthCalls.length = 0;
   });
 
-  it('DVM_ARWEAVE_JWK_B64 set + valid JWK → constructs ArweaveSigner-backed client', async () => {
+  it('STORE_ARWEAVE_JWK_B64 set + valid JWK → constructs ArweaveSigner-backed client', async () => {
     const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
     const result = await createTurboAdapter(b64, undefined);
 
@@ -265,7 +263,7 @@ describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', 
     expect(typeof result.arweaveAddress).toBe('string');
   });
 
-  it('DVM_ARWEAVE_JWK_B64 malformed base64 → clean error, no silent fallback', async () => {
+  it('STORE_ARWEAVE_JWK_B64 malformed base64 → clean error, no silent fallback', async () => {
     // Provide a TURBO_TOKEN to prove we do NOT fall back to it.
     const legacyToken = JSON.stringify(FAKE_JWK);
     // `Buffer.from(..., 'base64')` doesn't throw on most non-base64 strings —
@@ -273,13 +271,13 @@ describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', 
     // JSON.parse step. Pass clearly-non-JSON bytes.
     const garbageB64 = Buffer.from('this is not json', 'utf-8').toString('base64');
     await expect(createTurboAdapter(garbageB64, legacyToken)).rejects.toThrow(
-      /DVM_ARWEAVE_JWK_B64 does not decode to valid JSON/
+      /STORE_ARWEAVE_JWK_B64 does not decode to valid JSON/
     );
     // ArweaveSigner must NOT have been constructed (we bailed before).
     expect(ArweaveSignerCalls).toHaveLength(0);
   });
 
-  it('DVM_ARWEAVE_JWK_B64 missing RSA fields → clean error, no silent fallback', async () => {
+  it('STORE_ARWEAVE_JWK_B64 missing RSA fields → clean error, no silent fallback', async () => {
     const badJwk = { kty: 'EC', n: undefined };
     const b64 = Buffer.from(JSON.stringify(badJwk), 'utf-8').toString('base64');
     const legacyToken = JSON.stringify(FAKE_JWK);
@@ -289,7 +287,7 @@ describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', 
     expect(ArweaveSignerCalls).toHaveLength(0);
   });
 
-  it('DVM_ARWEAVE_JWK_B64 absent + TURBO_TOKEN set → legacy path used', async () => {
+  it('STORE_ARWEAVE_JWK_B64 absent + TURBO_TOKEN set → legacy path used', async () => {
     const legacyToken = JSON.stringify(FAKE_JWK);
     const result = await createTurboAdapter(undefined, legacyToken);
 
@@ -349,10 +347,10 @@ describe('createTurboAdapter — DVM_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', 
   });
 });
 
-describe('entrypoint-dvm.ts — BLS server static analysis', () => {
+describe('entrypoint-store.ts — BLS server static analysis', () => {
   let src: string;
   beforeEach(() => {
-    src = readFileSync(join(__dirname, 'entrypoint-dvm.ts'), 'utf-8');
+    src = readFileSync(join(__dirname, 'entrypoint-store.ts'), 'utf-8');
   });
 
   it('imports Hono from hono', () => {
@@ -371,8 +369,8 @@ describe('entrypoint-dvm.ts — BLS server static analysis', () => {
     expect(src).toMatch(/serve\(\s*\{[^}]*blsPort/s);
   });
 
-  it('extends SIGTERM shutdown to close blsServer before node.stop()', () => {
+  it('extends SIGTERM shutdown to close blsServer and the store backend', () => {
     expect(src).toMatch(/blsServer/);
-    expect(src).toMatch(/node\.stop\(\)/);
+    expect(src).toMatch(/storeBackend\.close\(/);
   });
 });

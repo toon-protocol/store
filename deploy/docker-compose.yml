@@ -1,0 +1,73 @@
+# =============================================================================
+# store deploy — connector (payment proxy) + Arweave store backend. NO Caddy.
+# =============================================================================
+# The connector monetizes the kind:5094 blob-storage job; the store backend is
+# payment-oblivious. TLS is terminated by the deployment environment, which
+# reverse-proxies to the host-published edge (:3000).
+#
+#   payer ──POST /ilp──▶ connector ──POST /store──▶ store:3300  (store backend; PRIVATE)
+#
+# PRIVACY INVARIANT (enforced by construction):
+#   - store :3300 (store job backend) → NEVER host-published; only connector dials store:3300.
+#   - store :3400 (health) / connector admin :8081 / health :8080 → NEVER host-published.
+#   The only host-bound port is the edge :3000.
+#
+# Dev:  docker compose up --build   (builds store-connector locally from ./Dockerfile)
+# Prod: docker compose up           (pulls the pinned STORE_CONNECTOR_IMAGE)
+# =============================================================================
+
+services:
+  # ── The payment proxy (connector + baked store route config) ────────────────
+  connector:
+    image: ${STORE_CONNECTOR_IMAGE:-ghcr.io/toon-protocol/store-connector:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CONNECTOR_TAG: ${CONNECTOR_TAG:-3.24.2}
+    environment:
+      CONFIG_FILE: /app/config/connector.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # On-chain settlement key derived from this BIP-39 mnemonic at boot
+      # (overwrites connector.yaml's keyId). Empty → pre-funded anvil account-0.
+      TOON_MNEMONIC: ${TOON_MNEMONIC:-}
+      # Devnet serves a SELF-SIGNED cert — devnet-only shortcut for the
+      # connector's RPC/faucet calls. DEVNET-ONLY.
+      NODE_TLS_REJECT_UNAUTHORIZED: ${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+    ports:
+      - '${EDGE_PORT:-3000}:3000' # paid POST /ilp edge (the env's TLS terminator fronts this)
+    expose:
+      - '8080' # health — internal only
+    depends_on:
+      store:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The Arweave store (payment-oblivious HTTP backend) ───────────────────────
+  # Published store image: it serves the plain-HTTP POST /store backend that the
+  # connector reverse-proxies to (RouteTermination). The job port (3300) and
+  # health (3400) are NOT published — only the connector dials store:3300 over the
+  # compose network, enforcing the privacy invariant.
+  store:
+    image: ${STORE_IMAGE:-ghcr.io/toon-protocol/store:latest}
+    environment:
+      NODE_NOSTR_SECRET_KEY: ${STORE_NOSTR_SECRET_KEY:?set STORE_NOSTR_SECRET_KEY in .env (64-char hex)}
+      HANDLER_PORT: '3300' # POST /store job backend — PRIVATE
+      BLS_PORT: '3400' # health — internal
+      FEE_PER_JOB: ${FEE_PER_JOB:-10} # informational (connector enforces the flat route price)
+      # Arweave wallet: base64(JSON JWK). Empty → ephemeral free-tier (≤100KB).
+      STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
+    expose:
+      - '3300' # store job backend — PRIVATE (only the connector dials store:3300)
+      - '3400' # health — internal
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3400/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  default:
+    name: store_deploy_net
