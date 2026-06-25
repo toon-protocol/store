@@ -256,6 +256,29 @@ function parseBtpPeers() {
   return { peers, routes };
 }
 
+/**
+ * Resolve the route addresses advertised OUT OF BAND in the kind:10032
+ * announcement content (issue #22). A client holding only the genesis seed can
+ * then learn where to PUBLISH (the relay terminate address) and where to STORE
+ * (the blob terminate address) without falling back to a hardcoded route map.
+ *
+ * Defaults are derived from this node's own ILP address (which IS the store
+ * terminate, e.g. `g.proxy.store`): the sibling publish route is obtained by
+ * swapping the trailing `.store` label for `.relay` (`g.proxy.store` ->
+ * `g.proxy.relay`). Both are overridable via env for non-standard topologies.
+ */
+function resolveAnnouncementRoutes(ilpAddress: string): {
+  publish: string;
+  store: string;
+} {
+  const store = process.env['TOON_STORE_ROUTE']?.trim() || ilpAddress;
+  const derivedPublish = ilpAddress.endsWith('.store')
+    ? `${ilpAddress.slice(0, -'.store'.length)}.relay`
+    : ilpAddress;
+  const publish = process.env['TOON_PUBLISH_ROUTE']?.trim() || derivedPublish;
+  return { publish, store };
+}
+
 // ---------- Main ----------
 async function main(): Promise<void> {
   console.log('\n' + '='.repeat(50));
@@ -748,14 +771,53 @@ async function main(): Promise<void> {
       }),
     };
 
-    // Publish own ILP info to local relay
-    try {
-      const ilpInfoEvent = buildIlpPeerInfoEvent(ownIlpInfo, config.secretKey);
-      eventStore.store(ilpInfoEvent);
-      console.log('[Bootstrap] Published own ILP info to local relay');
-    } catch (error) {
-      console.warn('[Bootstrap] Failed to publish ILP info:', error);
-    }
+    // Carry the node's route addresses OUT OF BAND in the announcement CONTENT
+    // (NOT core's IlpPeerInfo wire types — see issue #22). The genesis seed
+    // gives a client only connect info (pubkey/relayUrl/ilpAddress/btpEndpoint);
+    // routing is meant to be learned from this announcement at connect time, so
+    // a client never needs a hardcoded publish/store route map in config.json.
+    const announcementRoutes = resolveAnnouncementRoutes(config.ilpAddress);
+    const ownIlpAnnouncement: IlpPeerInfo & {
+      routes: { publish: string; store: string };
+    } = {
+      ...ownIlpInfo,
+      routes: announcementRoutes,
+    };
+    console.log(
+      `[Announce] Route hints: publish=${announcementRoutes.publish} store=${announcementRoutes.store}`
+    );
+
+    // The kind:10032 announcement carries a NIP-40 `expiration` tag, so when it
+    // is published ONCE at bootstrap it goes dark the moment the tag lapses and
+    // connecting clients (which skip expired events) fall back to their
+    // hardcoded route map (issue #22). Republish on an interval that refreshes
+    // at HALF the TTL so a fresh, unexpired event is CONTINUOUSLY available on
+    // the local relay for as long as the node is up. Mirrors the
+    // publishAttestation interval pattern below (a DIFFERENT, kind:10033 event).
+    const ilpInfoRefreshSeconds = parseInt(
+      process.env['ILP_INFO_REFRESH_INTERVAL'] || '300',
+      10
+    );
+
+    const publishOwnIlpInfo = () => {
+      try {
+        const ilpInfoEvent = buildIlpPeerInfoEvent(
+          ownIlpAnnouncement,
+          config.secretKey,
+          { ttlSeconds: ilpInfoRefreshSeconds * 2 }
+        );
+        eventStore.store(ilpInfoEvent);
+        wsRelay.broadcastEvent(ilpInfoEvent);
+        console.log(
+          `[Announce] Published own ILP info to local relay (id: ${ilpInfoEvent.id.slice(0, 16)}..., expires in ${ilpInfoRefreshSeconds * 2}s)`
+        );
+      } catch (error) {
+        console.warn('[Announce] Failed to publish ILP info:', error);
+      }
+    };
+
+    publishOwnIlpInfo();
+    setInterval(publishOwnIlpInfo, ilpInfoRefreshSeconds * 1000);
 
     // Publish kind:10035 service discovery event to local relay.
     // Advertises pricing, supported kinds, and DVM capabilities (e.g., Arweave blob storage).
@@ -877,7 +939,7 @@ async function main(): Promise<void> {
     for (const result of results) {
       try {
         const announceEvent = buildIlpPeerInfoEvent(
-          ownIlpInfo,
+          ownIlpAnnouncement,
           config.secretKey
         );
         await node.publishEvent(announceEvent, {
