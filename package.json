@@ -2,13 +2,13 @@
   "name": "@toon-protocol/store",
   "version": "0.2.0",
   "private": true,
-  "description": "Docker entrypoint for toon containers",
+  "description": "Arweave-only store backend (NIP-90 kind:5094) — Docker entrypoint",
   "type": "module",
-  "main": "dist/entrypoint-sdk.js",
+  "main": "dist/entrypoint-store.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/entrypoint-sdk.js",
+    "start": "node dist/entrypoint-store.js",
     "test": "vitest run"
   },
   "dependencies": {
@@ -32,7 +32,6 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/dockerode": "^3.3.0",
     "@types/node": "^20.11.0",
     "@types/ws": "^8.5.10",
     "esbuild": "^0.24.0",

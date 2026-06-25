@@ -1,10 +1,10 @@
 /**
- * esbuild configuration for TOON Docker entrypoints.
+ * esbuild configuration for the TOON store Docker entrypoint.
  *
- * Bundles entrypoint-sdk.ts and attestation-server.ts into self-contained ESM
- * files. Native modules (better-sqlite3) and dynamically-required packages
- * (ethers, express) are marked external since they use variable `require()`
- * calls in the connector's `requireOptional()` that esbuild can't resolve.
+ * Bundles entrypoint-store.ts into a self-contained ESM file. Native modules
+ * (better-sqlite3) and dynamically-required packages (ethers, express) are
+ * marked external since they use variable `require()` calls in the connector's
+ * `requireOptional()` that esbuild can't resolve.
  *
  * Usage: node esbuild.config.mjs
  */
@@ -13,8 +13,6 @@ import * as esbuild from 'esbuild';
 
 const result = await esbuild.build({
   entryPoints: [
-    'src/entrypoint-sdk.ts',
-    'src/attestation-server.ts',
     'src/entrypoint-store.ts',
   ],
   bundle: true,

@@ -1,8 +1,0 @@
-# ATOR Protocol (anon) v0.4.10.0-beta — Debian bookworm .deb packages
-# Source URL pattern:
-#   https://github.com/anyone-protocol/ator-protocol/releases/download/v0.4.10.0-beta/<file>
-# Mirrored from connector/docker/ator-public-sidecar/checksums.txt — keep in sync.
-#
-# Format: sha256sum -c compatible (checksum, two spaces, filename)
-f75c139509fd353504d0de45356336bef7dcdf13c3d11a087b3a9733bc08790a  anon_0.4.10.0-beta-1.d12.bookworm+1_amd64.deb
-1f5f0971f9c359d42aa8c77442234dfdccc50654927c93b2f538410582563e5a  anon_0.4.10.0-beta-1.d12.bookworm+1_arm64.deb
