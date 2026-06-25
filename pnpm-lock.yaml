@@ -61,9 +61,6 @@ dependencies:
     version: 8.21.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
 
 devDependencies:
-  '@types/dockerode':
-    specifier: ^3.3.0
-    version: 3.3.47
   '@types/node':
     specifier: ^20.11.0
     version: 20.19.43
@@ -5480,21 +5477,6 @@ packages:
     dev: false
     optional: true
 
-  /@types/docker-modem@3.0.6:
-    resolution: {integrity: sha512-yKpAGEuKRSS8wwx0joknWxsmLha78wNMe9R2S3UNsVOkZded8UqOrV8KoeDXoXsjndxwyF3eIhyClGbO1SEhEg==}
-    dependencies:
-      '@types/node': 20.19.43
-      '@types/ssh2': 1.15.5
-    dev: true
-
-  /@types/dockerode@3.3.47:
-    resolution: {integrity: sha512-ShM1mz7rCjdssXt7Xz0u1/R2BJC7piWa3SJpUBiVjCf2A3XNn4cP6pUVaD8bLanpPVVn4IKzJuw3dOvkJ8IbYw==}
-    dependencies:
-      '@types/docker-modem': 3.0.6
-      '@types/node': 20.19.43
-      '@types/ssh2': 1.15.5
-    dev: true
-
   /@types/estree@1.0.9:
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
     dev: true
@@ -5548,12 +5530,6 @@ packages:
     requiresBuild: true
     dev: false
 
-  /@types/node@18.19.130:
-    resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
-    dependencies:
-      undici-types: 5.26.5
-    dev: true
-
   /@types/node@20.19.43:
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
     dependencies:
@@ -5573,12 +5549,6 @@ packages:
       '@types/node': 20.19.43
     dev: false
     optional: true
-
-  /@types/ssh2@1.15.5:
-    resolution: {integrity: sha512-N1ASjp/nXH3ovBHddRJpli4ozpk6UdDYIX4RJWFa9L1YKnzdhTlVmiGHm4DZnj/jLbqZpes4aeR30EFGQtvhQQ==}
-    dependencies:
-      '@types/node': 18.19.130
-    dev: true
 
   /@types/trusted-types@2.0.7:
     resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
@@ -11434,10 +11404,6 @@ packages:
     requiresBuild: true
     dev: false
     optional: true
-
-  /undici-types@5.26.5:
-    resolution: {integrity: sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA==}
-    dev: true
 
   /undici-types@6.19.8:
     resolution: {integrity: sha512-ve2KP6f/JnbPBFyobGHuerC9g1FYGn/F8n1LWTwNxCEzd6IfqTwUQcNXgEtmmQ6DlRrC1hrSrBnCZPokRrDHjw==}
