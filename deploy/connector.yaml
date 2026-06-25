@@ -82,24 +82,52 @@ chainProviders:
       initialDepositMultiplier: 2
       ledgerSnapshotPath: ./data/ledger-connector.json
 
-peers: []
+# ── Peers ─────────────────────────────────────────────────────────────────────
+# One upstream peer: the relay-connector, which ABSORBS the g.proxy apex role (it
+# replaced the old toon box). It both routes the direct g.proxy.store here (apex
+# role) AND forwards the relay-hop g.proxy.relay.store here, settling over a
+# single channel. It dials in over BTP at the apex hostname; this entry is for
+# bilateral settlement accounting.
+#
+# DISTINCT SETTLEMENT IDENTITY: set in .env (devnet):
+#   TOON_MNEMONIC="portion symbol pencil track twenty vault love raccoon rigid gravity glide aerobic"
+#   → EVM 0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e (NIP-06 path m/44'/1237'/0'/0/0)
+# Distinct from the relay-connector/apex (0xC0E55…), so the channel doesn't self-pay.
+peers:
+  - id: relay-connector
+    url: wss://proxy.devnet.toonprotocol.dev:443
+    relation: peer
+    authToken: ''
+    chain: evm:31337
+    # The relay-connector/apex settlement address (reuses the demo apex seed).
+    settlementAddress: '0xC0E55cD2E967a4F625627DaE5d4946f54267C7ab'
 
 # ── Routes ──────────────────────────────────────────────────────────────────
-# ONE terminated route. `upstream` points at the store's payment-oblivious HTTP
-# job backend (3300, POST /store) over the compose network by service name — the
-# host can never reach `store:3300` directly (that port is NOT published), which
-# enforces the privacy invariant: paid writes MUST flow through the connector.
+# This box TERMINATES both paths to the same Arweave DVM (store:3300, POST /store):
+#   1. g.proxy.store        — the DIRECT path (client → apex → here).
+#   2. g.proxy.relay.store  — the RELAY-HOP path (client → apex → relay-connector → here).
+# Both reverse-proxy POST /store to the private store:3300 backend; the relay's
+# hop fee is added upstream by the relay-connector, so this box charges only the
+# flat DVM job price on each.
 #
-# `price` is a FLAT per-job price (align with the store's FEE_PER_JOB).
-# `settlementAddresses.evm` is anvil account-0's address (matches the keyId
-# above). With TOON_MNEMONIC set, change it to the mnemonic-derived EVM address.
+# settlementAddresses.evm is the store box's OWN derived address (its income).
 routes:
-  - prefix: g.connector.store
+  - prefix: g.proxy.store
     nextHop: connector
     upstream: http://store:3300
-    price: '10'
+    price: '1000'
     chains:
       - evm
-    ilpAddress: g.connector.store
+    ilpAddress: g.proxy.store
     settlementAddresses:
-      evm: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
+
+  - prefix: g.proxy.relay.store
+    nextHop: connector
+    upstream: http://store:3300
+    price: '1000'
+    chains:
+      - evm
+    ilpAddress: g.proxy.relay.store
+    settlementAddresses:
+      evm: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
