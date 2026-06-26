@@ -55,7 +55,7 @@ jobs:
           context: deploy
           file: deploy/Dockerfile
           build-args: |
-            CONNECTOR_TAG=3.24.2
+            CONNECTOR_TAG=3.28.0
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
