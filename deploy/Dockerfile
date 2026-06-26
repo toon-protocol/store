@@ -13,7 +13,7 @@
 # HTTP-envelope contract are frozen against a known connector. Bump CONNECTOR_TAG
 # deliberately when adopting a newer connector.
 # =============================================================================
-ARG CONNECTOR_TAG=3.24.2
+ARG CONNECTOR_TAG=3.28.0
 FROM ghcr.io/toon-protocol/connector:${CONNECTOR_TAG}
 
 # Bake the store route config to the connector's default CONFIG_FILE location.

@@ -190,9 +190,9 @@ routes:
 # NIP-40 expiration is refreshed at half the TTL (refreshIntervalSecs → TTL = 2×),
 # so the announcement stays continuously fresh while the node is up.
 #
-# REQUIRES a connector image with the self-announce feature
-# (toon-protocol/connector#265). Bump CONNECTOR_TAG (.env / Dockerfile) to a release
-# that carries it; older images ignore this block.
+# REQUIRES connector >= 3.28.0 — the self-announce feature
+# (toon-protocol/connector#265) shipped in v3.28.0. CONNECTOR_TAG (.env / Dockerfile)
+# is pinned to 3.28.0; older images ignore this block.
 selfAnnounce:
   enabled: true
   # The ILP route to publish the kind:10032 THROUGH. Resolves to the outbound
