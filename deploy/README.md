@@ -89,6 +89,50 @@ NOT publicly reachable. The ephemeral free-tier returns a real Arweave tx id for
 ≤100KB blobs without a funded wallet. (Against a public edge, point the URLs at
 the env's HTTPS hostnames instead of `localhost`.)
 
+## Out-of-band discovery (kind:10032 self-announce — remote/paid)
+
+This store connector publishes a fresh `kind:10032` `IlpPeerInfo` announcement
+describing its **own** `g.proxy.store` route (settlement address
+`0x1f4E12…`) so a client holding **only the genesis seed** discovers the store
+route out of band — instead of relying on it being advertised only by the apex.
+This is the store-side half of
+[toon-protocol/store#22](https://github.com/toon-protocol/store/issues/22)
+(apex half: [relay#37](https://github.com/toon-protocol/relay/issues/37) /
+[relay#39](https://github.com/toon-protocol/relay/pull/39)).
+
+- The connector publishes the event **through its own routing** by addressing
+  `announceTo` (an ILP route). Unlike the apex (which terminates its own
+  `g.proxy.relay` and announces **free/locally**), the store box does **not** front
+  the relay, so `announceTo: g.proxy.relay` resolves to a **forwarded** route (the
+  outbound `g.proxy.relay → relay-connector` route in `connector.yaml`). The publish
+  therefore takes the **REMOTE / PAID** branch: the store box **pays the apex** over
+  its existing store↔apex settlement channel to store its own peer-info announcement
+  on the relay. **This costs a small paid write on every refresh and needs the store
+  box's funded channel to the apex.**
+- The amount sent is `selfAnnounce.announcePrice` (`'2000'`). The apex's
+  `g.proxy.relay` terminate price is `1000`, but the store box deducts its own
+  `connectorFeePercentage` (0.1% = `floor(amount/1000)`) when it forwards the write,
+  so `'1000'` would deliver only `999` and underpay — `'2000'` delivers `1998 ≥ 1000`
+  (see the `connector.yaml` comment).
+- It signs with its **NIP-06 key derived from `TOON_MNEMONIC`** (the settlement
+  identity; no new secret). The announcement CONTENT carries route hints
+  `{ publish: g.proxy.relay, store: g.proxy.store }`.
+- It **refreshes before the NIP-40 expiration lapses** (`refreshIntervalSecs` →
+  TTL = 2×), so the announcement is continuously fresh while the node is up.
+- Config lives in `connector.yaml`'s `selfAnnounce` block. **It REQUIRES a connector
+  image that includes [toon-protocol/connector#265](https://github.com/toon-protocol/connector/pull/265)** —
+  bump `CONNECTOR_TAG` (`.env` / `Dockerfile`) to a release carrying it; older images
+  ignore the block and the store box will not self-announce.
+
+Verify it's live (after redeploying against a connector that supports it):
+
+```bash
+# Query the apex relay's free read WS for the store box's announcement:
+npx ts-node -e 'import {SimplePool} from "nostr-tools";const p=new SimplePool();p.querySync(["wss://relay-ws.devnet.toonprotocol.dev"],{kinds:[10032]}).then(e=>{console.log(e);process.exit(0)})'
+# Expect a fresh, UNEXPIRED kind:10032 from the store box whose content carries
+# routes {publish,store} and settlement address 0x1f4E12…
+```
+
 ## Privacy invariant
 
 - **store `:3300` (store job backend) is never host-published** — the only way in
