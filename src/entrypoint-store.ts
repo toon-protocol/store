@@ -155,6 +155,10 @@ export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
   legacyToken: string | undefined
 ): Promise<CreateTurboAdapterResult> {
+  // @ts-ignore — @ardrive/turbo-sdk is a transitive peer dep; under pnpm's strict
+  // node_modules layout it is not hoisted, so its types are not resolvable here.
+  // Use @ts-ignore (not @ts-expect-error) so this stays silent whether or not the
+  // package happens to be hoisted in a given install layout.
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
   // Treat an empty OR whitespace-only env var as ABSENT, not "present but
