@@ -36,9 +36,10 @@ reverse-proxies to (RouteTermination).
 | `ghcr.io/toon-protocol/store-connector`     | connector + this repo's `connector.yaml` baked in           |
 
 The `store-connector` image bakes a **pinned** connector (`CONNECTOR_TAG`,
-default `3.24.2`) so the config schema and the HTTP-envelope contract are frozen
-against a known connector. The image's own version tracks this repo's release;
-bump `CONNECTOR_TAG` deliberately to adopt a newer connector.
+default `3.28.0` — the release that ships the `selfAnnounce` feature) so the config
+schema and the HTTP-envelope contract are frozen against a known connector. The
+image's own version tracks this repo's release; bump `CONNECTOR_TAG` deliberately
+to adopt a newer connector.
 
 ## Drop-in steps
 
@@ -119,10 +120,10 @@ This is the store-side half of
   `{ publish: g.proxy.relay, store: g.proxy.store }`.
 - It **refreshes before the NIP-40 expiration lapses** (`refreshIntervalSecs` →
   TTL = 2×), so the announcement is continuously fresh while the node is up.
-- Config lives in `connector.yaml`'s `selfAnnounce` block. **It REQUIRES a connector
-  image that includes [toon-protocol/connector#265](https://github.com/toon-protocol/connector/pull/265)** —
-  bump `CONNECTOR_TAG` (`.env` / `Dockerfile`) to a release carrying it; older images
-  ignore the block and the store box will not self-announce.
+- Config lives in `connector.yaml`'s `selfAnnounce` block. **It REQUIRES connector
+  `>= 3.28.0`** ([toon-protocol/connector#265](https://github.com/toon-protocol/connector/pull/265),
+  shipped in v3.28.0) — `CONNECTOR_TAG` is pinned to `3.28.0`; older images ignore the
+  block and the store box will not self-announce.
 
 Verify it's live (after redeploying against a connector that supports it):
 

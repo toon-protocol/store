@@ -24,7 +24,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CONNECTOR_TAG: ${CONNECTOR_TAG:-3.24.2}
+        CONNECTOR_TAG: ${CONNECTOR_TAG:-3.28.0}
     environment:
       CONFIG_FILE: /app/config/connector.yaml
       LOG_LEVEL: ${LOG_LEVEL:-info}
