@@ -4,8 +4,6 @@ The TOON Protocol **store** — NIP-90 **kind:5094** Arweave blob storage. Built
 
 Part of the **TOON Protocol** — pay-to-write Nostr over Interledger (ILP), split into per-team repos.
 
-> **Follow-ups:** this repo was carved from the monorepo `docker/` aggregator and still contains the other images' build contexts — trim to store-only (keep `Dockerfile.store` + `src/entrypoint-store.ts` + `src/store-backend.ts` + shared helpers). The image-publish workflows now exist: `publish-store-image.yml` (the store app) and `publish-store-connector-image.yml` (the connector-with-config payment proxy).
-
 ## Build
 This builds a Docker image, not an npm package:
 ```
@@ -13,6 +11,7 @@ pnpm install
 pnpm build            # esbuild bundle of the entrypoint
 docker build -f Dockerfile.store -t toon-store .
 ```
+Image-publish workflows: `publish-store-image.yml` (the store app) and `publish-store-connector-image.yml` (the connector-with-config payment proxy).
 
 ## Shared skills, docs & project context → toon-protocol/toon-meta
 Cross-cutting agent skills, docs, and the canonical project context live in **[toon-protocol/toon-meta](https://github.com/toon-protocol/toon-meta)**. Load the shared skills:
