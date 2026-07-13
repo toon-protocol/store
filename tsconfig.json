@@ -14,8 +14,6 @@
   },
   "include": ["src/**/*"],
   "exclude": [
-    "src/**/*.test.ts",
-    "src/entrypoint-town.ts",
-    "src/entrypoint-townhouse-api.ts"
+    "src/**/*.test.ts"
   ]
 }

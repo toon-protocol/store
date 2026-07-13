@@ -112,9 +112,8 @@ export function createJobCounter(windowMs: number = 5 * 60 * 1000): JobCounter {
   return { wrap, snapshot };
 }
 
-// --- Helper: bytes formatter (inlined; cannot import host-side @toon-protocol/townhouse) ---
-// Mirrors packages/townhouse/src/credits/units.ts:formatWincAsBytes — base-1000
-// SI units, rounds DOWN. Duplicated here to keep the Docker bundle self-contained.
+// --- Helper: bytes formatter (inlined to keep the Docker bundle self-contained) ---
+// base-1000 SI units, rounds DOWN.
 const WINC_PER_BYTE_FALLBACK = 610_000n; // ~ARIO mainnet rate floor; sufficient for a boot-time log line
 function formatWincAsBytes(winc: bigint): string {
   if (winc <= 0n) return '~0 B';
@@ -156,7 +155,10 @@ export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
   legacyToken: string | undefined
 ): Promise<CreateTurboAdapterResult> {
-  // @ts-expect-error — @ardrive/turbo-sdk is a transitive peer dep; types not resolvable as a phantom dep
+  // @ts-ignore — @ardrive/turbo-sdk is a transitive peer dep; under pnpm's strict
+  // node_modules layout it is not hoisted, so its types are not resolvable here.
+  // Use @ts-ignore (not @ts-expect-error) so this stays silent whether or not the
+  // package happens to be hoisted in a given install layout.
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
   // Treat an empty OR whitespace-only env var as ABSENT, not "present but

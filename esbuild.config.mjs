@@ -32,7 +32,7 @@ const result = await esbuild.build({
   //   node_modules so the toon-client entrypoint can require() it at runtime
   // - @noble/curves: dynamic import inside packages/client/dist causes esbuild
   //   to fail resolving the subpath export in Docker's pnpm store layout
-  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'arweave', 'o1js', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'mina-fungible-token', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves', '@toon-protocol/town'],
+  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'arweave', 'o1js', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'mina-fungible-token', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves'],
 
   // The connector (@crosstown/connector) is CJS and its requireOptional() uses
   // require(packageName). When esbuild bundles CJS into ESM output, these
