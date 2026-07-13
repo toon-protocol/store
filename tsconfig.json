@@ -15,9 +15,6 @@
   "include": ["src/**/*"],
   "exclude": [
     "src/**/*.test.ts",
-    "src/entrypoint-sdk.ts",
-    "src/entrypoint-toon-client.ts",
-    "src/entrypoint-toon-client-helpers.ts",
     "src/entrypoint-town.ts",
     "src/entrypoint-townhouse-api.ts"
   ]
