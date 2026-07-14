@@ -27,9 +27,6 @@ FROM node:20-alpine AS builder
 LABEL maintainer="toon-protocol"
 LABEL description="TOON store - Arweave-only blob storage (NIP-90 kind:5094)"
 
-# Build deps for native modules (better-sqlite3 prebuild via node-gyp).
-RUN apk add --no-cache python3 py3-setuptools make g++
-
 # Pin pnpm to match the repo's packageManager / lockfileVersion 6.0.
 RUN corepack enable && corepack prepare pnpm@8.15.9 --activate
 
@@ -40,12 +37,9 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 
 # Install all deps (incl. devDeps: esbuild, typescript needed for the bundle).
-# better-sqlite3 is pulled transitively via @toon-protocol/connector and backs
-# the connector's local claim store on the value-bearing path; build its native
-# .node here. The rest of the native runtime deps (@libsql/client, libsql,
-# @ardrive/turbo-sdk) are installed fresh in the assembly step below.
-RUN pnpm install --frozen-lockfile && \
-    pnpm rebuild better-sqlite3
+# The native runtime deps (@libsql/client, libsql, @ardrive/turbo-sdk) are
+# installed fresh in the assembly step below.
+RUN pnpm install --frozen-lockfile
 
 # Source + build config.
 COPY tsconfig.json esbuild.config.mjs ./
@@ -66,20 +60,6 @@ RUN mkdir -p /runtime/node_modules
 # (createRequire) resolves.
 RUN cp dist/entrypoint-store.js /runtime/ && \
     echo '{"type":"module"}' > /runtime/package.json
-
-# Cherry-pick better-sqlite3 (native .node) + its runtime deps (bindings,
-# file-uri-to-path). Externalized by esbuild; required() at runtime by the
-# connector's local store.
-RUN set -eux; \
-    SQLITE_DIR=$(ls -d node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3); \
-    BINDINGS_DIR=$(ls -d node_modules/.pnpm/bindings@*/node_modules/bindings); \
-    FUTP_DIR=$(ls -d node_modules/.pnpm/file-uri-to-path@*/node_modules/file-uri-to-path); \
-    mkdir -p /runtime/node_modules/better-sqlite3/build/Release; \
-    cp -r "$SQLITE_DIR/lib" /runtime/node_modules/better-sqlite3/; \
-    cp "$SQLITE_DIR/build/Release/better_sqlite3.node" /runtime/node_modules/better-sqlite3/build/Release/; \
-    cp "$SQLITE_DIR/package.json" /runtime/node_modules/better-sqlite3/; \
-    cp -r "$BINDINGS_DIR" /runtime/node_modules/; \
-    cp -r "$FUTP_DIR" /runtime/node_modules/
 
 # Cherry-pick the remaining esbuild --external:* modules that the store bundle
 # can reach at runtime, resolved from pnpm's hoist trees. ethers/express are
@@ -127,7 +107,7 @@ RUN cd /tmp && npm init -y >/dev/null 2>&1 && \
 # -- Stage 2: Runtime --------------------------------------------------------
 FROM node:20-alpine
 
-# Runtime support for native modules (better-sqlite3 / libsql link libstdc++).
+# Runtime support for native modules (libsql links libstdc++).
 RUN apk add --no-cache libstdc++
 
 WORKDIR /app
