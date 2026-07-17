@@ -12,8 +12,13 @@
  * purchased name with that ANT, so the client owns the name from inception —
  * the DVM is only the payer, never the owner. Because the buyer is not the ANT
  * holder, the ANT NFT's Attributes plugin is left unpopulated by the purchase;
- * the handler runs the permissionless `syncAttributes(name)` reconcile
- * afterwards (best-effort — a sync failure never fails a completed buy).
+ * the handler attempts the `syncAttributes(name)` reconcile afterwards
+ * (best-effort — a sync failure never fails a completed buy). NOTE, proven
+ * live on devnet 2026-07-17: the deployed `ario-ant` program gates
+ * SyncAttributes to the NFT HOLDER (AnchorError 6026 NotNftHolder,
+ * lib.rs:1603), so the DVM's attempt fails benignly and the receipt carries
+ * `syncAttributesTxId: null` — the CLIENT (holder) runs the reconcile itself.
+ * The attempt is kept for deployments where the reconcile is permissionless.
  *
  * PAYMENT: like kind:5094, this backend is payment-oblivious. The connector in
  * front terminates the ILP payment (RouteTermination) and forwards the plain
