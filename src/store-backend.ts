@@ -52,8 +52,15 @@ export interface StoreBackendConfig {
   /**
    * The kind:5094 handler — typically `createArweaveDvmHandler(...)` wrapped by
    * the job counter, so /health (BLS, on blsPort) still reflects activity.
+   * Fallback for kinds without an entry in {@link StoreBackendConfig.handlers}.
    */
   handle: StoreHandler;
+  /**
+   * Additional per-kind handlers (e.g. kind:5095 ArNS buy — see
+   * ./arns-buy-handler). Dispatch is by the event's `kind`; kinds not listed
+   * here fall back to `handle`.
+   */
+  handlers?: Record<number, StoreHandler>;
   /**
    * Plain-HTTP job port. The connector route's `upstream` points here
    * (`http://store:<handlerPort>`); the client request-target is `/store`.
@@ -124,9 +131,13 @@ export function startStoreBackend(config: StoreBackendConfig): StoreBackend {
       reject: (code, message) => ({ accept: false, code, message }),
     };
 
+    // Per-kind dispatch: registered kinds get their own handler; everything
+    // else falls back to the default (kind:5094 Arweave) handler.
+    const handle = config.handlers?.[event.kind] ?? config.handle;
+
     let res: StoreHandlerResponse;
     try {
-      res = await config.handle(ctx);
+      res = await handle(ctx);
     } catch (err) {
       console.error(
         '[store] handler threw:',
@@ -136,14 +147,45 @@ export function startStoreBackend(config: StoreBackendConfig): StoreBackend {
     }
 
     if (res.accept) {
-      // The Arweave handler returns `data = base64(txId)`; decode it for a
-      // friendly JSON while also echoing the base64 for byte-faithful clients.
-      const txId = res.data ? Buffer.from(res.data, 'base64').toString('utf8') : undefined;
+      // The Arweave handler returns `data = base64(txId)`; structured handlers
+      // (e.g. kind:5095 arns-buy) return `data = base64(JSON receipt)`. Decode
+      // for a friendly JSON while echoing the base64 for byte-faithful
+      // clients: a JSON object surfaces as `result`, anything else as `txId`
+      // (the historical kind:5094 contract, unchanged).
+      const decoded = res.data
+        ? Buffer.from(res.data, 'base64').toString('utf8')
+        : undefined;
+      let txId: string | undefined;
+      let result: Record<string, unknown> | undefined;
+      if (decoded !== undefined) {
+        try {
+          const parsed: unknown = JSON.parse(decoded);
+          if (parsed !== null && typeof parsed === 'object') {
+            result = parsed as Record<string, unknown>;
+          } else {
+            txId = decoded;
+          }
+        } catch {
+          txId = decoded;
+        }
+      }
       console.log(
         `[store] kind:${event.kind} id=${event.id} payer=${payer ?? '-'} ` +
-          `amount=${amount ?? '-'} chain=${chain ?? '-'} -> txId=${txId ?? '-'}`
+          `amount=${amount ?? '-'} chain=${chain ?? '-'} -> ` +
+          `${result ? `result=${decoded}` : `txId=${txId ?? '-'}`}`
       );
-      return c.json({ accept: true, txId, data: res.data, payer, amount, chain }, 200);
+      return c.json(
+        {
+          accept: true,
+          ...(txId !== undefined ? { txId } : {}),
+          ...(result !== undefined ? { result } : {}),
+          data: res.data,
+          payer,
+          amount,
+          chain,
+        },
+        200
+      );
     }
 
     // Rejection: surface code+message so the failure self-diagnoses from the
