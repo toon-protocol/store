@@ -1,6 +1,6 @@
 # store
 
-The TOON Protocol **store** — NIP-90 **kind:5094** Arweave blob storage. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`: upload the blob to Arweave via Turbo, return the tx id. This is a **container, not an npm package** (`@toon-protocol/store`, kept private). It runs as a payment-oblivious `POST /store` backend (`src/store-backend.ts`) behind the connector, which is the front-of-app payment proxy and reverse-proxies to it (RouteTermination — see `deploy/`).
+The TOON Protocol **store** — NIP-90 **kind:5094** Arweave blob storage, plus two optional job kinds: **kind:5095** ArNS brokered buy (`src/arns-buy-handler.ts`, gated by `ARNS_DVM_SOLANA_SECRET_KEY`) and **kind:5096** gas-station co-sign/broadcast (`src/gas-station-handler.ts`, gated by `GAS_STATION_SOLANA_SECRET_KEY`). Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`: upload the blob to Arweave via Turbo, return the tx id. This is a **container, not an npm package** (`@toon-protocol/store`, kept private). It runs as a payment-oblivious `POST /store` backend (`src/store-backend.ts`) behind the connector, which is the front-of-app payment proxy and reverse-proxies to it (RouteTermination — see `deploy/`).
 
 Part of the **TOON Protocol** — pay-to-write Nostr over Interledger (ILP), split into per-team repos.
 
