@@ -22,8 +22,17 @@
  *   STORE_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of an RSA JWK Arweave wallet.
  *                            Treated as secret — never logged.
  *   TURBO_TOKEN           -> Legacy fallback: raw JSON JWK for Arweave uploads.
+ *   ARNS_DVM_SOLANA_SECRET_KEY -> OPTIONAL: 128-char hex (64-byte Ed25519
+ *                            keypair) of the DVM's funded Solana wallet.
+ *                            When set, the kind:5095 ArNS brokered-buy job
+ *                            ("buyfor" — see ./arns-buy-handler) is enabled.
+ *                            Treated as secret — never logged.
+ *   ARNS_NETWORK          -> devnet (default) | mainnet — which ar.io registry
+ *                            the kind:5095 buys target. Mainnet is explicit
+ *                            opt-in only.
  *
- * Registers ONLY kind:5094 Arweave blob storage. kind:5250 Dungeon DVM was
+ * Registers kind:5094 Arweave blob storage, plus kind:5095 ArNS buy when
+ * ARNS_DVM_SOLANA_SECRET_KEY is configured. kind:5250 Dungeon DVM was
  * removed from this image (Arweave-only) so the bundle no longer pulls in
  * pet-dvm / memvid-node / o1js / mina-signer.
  */
@@ -42,6 +51,11 @@ import {
 } from '@toon-protocol/sdk';
 import type { NodeConfig } from '@toon-protocol/sdk';
 import { startStoreBackend, type StoreBackend, type StoreHandler } from './store-backend.js';
+import {
+  ARNS_BUY_KIND,
+  createArnsBuyHandler,
+  type ArnsNetwork,
+} from './arns-buy-handler.js';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -404,6 +418,44 @@ export function applyEnvOverlay(cfg: StoreConfig): StoreConfig {
   return out;
 }
 
+// --- kind:5095 ArNS buy — env resolution (exported for tests) ---
+
+/** Parsed kind:5095 configuration (undefined = job disabled). */
+export interface ArnsBuyEnvConfig {
+  network: ArnsNetwork;
+  solanaSecretKey: Uint8Array;
+}
+
+/**
+ * Resolve the OPTIONAL kind:5095 ArNS-buy config from the environment.
+ * Absent/empty `ARNS_DVM_SOLANA_SECRET_KEY` disables the job (returns
+ * undefined); a malformed value throws (misconfiguration must not boot a
+ * silently-crippled DVM). `ARNS_NETWORK` defaults to DEVNET — mainnet is an
+ * explicit opt-in.
+ */
+export function resolveArnsBuyEnv(
+  env: NodeJS.ProcessEnv
+): ArnsBuyEnvConfig | undefined {
+  const hex = env['ARNS_DVM_SOLANA_SECRET_KEY']?.trim();
+  if (!hex) return undefined;
+  if (!/^[0-9a-fA-F]{128}$/.test(hex)) {
+    throw new Error(
+      'ARNS_DVM_SOLANA_SECRET_KEY must be a 128-char hex string ' +
+        '(64-byte Ed25519 keypair: secretKey ‖ publicKey)'
+    );
+  }
+  const networkRaw = env['ARNS_NETWORK']?.trim() || 'devnet';
+  if (networkRaw !== 'devnet' && networkRaw !== 'mainnet') {
+    throw new Error(
+      `ARNS_NETWORK must be 'devnet' or 'mainnet', got ${JSON.stringify(networkRaw)}`
+    );
+  }
+  return {
+    network: networkRaw as ArnsNetwork,
+    solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')),
+  };
+}
+
 function buildNoCreditsMessage(address: string | undefined): string {
   const addr = address ?? 'unknown';
   return (
@@ -504,6 +556,24 @@ async function main(): Promise<void> {
   const counter = createJobCounter();
   const arweaveHandler = counter.wrap(5094, createArweaveDvmHandler(arweaveConfig));
 
+  // kind:5095 ArNS brokered buy ("buyfor") — enabled only when the DVM has a
+  // funded Solana payer wallet configured. Defaults to DEVNET.
+  const arnsBuyEnv = resolveArnsBuyEnv(process.env);
+  const extraHandlers: Record<number, StoreHandler> = {};
+  if (arnsBuyEnv) {
+    extraHandlers[ARNS_BUY_KIND] = counter.wrap(
+      ARNS_BUY_KIND,
+      createArnsBuyHandler({
+        network: arnsBuyEnv.network,
+        solanaSecretKey: arnsBuyEnv.solanaSecretKey,
+      })
+    ) as unknown as StoreHandler;
+    console.log(
+      `[store] kind:${ARNS_BUY_KIND} ArNS buy enabled (network: ${arnsBuyEnv.network})`
+    );
+  }
+  const handlerKinds = [5094, ...(arnsBuyEnv ? [ARNS_BUY_KIND] : [])];
+
   // The connector is the front-of-app payment proxy: it terminates payment and
   // reverse-proxies a plain HTTP request to POST /store (RouteTermination). This
   // process contains NO ILP/BTP/connector-dialing logic.
@@ -513,6 +583,7 @@ async function main(): Promise<void> {
   const pubkey = getPublicKey(config.secretKey);
   const storeBackend: StoreBackend = startStoreBackend({
     handle: arweaveHandler as unknown as StoreHandler,
+    ...(arnsBuyEnv ? { handlers: extraHandlers } : {}),
     handlerPort: config.handlerPort ?? 3300,
     devMode,
   });
@@ -529,7 +600,7 @@ async function main(): Promise<void> {
       version: '1.0.0',
       nodePubkey: safePubkey,
       uptimeSec: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-      handlerKinds: [5094],
+      handlerKinds,
       kindPricing: Object.fromEntries(
         Object.entries(config.kindPricing ?? {}).map(([k, v]) => [k, String(v)])
       ),
@@ -552,12 +623,13 @@ async function main(): Promise<void> {
 ║ Pubkey:        ${safePubkey.slice(0, 32)}... ║
 ║ Handler Port:   ${config.handlerPort} (POST /store)                       ║
 ║ BLS Port:      ${blsPort} (health endpoint)                       ║
-║ Handler Kinds: 5094 (Arweave only)                    ║
+║ Handler Kinds: ${handlerKinds.join(', ')}                    ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 
   // Clean up sensitive env vars after extraction
   delete process.env['NODE_NOSTR_SECRET_KEY'];
+  delete process.env['ARNS_DVM_SOLANA_SECRET_KEY'];
 
   // Graceful shutdown handlers
   let shuttingDown = false;

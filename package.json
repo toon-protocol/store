@@ -2,7 +2,7 @@
   "name": "@toon-protocol/store",
   "version": "0.2.0",
   "private": true,
-  "description": "Arweave-only store backend (NIP-90 kind:5094) — Docker entrypoint",
+  "description": "Arweave-only store backend (NIP-90 kind:5094) \u2014 Docker entrypoint",
   "type": "module",
   "main": "dist/entrypoint-store.js",
   "scripts": {
@@ -12,13 +12,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ar.io/sdk": "^4.0.3",
     "@fastify/cors": "^10.0.0",
-    "arweave": "^1.15.0",
     "@hono/node-server": "^1.13.7",
     "@noble/curves": "^1.8.1",
+    "@solana/kit": "^6.8.0",
     "@toon-protocol/connector": "^3.10.0",
     "@toon-protocol/core": "^1.4.1",
     "@toon-protocol/sdk": "^0.5.0",
+    "arweave": "^1.15.0",
     "fastify": "^5.0.0",
     "hono": "^4.11.10",
     "nostr-tools": "^2.10.4"
