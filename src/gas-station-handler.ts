@@ -81,7 +81,14 @@ export const COMPUTE_BUDGET_PROGRAM =
 /** Metaplex Core (canonical program id, same on devnet + mainnet). */
 export const MPL_CORE_PROGRAM = 'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d';
 
-/** Quote TTL — merged with blockhash validity (~60–90s), one deadline. */
+/**
+ * Default quote TTL — merged with Solana blockhash validity (~60–90s), one
+ * deadline. Configurable via {@link GasStationConfig.quoteTtlMs} for
+ * operators/e2e whose client ceremony (e.g. a multi-step channel-paid job that
+ * signs an o1js Mina claim per submission) takes longer than the default
+ * between quote and execute — bounded in practice by how long the quoted
+ * Solana blockhash stays valid.
+ */
 export const QUOTE_TTL_MS = 60_000;
 
 // ---------------------------------------------------------------------------
@@ -608,6 +615,12 @@ export interface GasStationConfig {
   loadDeps?: LoadGasStationDeps;
   /** Policy knob overrides (caps, allowances). */
   policy?: Partial<Omit<GasStationPolicy, 'feePayer' | 'programWhitelist'>>;
+  /**
+   * Merged quote/blockhash deadline in ms (default {@link QUOTE_TTL_MS}).
+   * Raise it for a slow client ceremony; keep it under how long the quoted
+   * Solana blockhash stays valid or execute rejects with `blockhash_expired`.
+   */
+  quoteTtlMs?: number;
   /** Clock seam for deadline tests. */
   now?: () => number;
   /** Confirmation polling seam (ms) — tests shrink these. */
@@ -640,6 +653,7 @@ export function createGasStationHandler(
   config: GasStationConfig
 ): (ctx: StoreHandlerContext) => Promise<StoreHandlerResponse> {
   const now = config.now ?? Date.now;
+  const quoteTtlMs = config.quoteTtlMs ?? QUOTE_TTL_MS;
   const confirmTimeoutMs = config.confirm?.timeoutMs ?? 45_000;
   const confirmIntervalMs = config.confirm?.intervalMs ?? 2_000;
   const quotes = new Map<string, QuoteRecord>();
@@ -740,7 +754,7 @@ export function createGasStationHandler(
       quoteId: randomUUID(),
       maxLamports,
       blockhash,
-      expiresAt: now() + QUOTE_TTL_MS,
+      expiresAt: now() + quoteTtlMs,
     };
     quotes.set(record.quoteId, record);
 
