@@ -28,8 +28,15 @@
  *                            ("buyfor" — see ./arns-buy-handler) is enabled.
  *                            Treated as secret — never logged.
  *   ARNS_NETWORK          -> devnet (default) | mainnet — which ar.io registry
- *                            the kind:5095 buys target. Mainnet is explicit
- *                            opt-in only.
+ *                            the kind:5095 buys and kind:5096 broadcasts
+ *                            target. Mainnet is explicit opt-in only.
+ *   GAS_STATION_SOLANA_SECRET_KEY -> OPTIONAL: 128-char hex (64-byte Ed25519
+ *                            keypair) of the DEDICATED gas-station fee-payer
+ *                            wallet (toon-meta#163 mitigation a — MUST differ
+ *                            from ARNS_DVM_SOLANA_SECRET_KEY; the store
+ *                            refuses to boot with the same key in both).
+ *                            When set, the kind:5096 gas-station job is
+ *                            enabled. Secret — never logged.
  *
  * Registers kind:5094 Arweave blob storage, plus kind:5095 ArNS buy when
  * ARNS_DVM_SOLANA_SECRET_KEY is configured. kind:5250 Dungeon DVM was
@@ -56,6 +63,10 @@ import {
   createArnsBuyHandler,
   type ArnsNetwork,
 } from './arns-buy-handler.js';
+import {
+  GAS_STATION_KIND,
+  createGasStationHandler,
+} from './gas-station-handler.js';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -456,6 +467,44 @@ export function resolveArnsBuyEnv(
   };
 }
 
+/**
+ * Resolve the OPTIONAL kind:5096 gas-station config from the environment.
+ * Same contract as {@link resolveArnsBuyEnv} (absent/empty disables;
+ * malformed throws; ARNS_NETWORK shared), plus the toon-meta#163
+ * mitigation (a) boot check: the DEDICATED fee-payer wallet must not be the
+ * ARIO-float wallet — identical keys refuse to boot.
+ */
+export function resolveGasStationEnv(
+  env: NodeJS.ProcessEnv
+): ArnsBuyEnvConfig | undefined {
+  const hex = env['GAS_STATION_SOLANA_SECRET_KEY']?.trim();
+  if (!hex) return undefined;
+  if (!/^[0-9a-fA-F]{128}$/.test(hex)) {
+    throw new Error(
+      'GAS_STATION_SOLANA_SECRET_KEY must be a 128-char hex string ' +
+        '(64-byte Ed25519 keypair: secretKey ‖ publicKey)'
+    );
+  }
+  const arnsHex = env['ARNS_DVM_SOLANA_SECRET_KEY']?.trim();
+  if (arnsHex && arnsHex.toLowerCase() === hex.toLowerCase()) {
+    throw new Error(
+      'GAS_STATION_SOLANA_SECRET_KEY must be a DEDICATED wallet, distinct ' +
+        'from ARNS_DVM_SOLANA_SECRET_KEY (toon-meta#163 mitigation a: the ' +
+        'fee payer holds working SOL only, never the ARIO float)'
+    );
+  }
+  const networkRaw = env['ARNS_NETWORK']?.trim() || 'devnet';
+  if (networkRaw !== 'devnet' && networkRaw !== 'mainnet') {
+    throw new Error(
+      `ARNS_NETWORK must be 'devnet' or 'mainnet', got ${JSON.stringify(networkRaw)}`
+    );
+  }
+  return {
+    network: networkRaw as ArnsNetwork,
+    solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')),
+  };
+}
+
 function buildNoCreditsMessage(address: string | undefined): string {
   const addr = address ?? 'unknown';
   return (
@@ -572,7 +621,26 @@ async function main(): Promise<void> {
       `[store] kind:${ARNS_BUY_KIND} ArNS buy enabled (network: ${arnsBuyEnv.network})`
     );
   }
-  const handlerKinds = [5094, ...(arnsBuyEnv ? [ARNS_BUY_KIND] : [])];
+  // kind:5096 gas-station (fee-payer-as-a-service) — enabled only when the
+  // DEDICATED fee-payer wallet is configured (distinct from the ARIO float).
+  const gasStationEnv = resolveGasStationEnv(process.env);
+  if (gasStationEnv) {
+    extraHandlers[GAS_STATION_KIND] = counter.wrap(
+      GAS_STATION_KIND,
+      createGasStationHandler({
+        network: gasStationEnv.network,
+        solanaSecretKey: gasStationEnv.solanaSecretKey,
+      })
+    ) as unknown as StoreHandler;
+    console.log(
+      `[store] kind:${GAS_STATION_KIND} gas-station enabled (network: ${gasStationEnv.network})`
+    );
+  }
+  const handlerKinds = [
+    5094,
+    ...(arnsBuyEnv ? [ARNS_BUY_KIND] : []),
+    ...(gasStationEnv ? [GAS_STATION_KIND] : []),
+  ];
 
   // The connector is the front-of-app payment proxy: it terminates payment and
   // reverse-proxies a plain HTTP request to POST /store (RouteTermination). This
@@ -583,7 +651,7 @@ async function main(): Promise<void> {
   const pubkey = getPublicKey(config.secretKey);
   const storeBackend: StoreBackend = startStoreBackend({
     handle: arweaveHandler as unknown as StoreHandler,
-    ...(arnsBuyEnv ? { handlers: extraHandlers } : {}),
+    ...(Object.keys(extraHandlers).length > 0 ? { handlers: extraHandlers } : {}),
     handlerPort: config.handlerPort ?? 3300,
     devMode,
   });
@@ -630,6 +698,7 @@ async function main(): Promise<void> {
   // Clean up sensitive env vars after extraction
   delete process.env['NODE_NOSTR_SECRET_KEY'];
   delete process.env['ARNS_DVM_SOLANA_SECRET_KEY'];
+  delete process.env['GAS_STATION_SOLANA_SECRET_KEY'];
 
   // Graceful shutdown handlers
   let shuttingDown = false;
