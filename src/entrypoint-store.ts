@@ -630,6 +630,13 @@ async function main(): Promise<void> {
       createGasStationHandler({
         network: gasStationEnv.network,
         solanaSecretKey: gasStationEnv.solanaSecretKey,
+        // GAS_STATION_QUOTE_TTL_MS: raise the merged quote/blockhash deadline
+        // for a slow client ceremony (e.g. a channel-paid job that signs an
+        // o1js Mina claim per submission). Keep it under Solana blockhash
+        // validity or execute rejects blockhash_expired.
+        ...(process.env['GAS_STATION_QUOTE_TTL_MS']
+          ? { quoteTtlMs: Number(process.env['GAS_STATION_QUOTE_TTL_MS']) }
+          : {}),
       })
     ) as unknown as StoreHandler;
     console.log(
