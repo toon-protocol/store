@@ -88,8 +88,11 @@ RUN set -eux; \
 # @libsql/client + libsql (connector >=3.8 moved its local settlement/claim
 # store off better-sqlite3 to libsql, lazy-required at runtime) and
 # @ardrive/turbo-sdk + arweave (the Arweave upload SDK, externalized in
-# esbuild and lazy-imported by createTurboAdapter). Install the WHOLE closure
-# at the self-consistent version set turbo-sdk requires via npm (robust
+# esbuild and lazy-imported by createTurboAdapter). Also @ar.io/sdk +
+# @solana/kit — the OPTIONAL kind:5095 ArNS-buy runtime deps, externalized in
+# esbuild and lazy-imported via a variable specifier by src/arns-buy-handler.ts
+# (without these the handler registers but every buy fails `arns_sdk_unavailable`).
+# Install the WHOLE closure at a self-consistent version set via npm (robust
 # native-binding + transitive resolution), then flatten into /runtime. libsql
 # ships a prebuilt linux-x64-musl NAPI binding for node:20-alpine.
 RUN cd /tmp && npm init -y >/dev/null 2>&1 && \
@@ -97,7 +100,9 @@ RUN cd /tmp && npm init -y >/dev/null 2>&1 && \
       @libsql/client@0.14.0 \
       libsql@0.4.7 \
       @ardrive/turbo-sdk@1.40.2 \
-      arweave@1.15.5 && \
+      arweave@1.15.5 \
+      @ar.io/sdk@4.0.3 \
+      @solana/kit@6.10.0 && \
     cp -rL /tmp/node_modules/. /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
