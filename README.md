@@ -72,14 +72,17 @@ not the source of truth).
 ### TOON payment-channel contracts (the connector in FRONT of this store)
 
 The store itself is payment-oblivious; the channel contracts belong to the
-**connector** deployment. Canonical source: the connector repo's
-`infra/linode/endpoints.json` + toon-meta `docs/deployment.md`. Highlights
-(devnet/testnet only — **TOON has no mainnet deployments**):
+**connector** deployment. Since the 2026-07-19 public-chain cutover the devnet
+settles on public networks. Canonical machine-readable source: the apex's
+**kind:10032 announce** on the relay; human-readable: toon-client
+[`packages/rig/README.md` § "Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains)
++ toon-meta [`docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md).
+Snapshot (devnet/testnet only — **TOON has no mainnet deployments**):
 
 | Chain / network | What | Id |
 |---|---|---|
-| Solana devnet | payment-channel program | *non-deterministic* — regenerated per provision (`cargo build-sbf`); read it from the live box `connector.yaml` / kind:10032 announce, never from docs |
-| Solana devnet | mock USDC SPL mint (6dp) | `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` |
-| Mina public devnet | mock-USDC `UsdcChannelToken` FungibleToken (6dp, redeployed 2026-07-17 with the connector#352 single-o1js tooling) | token `B62qmM6queHpUAWW1G6Hkb5MCEk1xKZ2wmydVdke4LvtZ8mL3AYkRKw` · tokenId `11023656268526876025673184191684945855837551514830012586280356683923962762116` · admin contract `B62qkHwT6qbkqyyrxVs8cPBmmVJTVX5es63DKZK9vewNWRD2Vs5jE2k` · vk hash `9692307225143487166733467413506207145324336685411164992097971188215422741850` |
-| Mina public devnet | `PaymentChannel` zkApp | *per-channel* — the zkApp address IS the channel id; each channel is a fresh bare deploy the client initializes (issue #185 discipline). No single canonical address exists. |
-| EVM | TokenNetworkRegistry / TokenNetwork / MockUSDC | box-devnet (anvil 31337) addresses in toon-meta `docs/deployment.md`; Base-Sepolia addresses were never committed (`e2e/testnets.json` gap — see toon-meta `docs/e2e-testnets.md`) |
+| Solana devnet | payment-channel program (fixed public deployment) | `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` |
+| Solana devnet | mock USDC SPL mint (6dp) | `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` |
+| Mina public devnet | canonical USDC token (6dp) | token `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d` · tokenId `9497120696276615621907376728658022802954262638363646162765282600447713419198` |
+| Mina public devnet | `PaymentChannel` zkApp | `B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf` |
+| Base Sepolia (`evm:84532`) | TokenNetworkRegistry / TokenNetwork / USDC | registry `0xcC9079adE929b168B54145f6d25262b64FAB9D5b` · TokenNetwork `0x1E95493fEF46707E034b4a1945f25a8C76A1823D` · USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` |
