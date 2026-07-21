@@ -39,9 +39,10 @@
  *                            enabled. Secret — never logged.
  *
  * Registers kind:5094 Arweave blob storage, plus kind:5095 ArNS buy when
- * ARNS_DVM_SOLANA_SECRET_KEY is configured. kind:5250 Dungeon DVM was
- * removed from this image (Arweave-only) so the bundle no longer pulls in
- * pet-dvm / memvid-node / o1js / mina-signer.
+ * ARNS_DVM_SOLANA_SECRET_KEY is configured and kind:5096 gas-station
+ * co-sign/broadcast when GAS_STATION_SOLANA_SECRET_KEY is configured.
+ * kind:5250 Dungeon DVM was removed from this image (Arweave-only) so the
+ * bundle no longer pulls in pet-dvm / memvid-node / o1js / mina-signer.
  */
 
 import { readFileSync } from 'node:fs';

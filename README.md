@@ -1,6 +1,6 @@
 # store
 
-TOON Protocol **store** — NIP-90 kind:5094 Arweave blob storage. It uploads the blob to Arweave via Turbo and returns the tx id. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`. It runs as a payment-oblivious `POST /store` backend (RouteTermination) behind the connector, which is the front-of-app payment proxy — see [`deploy/`](./deploy).
+TOON Protocol **store** — NIP-90 kind:5094 Arweave blob storage, plus two optional job kinds: kind:5095 ArNS brokered buy (gated by `ARNS_DVM_SOLANA_SECRET_KEY`) and kind:5096 gas-station co-sign/broadcast (gated by `GAS_STATION_SOLANA_SECRET_KEY`). It uploads the blob to Arweave via Turbo and returns the tx id. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`. It runs as a payment-oblivious `POST /store` backend (RouteTermination) behind the connector, which is the front-of-app payment proxy — see [`deploy/`](./deploy).
 
 ## Status / follow-ups
 - Trimmed to store-only: the repo is now `Dockerfile.store` + `src/entrypoint-store.ts` + `src/store-backend.ts`. The other images' carried-over build contexts (`Dockerfile.{town,mill,townhouse-api,akash-*,oyster,nix,sdk-e2e,toon-client,…}`, their `src/entrypoint-*` files, and the `configs/`, `dev-fixtures/`, `akash-ator-probe/`, `townhouse-ator-sidecar/` dirs) have been removed.
