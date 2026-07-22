@@ -95,16 +95,17 @@ export function startStoreBackend(config: StoreBackendConfig): StoreBackend {
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
   app.post('/store', async (c) => {
-    // --- Parse request body ---
+    // --- Parse and shape-check the request body ---
+    // A non-object body (`null`, a bare `5` / `"x"`) is still valid JSON, so the
+    // parse does not throw — guard the shape before dereferencing `.event`, or
+    // `null.event` escapes into a framework-level 500 (issue #50). A parse
+    // failure funnels through the same guard via `undefined`.
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
-      return c.json({ accept: false, code: 'F00', message: 'Invalid request body' }, 422);
+      body = undefined;
     }
-    // A non-object body (`null`, a bare `5` / `"x"`) is still valid JSON, so the
-    // parse above does not throw — guard the shape before dereferencing `.event`,
-    // or `null.event` escapes into a framework-level 500 (issue #50).
     if (body === null || typeof body !== 'object') {
       return c.json({ accept: false, code: 'F00', message: 'Invalid request body' }, 422);
     }
