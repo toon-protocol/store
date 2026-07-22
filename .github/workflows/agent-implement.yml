@@ -25,11 +25,11 @@
 # │ itself verify-on-first-run.) Leave it unset/false for the pilot.           │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
-# Coexists with the OLD loops (backlog-manager / issue-executor / pr-reviewer /
-# issue-decomposer): those fire on `agent:ready` / `agent:split` /
-# `review-round:*` — DISJOINT labels — so no issue triggers two engines.
-# Retiring the old loops is a separate, gated slice once a merged agent PR
-# proves this path (see toon-protocol/toon-meta#190 / #178).
+# The old 4-loop automation (backlog-manager / issue-executor / pr-reviewer /
+# issue-decomposer) has been retired (toon-protocol/toon-meta#190 / #178): its
+# variant proof (store#52) merged, satisfying the no-coverage-gap rule. Triage
+# and decomposition now happen via the smart-zone `/to-tickets` flow; this
+# runner only fires on the human-applied `agent:implement` label.
 
 name: agent:implement
 
