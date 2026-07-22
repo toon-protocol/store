@@ -9,7 +9,11 @@
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
     "start": "node dist/entrypoint-store.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "sandcastle": "npx tsx .sandcastle/main.ts",
+    "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
+    "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
+    "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts"
   },
   "dependencies": {
     "@ar.io/sdk": "^4.0.3",
@@ -26,10 +30,13 @@
     "nostr-tools": "^2.10.4"
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
     "@types/node": "^20.11.0",
     "esbuild": "^0.24.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.3.0",
-    "vitest": "^1.0.0"
+    "vitest": "^1.0.0",
+    "zod": "^3.25.0"
   },
   "engines": {
     "node": ">=22"
