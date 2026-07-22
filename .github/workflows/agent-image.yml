@@ -1,0 +1,45 @@
+name: Agent image
+
+# Minimal build-only check for the sandcastle agent container image.
+# Proves the `.sandcastle/Dockerfile` (node:22-bookworm + gh + Claude Code CLI
+# + corepack/pnpm) builds. This is NOT the label->runner: the
+# agent:implement / agent:review triggered runners are the separate
+# agent-implement.yml / agent-review.yml workflows.
+
+on:
+  pull_request:
+    paths:
+      - '.sandcastle/**'
+      - '.github/workflows/agent-image.yml'
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: Build sandcastle agent image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Docker is preinstalled on ubuntu-latest GitHub-hosted runners.
+      # `sandcastle docker build-image` builds .sandcastle/Dockerfile,
+      # defaulting the AGENT_UID/AGENT_GID build args to the runner's uid/gid.
+      # The image is tagged `sandcastle:<dir-name>` — here `sandcastle:store`.
+      - name: Build agent image
+        run: npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+
+      - name: Verify toolchain inside image
+        run: |
+          docker run --rm --entrypoint bash sandcastle:store -lc '
+            set -e
+            node --version
+            gh --version | head -1
+            # pnpm resolves via corepack; the mounted repo pins pnpm@8.15.9
+            # through its packageManager field at runtime.
+            corepack --version
+            test "$(whoami)" = "agent"
+            test -x /home/agent/.local/bin/claude
+          '
