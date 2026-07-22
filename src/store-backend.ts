@@ -96,16 +96,22 @@ export function startStoreBackend(config: StoreBackendConfig): StoreBackend {
 
   app.post('/store', async (c) => {
     // --- Parse request body ---
-    let body: { event?: NostrEvent };
+    let body: unknown;
     try {
-      body = (await c.req.json()) as { event?: NostrEvent };
+      body = await c.req.json();
     } catch {
       return c.json({ accept: false, code: 'F00', message: 'Invalid request body' }, 422);
     }
-    if (!body.event) {
+    // A non-object body (`null`, a bare `5` / `"x"`) is still valid JSON, so the
+    // parse above does not throw — guard the shape before dereferencing `.event`,
+    // or `null.event` escapes into a framework-level 500 (issue #50).
+    if (body === null || typeof body !== 'object') {
+      return c.json({ accept: false, code: 'F00', message: 'Invalid request body' }, 422);
+    }
+    const event = (body as { event?: NostrEvent }).event;
+    if (!event) {
       return c.json({ accept: false, code: 'F00', message: 'Missing required field: event' }, 422);
     }
-    const event = body.event;
 
     // --- Capture trusted payment headers (NOT validated here) ---
     const payer = c.req.header('X-TOON-Payer');
