@@ -22,5 +22,5 @@ Cross-cutting agent skills, docs, and the canonical project context live in **[t
 Canonical rules/decisions: `toon-meta` → `_bmad-output/project-context.md`.
 
 ## Cross-repo dependencies
-- Consumes `@toon-protocol/{core,sdk,bls}` from **npm** (pinned semver) — the Arweave handler lives in `sdk`.
+- Consumes `@toon-protocol/{core,sdk}` from **npm** (pinned semver) — the Arweave handler lives in `sdk`.
 - The ILP payment engine is the separate **[toon-protocol/connector](https://github.com/toon-protocol/connector)** repo. The DVM receives ILP packets from the connector via HTTP and trusts they were already validated; **claim validation lives ONLY in the connector.**
