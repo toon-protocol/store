@@ -46,32 +46,47 @@ export interface RegressionResult {
   violations: string[];
 }
 
+/**
+ * Checks one metric against its baseline-relative limit. Returns a violation
+ * message, or null when the metric passes (or has no applicable baseline).
+ */
+function checkMetric(
+  label: string,
+  unit: string,
+  measured: number,
+  baseline: number | null,
+  multiplier: number
+): string | null {
+  if (baseline === null) return null;
+  const limit = baseline * multiplier;
+  if (measured <= limit) return null;
+  return (
+    `gate ${label} regressed: ${measured}${unit} > ${limit}${unit} limit ` +
+    `(baseline ${baseline}${unit} x${multiplier})`
+  );
+}
+
 export function evaluateGateRegression(
   baseline: GateBaseline,
   measured: GateMeasurement,
   thresholds: RegressionThresholds = DEFAULT_THRESHOLDS
 ): RegressionResult {
-  const violations: string[] = [];
-
-  const wallClockBaseline = baseline.gateSpeed.gateJobWallClockSeconds;
-  const wallClockLimit = wallClockBaseline * thresholds.wallClockMultiplier;
-  if (measured.wallClockSeconds > wallClockLimit) {
-    violations.push(
-      `gate wall-clock regressed: ${measured.wallClockSeconds}s > ${wallClockLimit}s limit ` +
-        `(baseline ${wallClockBaseline}s x${thresholds.wallClockMultiplier})`
-    );
-  }
-
-  const runnerMinutesBaseline = baseline.gatePerformance.runnerMinutesBilled.value;
-  if (runnerMinutesBaseline !== null) {
-    const runnerMinutesLimit = runnerMinutesBaseline * thresholds.runnerMinutesMultiplier;
-    if (measured.runnerMinutesBilled > runnerMinutesLimit) {
-      violations.push(
-        `gate runner-minutes regressed: ${measured.runnerMinutesBilled}min > ${runnerMinutesLimit}min limit ` +
-          `(baseline ${runnerMinutesBaseline}min x${thresholds.runnerMinutesMultiplier})`
-      );
-    }
-  }
+  const violations = [
+    checkMetric(
+      'wall-clock',
+      's',
+      measured.wallClockSeconds,
+      baseline.gateSpeed.gateJobWallClockSeconds,
+      thresholds.wallClockMultiplier
+    ),
+    checkMetric(
+      'runner-minutes',
+      'min',
+      measured.runnerMinutesBilled,
+      baseline.gatePerformance.runnerMinutesBilled.value,
+      thresholds.runnerMinutesMultiplier
+    ),
+  ].filter((violation): violation is string => violation !== null);
 
   return { pass: violations.length === 0, violations };
 }
