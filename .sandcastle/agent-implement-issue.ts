@@ -212,7 +212,7 @@ try {
     if (alreadyOpen.length === 0) {
       const body =
         "Produced by the sandcastle `agent:implement` runner; awaiting human " +
-        `review.\n\nPart of #${issueNumber}\n\n` +
+        `review.\n\nCloses #${issueNumber}\n\n` +
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
       execFileSync(
         "gh",
