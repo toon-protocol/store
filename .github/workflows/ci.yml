@@ -33,27 +33,22 @@ jobs:
       - name: Build, typecheck, lint, and test (parallel)
         run: |
           set +e
-          pnpm build > /tmp/build.log 2>&1 &
-          build_pid=$!
-          pnpm typecheck > /tmp/typecheck.log 2>&1 &
-          typecheck_pid=$!
-          pnpm lint > /tmp/lint.log 2>&1 &
-          lint_pid=$!
-          pnpm test > /tmp/test.log 2>&1 &
-          test_pid=$!
+          declare -A pid
+          for step in build typecheck lint test; do
+            pnpm "$step" > "/tmp/$step.log" 2>&1 &
+            pid[$step]=$!
+          done
 
-          wait "$build_pid"; build_status=$?
-          wait "$typecheck_pid"; typecheck_status=$?
-          wait "$lint_pid"; lint_status=$?
-          wait "$test_pid"; test_status=$?
+          failed=""
+          for step in build typecheck lint test; do
+            wait "${pid[$step]}"
+            status=$?
+            echo "::group::pnpm $step"; cat "/tmp/$step.log"; echo "::endgroup::"
+            [ "$status" -ne 0 ] && failed="$failed $step"
+          done
 
-          echo "::group::pnpm build"; cat /tmp/build.log; echo "::endgroup::"
-          echo "::group::pnpm typecheck"; cat /tmp/typecheck.log; echo "::endgroup::"
-          echo "::group::pnpm lint"; cat /tmp/lint.log; echo "::endgroup::"
-          echo "::group::pnpm test"; cat /tmp/test.log; echo "::endgroup::"
-
-          if [ "$build_status" -ne 0 ] || [ "$typecheck_status" -ne 0 ] || [ "$lint_status" -ne 0 ] || [ "$test_status" -ne 0 ]; then
-            echo "::error::gate failed — build=$build_status typecheck=$typecheck_status lint=$lint_status test=$test_status"
+          if [ -n "$failed" ]; then
+            echo "::error::gate failed:$failed"
             exit 1
           fi
 
