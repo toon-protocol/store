@@ -1,0 +1,81 @@
+{
+  "$schema": "https://toon-protocol/gate-baseline-v1",
+  "repo": "store",
+  "capturedAt": "2026-07-22T20:08:32Z",
+  "capturedFrom": {
+    "branch": "main",
+    "commit": "0f45a4579ea8f32f4468eb5ca15fefc0ead95dae",
+    "ciRunUrl": "https://github.com/toon-protocol/store/actions/runs/29953894875",
+    "ciRunEvent": "push"
+  },
+  "gateDefinition": {
+    "description": "typecheck / test / build, run as the single 'build' job in .github/workflows/ci.yml. store has NO eslint config, so there is no lint step in the gate (see CLAUDE.md / toon-meta#210).",
+    "steps": [
+      "pnpm install --frozen-lockfile",
+      "pnpm build",
+      "pnpm typecheck",
+      "pnpm test"
+    ]
+  },
+  "gateSpeed": {
+    "description": "CI wall-clock time for the 'build' job (the gate) on the representative run above.",
+    "gateJobWallClockSeconds": 25,
+    "gateJobStartedAt": "2026-07-22T20:08:39Z",
+    "gateJobCompletedAt": "2026-07-22T20:09:04Z",
+    "stepBreakdownSeconds": {
+      "setup_checkout_pnpm_node": 8,
+      "pnpm_install": 6,
+      "pnpm_build": 0,
+      "pnpm_typecheck": 4,
+      "pnpm_test": 5
+    },
+    "fullWorkflowRunWallClockSeconds": 63,
+    "note": "fullWorkflowRunWallClockSeconds also includes the parallel, non-gate 'Devbox Environment Validation' job (devbox-validate); the gate itself is the 'build' job only."
+  },
+  "gatePerformance": {
+    "runnerMinutesBilled": {
+      "value": 1,
+      "unit": "minutes",
+      "method": "GitHub Actions bills hosted-runner jobs in 1-minute increments; the gate ('build') job ran 25s wall-clock, so it bills as 1 runner-minute. `gh api repos/toon-protocol/store/actions/runs/<id>/timing` reported 0 billable ms for this run, which reflects included free-tier minutes rather than an unbilled job — the rounded-up job duration is used here as the reproducible proxy."
+    },
+    "dockerImageSize": {
+      "value": null,
+      "note": "The gate itself (ci.yml 'build' job) does not build or use a Docker image — it runs directly on ubuntu-latest via pnpm. For reference, the published runtime image (Dockerfile.store, ghcr.io/toon-protocol/store:latest at this same commit) is captured separately below since it is the only Docker image in this repo's pipeline; it is NOT part of the gate's critical path.",
+      "publishedRuntimeImageReference": {
+        "image": "ghcr.io/toon-protocol/store:latest",
+        "digest": "sha256:62e54cd055950e8793d87f9fc46e52ca95fcdebc4f8eeeedd89bd0f914c7be33",
+        "compressedSizeBytes": 130588066,
+        "compressedSizeMB": 124.5,
+        "method": "Sum of OCI manifest layer `size` fields fetched anonymously from the GHCR v2 API (public package): `curl -s https://ghcr.io/token?scope=repository:toon-protocol/store:pull` for a bearer token, then GET /v2/toon-protocol/store/manifests/<amd64-manifest-digest>."
+      }
+    },
+    "cacheHitRate": {
+      "value": 1.0,
+      "sampleSize": 10,
+      "hits": 10,
+      "method": "actions/setup-node@v4's built-in pnpm store cache. Checked the last 10 ci.yml 'build' job logs (`gh run view --job=<id> --log | grep 'Cache hit occurred'`) — all 10 hit the cache keyed on pnpm-lock.yaml."
+    }
+  },
+  "gateCorrectness": {
+    "lint": {
+      "applicable": false,
+      "warnings": null,
+      "errors": null,
+      "note": "store has no eslint config today (toon-meta#210 repo-specific note: 'store — add the missing eslint config'). Adding that config is a separate, later child of this epic, not this baseline-capture issue."
+    },
+    "typecheck": {
+      "errors": 0,
+      "method": "pnpm run typecheck (tsc --noEmit) on commit 0f45a45 — clean, matches the repo's documented '0 typecheck debt'."
+    },
+    "test": {
+      "passed": 73,
+      "failed": 0,
+      "files": 4,
+      "method": "pnpm test (vitest run) on commit 0f45a45."
+    }
+  },
+  "reproductionMethod": {
+    "gateSpeedAndPerformance": "gh run list --workflow=ci.yml --limit 10 --json ...; gh api repos/toon-protocol/store/actions/runs/<id>/jobs; gh run view --job=<id> --log",
+    "gateCorrectness": "pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test, read locally from a checkout of the same commit."
+  }
+}
