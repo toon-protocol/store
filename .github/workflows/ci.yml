@@ -9,6 +9,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Record gate start time
+        id: gate_start
+        run: echo "seconds=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
@@ -26,7 +30,16 @@ jobs:
 
       - run: pnpm typecheck
 
+      - run: pnpm lint
+
       - run: pnpm test
+
+      - name: Enforce gate no-regression guard
+        run: |
+          end=$(date +%s)
+          elapsed=$(( end - ${{ steps.gate_start.outputs.seconds }} ))
+          echo "Gate wall-clock: ${elapsed}s"
+          GATE_WALL_CLOCK_SECONDS="$elapsed" npx tsx src/gate-regression-guard.ts
 
   devbox-validate:
     name: Devbox Environment Validation
