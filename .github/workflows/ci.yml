@@ -26,13 +26,31 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm build
+      # build/typecheck/lint/test are independent of each other (build doesn't
+      # consume typecheck's output, vitest runs against src/ not dist/, lint is
+      # standalone), so run them concurrently instead of as sequential steps to
+      # cut gate wall-clock. Each still surfaces its own pass/fail clearly.
+      - name: Build, typecheck, lint, and test (parallel)
+        run: |
+          set +e
+          declare -A pid
+          for step in build typecheck lint test; do
+            pnpm "$step" > "/tmp/$step.log" 2>&1 &
+            pid[$step]=$!
+          done
 
-      - run: pnpm typecheck
+          failed=""
+          for step in build typecheck lint test; do
+            wait "${pid[$step]}"
+            status=$?
+            echo "::group::pnpm $step"; cat "/tmp/$step.log"; echo "::endgroup::"
+            [ "$status" -ne 0 ] && failed="$failed $step"
+          done
 
-      - run: pnpm lint
-
-      - run: pnpm test
+          if [ -n "$failed" ]; then
+            echo "::error::gate failed:$failed"
+            exit 1
+          fi
 
       - name: Enforce gate no-regression guard
         run: |
