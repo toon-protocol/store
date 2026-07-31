@@ -94,7 +94,7 @@ the env's HTTPS hostnames instead of `localhost`.)
 
 This store connector publishes a fresh `kind:10032` `IlpPeerInfo` announcement
 describing its **own** `g.proxy.store` route (settlement address
-`0x1f4E12…`) so a client holding **only the genesis seed** discovers the store
+`0x6B6c2D…`) so a client holding **only the genesis seed** discovers the store
 route out of band — instead of relying on it being advertised only by the apex.
 This is the store-side half of
 [toon-protocol/store#22](https://github.com/toon-protocol/store/issues/22)
@@ -131,7 +131,7 @@ Verify it's live (after redeploying against a connector that supports it):
 # Query the apex relay's free read WS for the store box's announcement:
 npx ts-node -e 'import {SimplePool} from "nostr-tools";const p=new SimplePool();p.querySync(["wss://relay-ws.devnet.toonprotocol.dev"],{kinds:[10032]}).then(e=>{console.log(e);process.exit(0)})'
 # Expect a fresh, UNEXPIRED kind:10032 from the store box whose content carries
-# routes {publish,store} and settlement address 0x1f4E12…
+# routes {publish,store} and settlement address 0x6B6c2D…
 ```
 
 ## Privacy invariant
