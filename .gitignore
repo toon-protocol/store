@@ -2,3 +2,27 @@ node_modules/
 dist/
 *.tgz
 .devbox/
+
+# Environment files. The repo root carried no env rule at all — only
+# `deploy/.gitignore` had a bare `.env` — so an operator copy dropped anywhere
+# else would have been committed silently. Match every `.env*` variant and
+# re-allow the checked-in templates.
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+
+# Editor/operator snapshot copies. These are point-in-time scratch artefacts
+# from live-box edits, never configuration the repo should carry; committing
+# them leaves stale copies of real deployment values behind forever.
+*.bak
+*.bak-*
+*.bak.*
+*.orig
+*.rej
+*~
+
+# Logs / OS noise
+*.log
+.DS_Store
