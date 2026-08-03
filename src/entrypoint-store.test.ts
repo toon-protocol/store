@@ -70,7 +70,12 @@ vi.mock('@ardrive/turbo-sdk/node', () => {
 });
 
 // After mocks, import the functions under test
-import { createJobCounter, applyEnvOverlay, createTurboAdapter } from './entrypoint-store.js';
+import {
+  createJobCounter,
+  applyEnvOverlay,
+  createTurboAdapter,
+  resolveGasStationEnv,
+} from './entrypoint-store.js';
 
 // ── Job counter tests ────────────────────────────────────────────────────────
 
@@ -208,6 +213,72 @@ describe('applyEnvOverlay — KIND_PRICING_<kind> support', () => {
   it('malformed key KIND_PRICING_abc is ignored (no throw)', () => {
     process.env['KIND_PRICING_abc'] = '5';
     expect(() => applyEnvOverlay({})).not.toThrow();
+  });
+});
+
+// ── resolveGasStationEnv — GAS_STATION_CHANNEL_PROGRAM_ID (issue #67) ───────
+
+describe('resolveGasStationEnv — GAS_STATION_CHANNEL_PROGRAM_ID', () => {
+  const GAS_STATION_ENV_KEYS = [
+    'GAS_STATION_SOLANA_SECRET_KEY',
+    'ARNS_DVM_SOLANA_SECRET_KEY',
+    'ARNS_NETWORK',
+    'GAS_STATION_CHANNEL_PROGRAM_ID',
+  ];
+  let savedGasStationEnv: Record<string, string | undefined>;
+  const GAS_STATION_HEX = 'b'.repeat(128);
+  const CHANNEL_PROGRAM_ID = '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip';
+
+  beforeEach(() => {
+    savedGasStationEnv = {};
+    for (const key of GAS_STATION_ENV_KEYS) {
+      savedGasStationEnv[key] = process.env[key];
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete process.env[key];
+    }
+    process.env['GAS_STATION_SOLANA_SECRET_KEY'] = GAS_STATION_HEX;
+  });
+
+  afterEach(() => {
+    for (const key of GAS_STATION_ENV_KEYS) {
+      if (savedGasStationEnv[key] === undefined) {
+        // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+        delete process.env[key];
+      } else {
+        process.env[key] = savedGasStationEnv[key];
+      }
+    }
+  });
+
+  it('absent → channelProgramId is undefined, gas-station config unaffected', () => {
+    const config = resolveGasStationEnv(process.env);
+    expect(config?.channelProgramId).toBeUndefined();
+  });
+
+  it('valid base58 program id → surfaced as channelProgramId', () => {
+    process.env['GAS_STATION_CHANNEL_PROGRAM_ID'] = CHANNEL_PROGRAM_ID;
+    const config = resolveGasStationEnv(process.env);
+    expect(config?.channelProgramId).toBe(CHANNEL_PROGRAM_ID);
+  });
+
+  it('trims surrounding whitespace', () => {
+    process.env['GAS_STATION_CHANNEL_PROGRAM_ID'] = `  ${CHANNEL_PROGRAM_ID}  `;
+    const config = resolveGasStationEnv(process.env);
+    expect(config?.channelProgramId).toBe(CHANNEL_PROGRAM_ID);
+  });
+
+  it('malformed value throws (misconfiguration must not boot silently)', () => {
+    process.env['GAS_STATION_CHANNEL_PROGRAM_ID'] = 'not-base58!';
+    expect(() => resolveGasStationEnv(process.env)).toThrow(
+      /GAS_STATION_CHANNEL_PROGRAM_ID/
+    );
+  });
+
+  it('gas-station job stays disabled without GAS_STATION_SOLANA_SECRET_KEY, even with a channel program id set', () => {
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete process.env['GAS_STATION_SOLANA_SECRET_KEY'];
+    process.env['GAS_STATION_CHANNEL_PROGRAM_ID'] = CHANNEL_PROGRAM_ID;
+    expect(resolveGasStationEnv(process.env)).toBeUndefined();
   });
 });
 

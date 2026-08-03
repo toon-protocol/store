@@ -218,8 +218,8 @@ export const defaultLoadArnsBuySdk: LoadArnsBuySdk = async (options) => {
 
 /** ArNS name rule: 1–51 chars, lowercase alnum + hyphens, no edge hyphens. */
 const ARNS_NAME_REGEX = /^(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,49}[a-z0-9])$/;
-/** Base58 Solana pubkey (the client ANT's MPL Core asset address). */
-const SOLANA_PUBKEY_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+/** Base58 Solana pubkey (32–44 chars, Bitcoin/Solana alphabet). */
+export const SOLANA_PUBKEY_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const MAX_LEASE_YEARS = 5;
 
 /** First value of a NIP-90 `['param', <key>, <value>]` tag, if present. */

@@ -33,6 +33,7 @@ import {
   inspectGasStationTransaction,
   MPL_CORE_PROGRAM,
   SYSTEM_PROGRAM,
+  TOON_CHANNEL_DISCRIMINATORS,
   type GasStationDeps,
   type GasStationExecuteReceipt,
   type GasStationFailureReceipt,
@@ -48,6 +49,8 @@ const GAS = 'HHX57jLjbNAqvqf1gkHwArym7qE9dAQooGVdrmbcscWU';
 const ANT_PROGRAM = 'DbHbRwUD1oAn1mrDSqtWtvwGcNrmhWdD2g8L4xmeQ7NX';
 const MEMO_PROGRAM = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
 const BLOCKHASH = 'EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N';
+/** A plausible base58 channel-program id (offline fixture, issue #67). */
+const CHANNEL_PROGRAM = '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip';
 
 /** Deterministic "client" keypair (never funded, offline only). */
 async function clientKeyPair() {
@@ -90,6 +93,22 @@ function memoIx(): Instruction {
     programAddress: address(MEMO_PROGRAM),
     accounts: [],
     data: new Uint8Array([104, 105]),
+  } as Instruction;
+}
+
+/**
+ * A TOON channel-program instruction with the given discriminator (8-byte LE
+ * opcode, matching `@toon-protocol/connector`'s `solana-payment-channel-sdk`
+ * wire format) and an arbitrary account list.
+ */
+function channelIx(
+  disc: Uint8Array,
+  accounts: { address: string; role: number }[]
+): Instruction {
+  return {
+    programAddress: address(CHANNEL_PROGRAM),
+    accounts: accounts.map((a) => ({ address: address(a.address), role: a.role })),
+    data: disc,
   } as Instruction;
 }
 
@@ -141,11 +160,13 @@ function policyWith(overrides: Partial<GasStationPolicy> = {}): GasStationPolicy
   return {
     ...DEFAULT_POLICY,
     feePayer: GAS,
+    channelProgramId: CHANNEL_PROGRAM,
     programWhitelist: new Set([
       SYSTEM_PROGRAM,
       COMPUTE_BUDGET_PROGRAM,
       MPL_CORE_PROGRAM,
       ANT_PROGRAM,
+      CHANNEL_PROGRAM,
     ]),
     ...overrides,
   };
@@ -260,6 +281,80 @@ describe('inspectGasStationTransaction', () => {
       ]),
     ]);
     expect(inspectGasStationTransaction(badWire, policyWith())).toMatchObject({
+      ok: false,
+      reason: 'dvm_key_misplaced',
+    });
+  });
+
+  it('accepts channel-program deposit/close/settle when the gas wallet is only the fee payer', async () => {
+    const { address: client } = await clientKeyPair();
+    const depositData = new Uint8Array(16);
+    depositData.set(TOON_CHANNEL_DISCRIMINATORS.DEPOSIT, 0);
+    new DataView(depositData.buffer).setBigUint64(8, 1_000_000n, true);
+
+    const depositWire = await buildTx([
+      channelIx(depositData, [
+        { address: client, role: 2 }, // depositor (READONLY_SIGNER)
+        { address: client, role: 1 }, // depositor token account (fixture)
+        { address: MPL_CORE_PROGRAM, role: 1 }, // vault PDA (fixture)
+        { address: ANT_PROGRAM, role: 1 }, // channel PDA (fixture)
+        { address: SYSTEM_PROGRAM, role: 0 }, // token program (fixture)
+      ]),
+    ]);
+    expect(inspectGasStationTransaction(depositWire, policyWith()).ok).toBe(true);
+
+    const closeWire = await buildTx([
+      channelIx(TOON_CHANNEL_DISCRIMINATORS.CLOSE_CHANNEL, [
+        { address: client, role: 2 }, // closer
+        { address: ANT_PROGRAM, role: 1 }, // channel PDA (fixture)
+        { address: SYSTEM_PROGRAM, role: 0 }, // clock sysvar (fixture)
+      ]),
+    ]);
+    expect(inspectGasStationTransaction(closeWire, policyWith()).ok).toBe(true);
+
+    const settleWire = await buildTx([
+      channelIx(TOON_CHANNEL_DISCRIMINATORS.SETTLE_CHANNEL, [
+        { address: client, role: 2 }, // caller
+        { address: ANT_PROGRAM, role: 1 }, // channel PDA (fixture)
+        { address: MPL_CORE_PROGRAM, role: 1 }, // vault PDA (fixture)
+        { address: client, role: 1 }, // participantA token
+        { address: client, role: 1 }, // participantB token
+        { address: client, role: 1 }, // rent recipient
+        { address: SYSTEM_PROGRAM, role: 0 }, // token program (fixture)
+        { address: SYSTEM_PROGRAM, role: 0 }, // clock sysvar (fixture)
+      ]),
+    ]);
+    expect(inspectGasStationTransaction(settleWire, policyWith()).ok).toBe(true);
+  });
+
+  it('DRILL: a non-permitted channel-program op (open) is channel_op_not_permitted', async () => {
+    const { address: client } = await clientKeyPair();
+    // INITIALIZE_CHANNEL (discriminator 1) — deliberately excluded from the
+    // v1 whitelist (issue #67 only permits deposit/close/settle).
+    const openDisc = new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0]);
+    const wire = await buildTx([channelIx(openDisc, [{ address: client, role: 3 }])]);
+    expect(inspectGasStationTransaction(wire, policyWith())).toMatchObject({
+      ok: false,
+      reason: 'channel_op_not_permitted',
+    });
+  });
+
+  it('DRILL: the gas wallet inside a permitted channel-program instruction is dvm_key_misplaced', async () => {
+    const { address: client } = await clientKeyPair();
+    // Settle, crafted so the rent-recipient slot pays out to the gas wallet.
+    const wire = await buildTx([
+      channelIx(TOON_CHANNEL_DISCRIMINATORS.SETTLE_CHANNEL, [
+        { address: client, role: 2 },
+        { address: ANT_PROGRAM, role: 1 },
+        { address: MPL_CORE_PROGRAM, role: 1 },
+        { address: client, role: 1 },
+        { address: client, role: 1 },
+        { address: GAS, role: 1 }, // rent recipient — the drain attempt
+        { address: SYSTEM_PROGRAM, role: 0 },
+        { address: SYSTEM_PROGRAM, role: 0 },
+      ]),
+    ]);
+    expect(inspectGasStationTransaction(wire, policyWith())).toMatchObject({
       ok: false,
       reason: 'dvm_key_misplaced',
     });
@@ -380,7 +475,9 @@ function makeStubDeps(opts: StubOptions = {}) {
   return { deps, rpc, sent };
 }
 
-function makeHandler(opts: StubOptions & { now?: () => number } = {}) {
+function makeHandler(
+  opts: StubOptions & { now?: () => number; channelProgramId?: string } = {}
+) {
   const stub = makeStubDeps(opts);
   const handler = createGasStationHandler({
     network: 'devnet',
@@ -388,6 +485,7 @@ function makeHandler(opts: StubOptions & { now?: () => number } = {}) {
     loadDeps: async () => stub.deps,
     now: opts.now,
     confirm: { timeoutMs: 200, intervalMs: 10 },
+    ...(opts.channelProgramId ? { channelProgramId: opts.channelProgramId } : {}),
   });
   return { handler, ...stub };
 }
@@ -510,7 +608,9 @@ describe('createGasStationHandler', () => {
     const { handler, sent } = makeHandler({
       simPostLamports: (pre) => pre - DEFAULT_POLICY.defaultMaxLamports - 1n,
     });
-    const alarm = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const alarm = vi.spyOn(console, 'error').mockImplementation((message) => {
+      expect(message).toEqual(expect.stringContaining('ALARM'));
+    });
     try {
       const { quote, wire } = await quoteThenTx(handler);
       const res = decodeReceipt<GasStationFailureReceipt>(
@@ -521,6 +621,52 @@ describe('createGasStationHandler', () => {
               transaction: wire,
               quoteId: quote.quoteId,
               idempotencyKey: 'idem-cap',
+            })
+          )
+        )
+      );
+      expect(res).toMatchObject({ status: 'failed', reason: 'delta_cap_exceeded' });
+      expect(sent).toHaveLength(0);
+      expect(alarm).toHaveBeenCalledWith(expect.stringContaining('ALARM'));
+    } finally {
+      alarm.mockRestore();
+    }
+  });
+
+  it('DRILL: over-cap simulated debit on a channel-program deposit → delta_cap_exceeded, no broadcast', async () => {
+    // The static gate alone can't catch a CPI-driven debit inside the
+    // channel program (mitigation e is instruction-shape only) — the
+    // simulated delta cap (mitigation c) must still be the backstop, even
+    // for a permitted deposit op that never references the fee payer.
+    const { handler, sent } = makeHandler({
+      channelProgramId: CHANNEL_PROGRAM,
+      simPostLamports: (pre) => pre - DEFAULT_POLICY.defaultMaxLamports - 1n,
+    });
+    const alarm = vi.spyOn(console, 'error').mockImplementation((message) => {
+      expect(message).toEqual(expect.stringContaining('ALARM'));
+    });
+    try {
+      const { address: client } = await clientKeyPair();
+      const depositData = new Uint8Array(16);
+      depositData.set(TOON_CHANNEL_DISCRIMINATORS.DEPOSIT, 0);
+      new DataView(depositData.buffer).setBigUint64(8, 1_000_000n, true);
+      const { quote, wire } = await quoteThenTx(handler, [
+        channelIx(depositData, [
+          { address: client, role: 2 },
+          { address: client, role: 1 },
+          { address: MPL_CORE_PROGRAM, role: 1 },
+          { address: ANT_PROGRAM, role: 1 },
+          { address: SYSTEM_PROGRAM, role: 0 },
+        ]),
+      ]);
+      const res = decodeReceipt<GasStationFailureReceipt>(
+        await handler(
+          ctxFor(
+            jobEvent({
+              phase: 'execute',
+              transaction: wire,
+              quoteId: quote.quoteId,
+              idempotencyKey: 'idem-channel-cap',
             })
           )
         )
