@@ -608,7 +608,9 @@ describe('createGasStationHandler', () => {
     const { handler, sent } = makeHandler({
       simPostLamports: (pre) => pre - DEFAULT_POLICY.defaultMaxLamports - 1n,
     });
-    const alarm = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const alarm = vi.spyOn(console, 'error').mockImplementation((message) => {
+      expect(message).toEqual(expect.stringContaining('ALARM'));
+    });
     try {
       const { quote, wire } = await quoteThenTx(handler);
       const res = decodeReceipt<GasStationFailureReceipt>(
@@ -640,7 +642,9 @@ describe('createGasStationHandler', () => {
       channelProgramId: CHANNEL_PROGRAM,
       simPostLamports: (pre) => pre - DEFAULT_POLICY.defaultMaxLamports - 1n,
     });
-    const alarm = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const alarm = vi.spyOn(console, 'error').mockImplementation((message) => {
+      expect(message).toEqual(expect.stringContaining('ALARM'));
+    });
     try {
       const { address: client } = await clientKeyPair();
       const depositData = new Uint8Array(16);
@@ -669,6 +673,7 @@ describe('createGasStationHandler', () => {
       );
       expect(res).toMatchObject({ status: 'failed', reason: 'delta_cap_exceeded' });
       expect(sent).toHaveLength(0);
+      expect(alarm).toHaveBeenCalledWith(expect.stringContaining('ALARM'));
     } finally {
       alarm.mockRestore();
     }
