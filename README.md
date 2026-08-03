@@ -67,7 +67,13 @@ snapshot (verified live 2026-07-17).
 The kind:5096 gas-station program whitelist = these three + the ar.io programs
 for the configured `ARNS_NETWORK` row above (assembled at runtime in
 `src/gas-station-handler.ts` from the SDK exports — the table is documentation,
-not the source of truth).
+not the source of truth), **plus, optionally, the TOON payment-channel
+program** (issue #67) when `GAS_STATION_CHANNEL_PROGRAM_ID` is set — see the
+next section. Unlike the three above, that program id is NOT a hardcoded
+preset: instructions against it are further restricted to deposit / close /
+settle (`TOON_CHANNEL_DISCRIMINATORS` in `src/gas-station-handler.ts`) so an
+agent can fund or reclaim its own channel without holding SOL, without the
+gas station ever co-signing an open or a claim.
 
 ### TOON payment-channel contracts (the connector in FRONT of this store)
 
@@ -86,3 +92,9 @@ Snapshot (devnet/testnet only — **TOON has no mainnet deployments**):
 | Mina public devnet | canonical USDC token (6dp) | token `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d` · tokenId `9497120696276615621907376728658022802954262638363646162765282600447713419198` |
 | Mina public devnet | `PaymentChannel` zkApp | `B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf` |
 | Base Sepolia (`evm:84532`) | TokenNetworkRegistry / TokenNetwork / USDC | registry `0xcC9079adE929b168B54145f6d25262b64FAB9D5b` · TokenNetwork `0x1E95493fEF46707E034b4a1945f25a8C76A1823D` · USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` |
+
+To let the kind:5096 gas station co-sign a channel deposit/close/settle for
+that Solana program, set `GAS_STATION_CHANNEL_PROGRAM_ID` to the current row
+above — read it fresh from the live kind:10032 announce at deploy time, since
+this address belongs to the connector's deployment and rotates with it (see
+e.g. commits #64/#66 rotating other announce-derived addresses in this repo).

@@ -34,6 +34,21 @@
  *  (d) PROGRAM WHITELIST: ar.io ANT/ArNS/core registry programs, MPL Core,
  *      System, and ComputeBudget with a capped priority fee. Reasons:
  *      `program_not_whitelisted`, `priority_fee_exceeded`.
+ *  (e) TOON CHANNEL PROGRAM (toon-meta#261, issue #67): when
+ *      `GasStationPolicy.channelProgramId` is configured, instructions
+ *      against it are additionally restricted to the deposit / close /
+ *      settle operations ({@link TOON_CHANNEL_DISCRIMINATORS}) — the ops an
+ *      agent needs to fund or reclaim its own channel without holding SOL.
+ *      Anything else (e.g. opening a channel, claiming via a balance proof)
+ *      is refused as `channel_op_not_permitted`, regardless of whether it
+ *      references the fee payer. Like the ar.io programs, the fee payer has
+ *      no legitimate account slot in any of these three instructions — it
+ *      only ever pays as the transaction fee payer — so a permitted op that
+ *      DOES reference it is still `dvm_key_misplaced`. The program id is
+ *      sourced from the apex's live kind:10032 announce (README § "TOON
+ *      payment-channel contracts"), never hardcoded here: unlike the
+ *      cluster-invariant ids above, this address belongs to the connector's
+ *      deployment and rotates with it.
  *
  * QUOTE → EXECUTE: the free quote phase returns `{ quoteId, feePayer,
  * maxLamports, recentBlockhash, expiresAt }` — quote TTL and blockhash
@@ -82,6 +97,22 @@ export const COMPUTE_BUDGET_PROGRAM =
 export const MPL_CORE_PROGRAM = 'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d';
 
 /**
+ * TOON payment-channel program instruction discriminators (8-byte LE opcode,
+ * no Anchor sighash — mirrors `DISCRIMINATORS` in
+ * `@toon-protocol/connector`'s `solana-payment-channel-sdk.ts`, the only
+ * source of truth for this wire format). Only these three are permitted
+ * through the gas-station whitelist (mitigation e) — `INITIALIZE_CHANNEL`
+ * and `CLAIM_FROM_CHANNEL` are deliberately excluded (out of scope for
+ * issue #67: opening a channel and claiming via a balance proof are not
+ * "an agent reclaiming its own collateral").
+ */
+export const TOON_CHANNEL_DISCRIMINATORS = {
+  DEPOSIT: new Uint8Array([0x02, 0, 0, 0, 0, 0, 0, 0]),
+  CLOSE_CHANNEL: new Uint8Array([0x03, 0, 0, 0, 0, 0, 0, 0]),
+  SETTLE_CHANNEL: new Uint8Array([0x04, 0, 0, 0, 0, 0, 0, 0]),
+} as const;
+
+/**
  * Default quote TTL — merged with Solana blockhash validity (~60–90s), one
  * deadline. Configurable via {@link GasStationConfig.quoteTtlMs} for
  * operators/e2e whose client ceremony (e.g. a multi-step channel-paid job that
@@ -101,6 +132,16 @@ export interface GasStationPolicy {
   feePayer: string;
   /** Program ids allowed to appear in the transaction (mitigation d). */
   programWhitelist: ReadonlySet<string>;
+  /**
+   * The TOON payment-channel program id, when this deployment supports
+   * co-signing channel jobs (mitigation e). Sourced at config time from the
+   * live kind:10032 announce, not a hardcoded preset. Instructions against
+   * this program are restricted to deposit / close / settle
+   * ({@link TOON_CHANNEL_DISCRIMINATORS}); undefined disables channel-program
+   * support (any instruction against it then fails `program_not_whitelisted`
+   * unless separately whitelisted).
+   */
+  channelProgramId?: string;
   /** Max priority fee (ComputeBudget price × limit) in lamports. */
   priorityFeeCapLamports: bigint;
   /**
@@ -129,6 +170,7 @@ export type GasStationFailureReason =
   | 'dvm_key_misplaced'
   | 'program_not_whitelisted'
   | 'priority_fee_exceeded'
+  | 'channel_op_not_permitted'
   | 'missing_client_signature'
   | 'unknown_quote'
   | 'quote_expired'
@@ -187,6 +229,15 @@ function readU64LE(data: Uint8Array, offset: number): bigint | null {
   ).getBigUint64(offset, true);
 }
 
+/** Whether `data` starts with the given instruction discriminator. */
+function matchesDiscriminator(data: Uint8Array, disc: Uint8Array): boolean {
+  if (data.length < disc.length) return false;
+  for (let i = 0; i < disc.length; i++) {
+    if (data[i] !== disc[i]) return false;
+  }
+  return true;
+}
+
 /**
  * Statically inspect a partially-signed wire transaction against the policy
  * BEFORE anything is signed (mitigations b + d). Rules:
@@ -211,7 +262,14 @@ function readU64LE(data: Uint8Array, offset: number): bigint | null {
  *  4. ComputeBudget priority fee (unit price × unit limit) must be under the
  *     cap;
  *  5. every required signer except the fee payer must already carry a
- *     signature (`missing_client_signature`).
+ *     signature (`missing_client_signature`);
+ *  6. every instruction against `policy.channelProgramId` (when configured)
+ *     must match one of {@link TOON_CHANNEL_DISCRIMINATORS} (deposit / close
+ *     / settle) — anything else is `channel_op_not_permitted`, checked
+ *     regardless of whether the instruction references the fee payer. Like
+ *     ar.io, the fee payer has no legitimate slot in these instructions, so
+ *     one that DOES reference it is `dvm_key_misplaced` even when the op
+ *     itself is permitted.
  */
 export function inspectGasStationTransaction(
   wireBase64: string,
@@ -299,6 +357,25 @@ export function inspectGasStationTransaction(
       } else if (disc === 3) {
         const v = readU64LE(data, 1);
         if (v !== null) cuPriceMicroLamports = v;
+      }
+      continue;
+    }
+
+    if (policy.channelProgramId !== undefined && program === policy.channelProgramId) {
+      const permitted = Object.values(TOON_CHANNEL_DISCRIMINATORS).some((disc) =>
+        matchesDiscriminator(data, disc)
+      );
+      if (!permitted) {
+        return fail(
+          'channel_op_not_permitted',
+          `instruction ${i}: TOON channel-program instruction is not one of the permitted operations (deposit / close / settle)`
+        );
+      }
+      if (referencesFeePayer) {
+        return fail(
+          'dvm_key_misplaced',
+          `instruction ${i}: the gas wallet has no legitimate slot in a TOON channel-program instruction — it may only be the fee payer`
+        );
       }
       continue;
     }
@@ -614,7 +691,18 @@ export interface GasStationConfig {
   solanaSecretKey: Uint8Array;
   loadDeps?: LoadGasStationDeps;
   /** Policy knob overrides (caps, allowances). */
-  policy?: Partial<Omit<GasStationPolicy, 'feePayer' | 'programWhitelist'>>;
+  policy?: Partial<
+    Omit<GasStationPolicy, 'feePayer' | 'programWhitelist' | 'channelProgramId'>
+  >;
+  /**
+   * The TOON payment-channel program id, when this deployment co-signs
+   * channel deposit/close/settle jobs (issue #67). Sourced from the apex's
+   * live kind:10032 announce — NOT a hardcoded preset, since (unlike the
+   * cluster-invariant programs) this address belongs to the connector's
+   * deployment and rotates with it. Omit to leave channel-program jobs
+   * unsupported.
+   */
+  channelProgramId?: string;
   /**
    * Merged quote/blockhash deadline in ms (default {@link QUOTE_TTL_MS}).
    * Raise it for a slow client ceremony; keep it under how long the quoted
@@ -670,11 +758,13 @@ export function createGasStationHandler(
           ...DEFAULT_POLICY,
           ...config.policy,
           feePayer: deps.signer.address,
+          channelProgramId: config.channelProgramId,
           programWhitelist: new Set([
             SYSTEM_PROGRAM,
             COMPUTE_BUDGET_PROGRAM,
             MPL_CORE_PROGRAM,
             ...deps.arioProgramIds,
+            ...(config.channelProgramId ? [config.channelProgramId] : []),
           ]),
         };
         return { deps, policy };

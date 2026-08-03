@@ -37,6 +37,20 @@
  *                            refuses to boot with the same key in both).
  *                            When set, the kind:5096 gas-station job is
  *                            enabled. Secret — never logged.
+ *   GAS_STATION_CHANNEL_PROGRAM_ID -> OPTIONAL: base58 Solana program id of
+ *                            the TOON payment-channel program for the
+ *                            configured ARNS_NETWORK cluster (issue #67).
+ *                            When set, the kind:5096 whitelist additionally
+ *                            permits deposit/close/settle instructions
+ *                            against it (instruction-shape restricted — see
+ *                            ./gas-station-handler). Take this value from the
+ *                            apex's LIVE kind:10032 announce (README § "TOON
+ *                            payment-channel contracts"), not a hardcoded
+ *                            preset: unlike the cluster-invariant programs,
+ *                            this address belongs to the connector's
+ *                            deployment and rotates with it. Absent: channel
+ *                            jobs fail `program_not_whitelisted`, same as
+ *                            before this variable existed.
  *
  * Registers kind:5094 Arweave blob storage, plus kind:5095 ArNS buy when
  * ARNS_DVM_SOLANA_SECRET_KEY is configured and kind:5096 gas-station
@@ -62,6 +76,7 @@ import { startStoreBackend, type StoreBackend, type StoreHandler } from './store
 import {
   ARNS_BUY_KIND,
   createArnsBuyHandler,
+  SOLANA_PUBKEY_REGEX,
   type ArnsNetwork,
 } from './arns-buy-handler.js';
 import {
@@ -468,16 +483,29 @@ export function resolveArnsBuyEnv(
   };
 }
 
+/** Parsed kind:5096 configuration (undefined = job disabled). */
+export interface GasStationEnvConfig extends ArnsBuyEnvConfig {
+  /**
+   * The TOON payment-channel program id (issue #67), when
+   * GAS_STATION_CHANNEL_PROGRAM_ID is configured — sourced from the live
+   * kind:10032 announce, not a preset. Undefined leaves channel-program
+   * jobs unsupported.
+   */
+  channelProgramId?: string;
+}
+
 /**
  * Resolve the OPTIONAL kind:5096 gas-station config from the environment.
  * Same contract as {@link resolveArnsBuyEnv} (absent/empty disables;
  * malformed throws; ARNS_NETWORK shared), plus the toon-meta#163
  * mitigation (a) boot check: the DEDICATED fee-payer wallet must not be the
- * ARIO-float wallet — identical keys refuse to boot.
+ * ARIO-float wallet — identical keys refuse to boot. GAS_STATION_CHANNEL_
+ * PROGRAM_ID (issue #67) is independently optional — malformed still throws,
+ * absent just leaves channel-program support off.
  */
 export function resolveGasStationEnv(
   env: NodeJS.ProcessEnv
-): ArnsBuyEnvConfig | undefined {
+): GasStationEnvConfig | undefined {
   const hex = env['GAS_STATION_SOLANA_SECRET_KEY']?.trim();
   if (!hex) return undefined;
   if (!/^[0-9a-fA-F]{128}$/.test(hex)) {
@@ -500,9 +528,16 @@ export function resolveGasStationEnv(
       `ARNS_NETWORK must be 'devnet' or 'mainnet', got ${JSON.stringify(networkRaw)}`
     );
   }
+  const channelProgramId = env['GAS_STATION_CHANNEL_PROGRAM_ID']?.trim() || undefined;
+  if (channelProgramId && !SOLANA_PUBKEY_REGEX.test(channelProgramId)) {
+    throw new Error(
+      `GAS_STATION_CHANNEL_PROGRAM_ID must be a base58 Solana program id, got ${JSON.stringify(channelProgramId)}`
+    );
+  }
   return {
     network: networkRaw as ArnsNetwork,
     solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')),
+    ...(channelProgramId ? { channelProgramId } : {}),
   };
 }
 
@@ -631,6 +666,9 @@ async function main(): Promise<void> {
       createGasStationHandler({
         network: gasStationEnv.network,
         solanaSecretKey: gasStationEnv.solanaSecretKey,
+        ...(gasStationEnv.channelProgramId
+          ? { channelProgramId: gasStationEnv.channelProgramId }
+          : {}),
         // GAS_STATION_QUOTE_TTL_MS: raise the merged quote/blockhash deadline
         // for a slow client ceremony (e.g. a channel-paid job that signs an
         // o1js Mina claim per submission). Keep it under Solana blockhash
@@ -641,7 +679,8 @@ async function main(): Promise<void> {
       })
     ) as unknown as StoreHandler;
     console.log(
-      `[store] kind:${GAS_STATION_KIND} gas-station enabled (network: ${gasStationEnv.network})`
+      `[store] kind:${GAS_STATION_KIND} gas-station enabled (network: ${gasStationEnv.network}` +
+        `${gasStationEnv.channelProgramId ? `, channel program: ${gasStationEnv.channelProgramId}` : ''})`
     );
   }
   const handlerKinds = [
