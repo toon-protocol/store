@@ -232,10 +232,7 @@ function readU64LE(data: Uint8Array, offset: number): bigint | null {
 /** Whether `data` starts with the given instruction discriminator. */
 function matchesDiscriminator(data: Uint8Array, disc: Uint8Array): boolean {
   if (data.length < disc.length) return false;
-  for (let i = 0; i < disc.length; i++) {
-    if (data[i] !== disc[i]) return false;
-  }
-  return true;
+  return disc.every((byte, i) => data[i] === byte);
 }
 
 /**
