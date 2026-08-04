@@ -222,7 +222,6 @@ export type EvmGasStationFailureReason =
   | 'request_mismatch'
   | 'simulation_failed'
   | 'float_exhausted'
-  | 'quote_refused'
   | 'confirmation_timeout'
   | 'broadcast_failed';
 
@@ -526,6 +525,15 @@ export function createEvmGasStationHandler(
   const idempotency = new Map<string, EvmGasStationExecuteReceipt>();
   const depsCache = new Map<number, Promise<EvmGasStationChainDeps>>();
 
+  /** Look up a configured chain by its raw (string) chainId param, or undefined if unknown/unparseable. */
+  const lookupChain = (
+    chainIdRaw: string
+  ): { chainId: number; chain: EvmChainConfig } | undefined => {
+    const chainId = Number(chainIdRaw);
+    const chain = Number.isFinite(chainId) ? chainsById.get(chainId) : undefined;
+    return chain ? { chainId, chain } : undefined;
+  };
+
   const getDeps = (chain: EvmChainConfig): Promise<EvmGasStationChainDeps> => {
     let p = depsCache.get(chain.chainId);
     if (!p) {
@@ -568,9 +576,8 @@ export function createEvmGasStationHandler(
         "quote needs ['param','chainId'] and ['param','from']"
       );
     }
-    const chainId = Number(chainIdRaw);
-    const chain = Number.isFinite(chainId) ? chainsById.get(chainId) : undefined;
-    if (!chain) {
+    const resolved = lookupChain(chainIdRaw);
+    if (!resolved) {
       return failed(
         'quote',
         undefined,
@@ -578,6 +585,7 @@ export function createEvmGasStationHandler(
         `chain ${chainIdRaw} is not configured`
       );
     }
+    const { chainId, chain } = resolved;
     if (!isAddress(from)) {
       return failed('quote', chainId, 'malformed_request', `'from' ${from} is not a valid address`);
     }
@@ -589,13 +597,13 @@ export function createEvmGasStationHandler(
       deps.getGasPrice(),
     ]);
 
-    const estimatedCost = policy.maxGas * gasPrice;
-    if (balance < estimatedCost * 2n) {
+    const requiredFloat = policy.maxGas * gasPrice * 2n;
+    if (balance < requiredFloat) {
       return failed(
         'quote',
         chainId,
         'float_exhausted',
-        `relayer float ${balance} wei cannot cover this job (needs ≥ ${estimatedCost * 2n} at current gas price ${gasPrice})`
+        `relayer float ${balance} wei cannot cover this job (needs ≥ ${requiredFloat} at current gas price ${gasPrice})`
       );
     }
 
@@ -644,9 +652,8 @@ export function createEvmGasStationHandler(
       return accept({ ...replay, replayed: true });
     }
 
-    const chainId = Number(chainIdRaw);
-    const chain = Number.isFinite(chainId) ? chainsById.get(chainId) : undefined;
-    if (!chain) {
+    const resolved = lookupChain(chainIdRaw);
+    if (!resolved) {
       return failed(
         'execute',
         undefined,
@@ -654,6 +661,7 @@ export function createEvmGasStationHandler(
         `chain ${chainIdRaw} is not configured`
       );
     }
+    const { chainId, chain } = resolved;
 
     const quote = quotes.get(quoteId);
     if (!quote) {
