@@ -1,6 +1,6 @@
 # store
 
-TOON Protocol **store** — NIP-90 kind:5094 Arweave blob storage, plus two optional job kinds: kind:5095 ArNS brokered buy (gated by `ARNS_DVM_SOLANA_SECRET_KEY`) and kind:5096 gas-station co-sign/broadcast (gated by `GAS_STATION_SOLANA_SECRET_KEY`). It uploads the blob to Arweave via Turbo and returns the tx id. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`. It runs as a payment-oblivious `POST /store` backend (RouteTermination) behind the connector, which is the front-of-app payment proxy — see [`deploy/`](./deploy).
+TOON Protocol **store** — NIP-90 kind:5094 Arweave blob storage, plus three optional job kinds: kind:5095 ArNS brokered buy (gated by `ARNS_DVM_SOLANA_SECRET_KEY`), kind:5096 Solana gas-station co-sign/broadcast (gated by `GAS_STATION_SOLANA_SECRET_KEY`), and kind:5098 EVM gas-station meta-transaction relayer (gated by `EVM_GAS_STATION_CONFIG_JSON`). It uploads the blob to Arweave via Turbo and returns the tx id. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`. It runs as a payment-oblivious `POST /store` backend (RouteTermination) behind the connector, which is the front-of-app payment proxy — see [`deploy/`](./deploy).
 
 ## Status / follow-ups
 - Trimmed to store-only: the repo is now `Dockerfile.store` + `src/entrypoint-store.ts` + `src/store-backend.ts`. The other images' carried-over build contexts (`Dockerfile.{town,mill,townhouse-api,akash-*,oyster,nix,sdk-e2e,toon-client,…}`, their `src/entrypoint-*` files, and the `configs/`, `dev-fixtures/`, `akash-ator-probe/`, `townhouse-ator-sidecar/` dirs) have been removed.
@@ -74,6 +74,49 @@ preset: instructions against it are further restricted to deposit / close /
 settle (`TOON_CHANNEL_DISCRIMINATORS` in `src/gas-station-handler.ts`) so an
 agent can fund or reclaim its own channel without holding SOL, without the
 gas station ever co-signing an open or a claim.
+
+## kind:5098 — EVM gas-station meta-transaction relayer (issue #68, toon-meta#261 decision 9)
+
+The EVM half of gasless settle for agent payment channels: a client-signed
+ERC-2771 forward request (OpenZeppelin `ERC2771Forwarder`) for `TokenNetwork`
+deposit/close/settle is validated, submitted through the trusted forwarder,
+and paid for by a dedicated relayer wallet — the caller needs no native gas.
+Deliberately a real relayer, not native-gas dispensing, so every new EVM
+chain gets gasless settle at deploy time (`connector#694`, the contract half,
+merged the ERC-2771 `TokenNetwork` + forwarder deployment support).
+
+**Mirrors the kind:5096 security model** (`src/evm-gas-station-handler.ts`
+doc comment has the full mapping) — no second security posture invented for
+the EVM leg:
+
+| kind:5096 (Solana) | kind:5098 (EVM) |
+|---|---|
+| (a) dedicated fee-payer wallet | (a) dedicated relayer wallet, one per configured chain |
+| (b) static inspection (fee-payer slot rules) | (b) static inspection (`to` = configured `TokenNetwork`, `value`/`gas`/`deadline` caps) |
+| (c) simulation + balance-delta cap | (c) `estimateGas` on `forwarder.execute(request)` + gas cap |
+| (d) program whitelist | (d) function-selector whitelist: `setTotalDeposit`/`closeChannel`/`settleChannel` only — `openChannel`/`claimFromChannel` excluded, same rationale as kind:5096's `INITIALIZE_CHANNEL`/`CLAIM_FROM_CHANNEL` exclusion |
+| quote → execute + idempotency key | quote → execute + idempotency key |
+| machine-readable failure reasons | machine-readable failure reasons |
+
+Signature/nonce/deadline validity is delegated to the forwarder's own
+`verify(request)` view call rather than reimplemented offline — it is the one
+contract that actually knows its EIP-712 domain and the signer's current
+nonce.
+
+**Chain portability is the point**: adding a new EVM chain is one entry in
+`EVM_GAS_STATION_CONFIG_JSON` — a JSON array of
+`{chainId, rpcUrl, forwarderAddress, tokenNetworkAddress, relayerPrivateKey}`
+— not a code change. Optional `EVM_GAS_STATION_QUOTE_TTL_MS` /
+`EVM_GAS_STATION_MAX_GAS` override the default 120s quote TTL / 300,000 gas
+cap. All three env vars are treated as secret (the config JSON carries
+relayer private keys) — never logged, deleted from `process.env` after boot.
+
+Proven against a local chain (`src/evm-gas-station-handler.test.ts`) — no
+live-chain calls in tests, ever, same hard-safety rule as the Solana suite.
+Live devnet verification additionally needs `connector#695` (deploy the
+ERC-2771 `TokenNetwork` to devnet and repoint the advertised addresses),
+which has not landed yet; the "TOON payment-channel contracts" table below
+still lists the pre-ERC-2771 `TokenNetwork` address for that reason.
 
 ## kind:5094 confirmed for encrypted increment artifacts (issue #70, toon-meta#262 decision 13)
 

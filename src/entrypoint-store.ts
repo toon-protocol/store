@@ -51,18 +51,36 @@
  *                            deployment and rotates with it. Absent: channel
  *                            jobs fail `program_not_whitelisted`, same as
  *                            before this variable existed.
+ *   EVM_GAS_STATION_CONFIG_JSON -> OPTIONAL: JSON array of EVM chain configs
+ *                            `[{chainId, rpcUrl, forwarderAddress,
+ *                            tokenNetworkAddress, relayerPrivateKey}, ...]`
+ *                            for the kind:5098 evm-gas-station (ERC-2771
+ *                            meta-transaction relayer, issue #68). Each
+ *                            entry is a DEDICATED per-chain relayer wallet —
+ *                            adding a new EVM chain is one more array entry,
+ *                            not new code. Absent disables the job; a
+ *                            malformed entry throws at boot. Secret — never
+ *                            logged.
+ *   EVM_GAS_STATION_QUOTE_TTL_MS -> OPTIONAL: overrides the default 120s
+ *                            quote deadline (EVM confirmation is typically
+ *                            slower than Solana's ~60-90s blockhash window).
+ *   EVM_GAS_STATION_MAX_GAS -> OPTIONAL: overrides the default 300_000 gas
+ *                            cap per forwarded call.
  *
  * Registers kind:5094 Arweave blob storage, plus kind:5095 ArNS buy when
- * ARNS_DVM_SOLANA_SECRET_KEY is configured and kind:5096 gas-station
- * co-sign/broadcast when GAS_STATION_SOLANA_SECRET_KEY is configured.
- * kind:5250 Dungeon DVM was removed from this image (Arweave-only) so the
- * bundle no longer pulls in pet-dvm / memvid-node / o1js / mina-signer.
+ * ARNS_DVM_SOLANA_SECRET_KEY is configured, kind:5096 gas-station
+ * co-sign/broadcast when GAS_STATION_SOLANA_SECRET_KEY is configured, and
+ * kind:5098 evm-gas-station meta-tx relaying when EVM_GAS_STATION_CONFIG_JSON
+ * is configured. kind:5250 Dungeon DVM was removed from this image
+ * (Arweave-only) so the bundle no longer pulls in pet-dvm / memvid-node /
+ * o1js / mina-signer.
  */
 
 import { readFileSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
+import { getAddress, isAddress } from 'ethers';
 import type { DvmHealthResponse } from '@toon-protocol/sdk';
 import {
   createArweaveDvmHandler,
@@ -83,6 +101,11 @@ import {
   GAS_STATION_KIND,
   createGasStationHandler,
 } from './gas-station-handler.js';
+import {
+  EVM_GAS_STATION_KIND,
+  createEvmGasStationHandler,
+  type EvmChainConfig,
+} from './evm-gas-station-handler.js';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -541,6 +564,102 @@ export function resolveGasStationEnv(
   };
 }
 
+// --- kind:5098 evm-gas-station — env resolution (exported for tests) ---
+
+interface EvmGasStationRawChainConfig {
+  chainId?: number;
+  rpcUrl?: string;
+  forwarderAddress?: string;
+  tokenNetworkAddress?: string;
+  relayerPrivateKey?: string;
+}
+
+/** Parsed kind:5098 configuration (undefined = job disabled). */
+export interface EvmGasStationEnvConfig {
+  chains: EvmChainConfig[];
+  quoteTtlMs?: number;
+  maxGas?: bigint;
+}
+
+/**
+ * Resolve the OPTIONAL kind:5098 evm-gas-station config from the
+ * environment. Absent/empty `EVM_GAS_STATION_CONFIG_JSON` disables the job
+ * (returns undefined); malformed JSON, an empty array, a duplicate chainId,
+ * or an invalid field in any entry throws (misconfiguration must not boot a
+ * silently-crippled relayer) — mirrors {@link resolveGasStationEnv}'s
+ * absent-vs-malformed contract. Chain portability (issue #68) lives here:
+ * each array entry IS a chain — adding one is a config change, not a code
+ * change.
+ */
+export function resolveEvmGasStationEnv(
+  env: NodeJS.ProcessEnv
+): EvmGasStationEnvConfig | undefined {
+  const raw = env['EVM_GAS_STATION_CONFIG_JSON']?.trim();
+  if (!raw) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `EVM_GAS_STATION_CONFIG_JSON is not valid JSON: ${err instanceof Error ? err.message : err}`
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error(
+      'EVM_GAS_STATION_CONFIG_JSON must be a non-empty JSON array of chain configs ' +
+        '({chainId, rpcUrl, forwarderAddress, tokenNetworkAddress, relayerPrivateKey})'
+    );
+  }
+
+  const seenChainIds = new Set<number>();
+  const chains: EvmChainConfig[] = parsed.map((entry: unknown, i: number) => {
+    const c = (entry ?? {}) as EvmGasStationRawChainConfig;
+    if (typeof c.chainId !== 'number' || !Number.isInteger(c.chainId) || c.chainId <= 0) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].chainId must be a positive integer`);
+    }
+    if (seenChainIds.has(c.chainId)) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON has a duplicate chainId ${c.chainId}`);
+    }
+    seenChainIds.add(c.chainId);
+    if (typeof c.rpcUrl !== 'string' || !c.rpcUrl.trim()) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].rpcUrl must be a non-empty string`);
+    }
+    let protocol: string;
+    try {
+      protocol = new URL(c.rpcUrl).protocol;
+    } catch {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].rpcUrl is not a valid URL: ${JSON.stringify(c.rpcUrl)}`);
+    }
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(protocol)) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].rpcUrl must be http(s) or ws(s), got ${JSON.stringify(c.rpcUrl)}`);
+    }
+    if (typeof c.forwarderAddress !== 'string' || !isAddress(c.forwarderAddress)) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].forwarderAddress must be a valid EVM address`);
+    }
+    if (typeof c.tokenNetworkAddress !== 'string' || !isAddress(c.tokenNetworkAddress)) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].tokenNetworkAddress must be a valid EVM address`);
+    }
+    if (typeof c.relayerPrivateKey !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(c.relayerPrivateKey)) {
+      throw new Error(`EVM_GAS_STATION_CONFIG_JSON[${i}].relayerPrivateKey must be a 0x-prefixed 32-byte hex secret key`);
+    }
+    return {
+      chainId: c.chainId,
+      rpcUrl: c.rpcUrl.trim(),
+      forwarderAddress: getAddress(c.forwarderAddress),
+      tokenNetworkAddress: getAddress(c.tokenNetworkAddress),
+      relayerPrivateKey: c.relayerPrivateKey,
+    };
+  });
+
+  const result: EvmGasStationEnvConfig = { chains };
+  const quoteTtlMs = env['EVM_GAS_STATION_QUOTE_TTL_MS']?.trim();
+  if (quoteTtlMs) result.quoteTtlMs = Number(quoteTtlMs);
+  const maxGas = env['EVM_GAS_STATION_MAX_GAS']?.trim();
+  if (maxGas) result.maxGas = BigInt(maxGas);
+  return result;
+}
+
 function buildNoCreditsMessage(address: string | undefined): string {
   const addr = address ?? 'unknown';
   return (
@@ -683,10 +802,33 @@ async function main(): Promise<void> {
         `${gasStationEnv.channelProgramId ? `, channel program: ${gasStationEnv.channelProgramId}` : ''})`
     );
   }
+  // kind:5098 evm-gas-station (ERC-2771 meta-transaction relayer, issue #68)
+  // — enabled only when at least one EVM chain is configured. Chain
+  // portability is a config entry (EVM_GAS_STATION_CONFIG_JSON), not code.
+  const evmGasStationEnv = resolveEvmGasStationEnv(process.env);
+  if (evmGasStationEnv) {
+    extraHandlers[EVM_GAS_STATION_KIND] = counter.wrap(
+      EVM_GAS_STATION_KIND,
+      createEvmGasStationHandler({
+        chains: evmGasStationEnv.chains,
+        ...(evmGasStationEnv.quoteTtlMs !== undefined
+          ? { quoteTtlMs: evmGasStationEnv.quoteTtlMs }
+          : {}),
+        ...(evmGasStationEnv.maxGas !== undefined
+          ? { policy: { maxGas: evmGasStationEnv.maxGas } }
+          : {}),
+      })
+    ) as unknown as StoreHandler;
+    console.log(
+      `[store] kind:${EVM_GAS_STATION_KIND} evm-gas-station enabled (chains: ` +
+        `${evmGasStationEnv.chains.map((c) => c.chainId).join(', ')})`
+    );
+  }
   const handlerKinds = [
     5094,
     ...(arnsBuyEnv ? [ARNS_BUY_KIND] : []),
     ...(gasStationEnv ? [GAS_STATION_KIND] : []),
+    ...(evmGasStationEnv ? [EVM_GAS_STATION_KIND] : []),
   ];
 
   // The connector is the front-of-app payment proxy: it terminates payment and
@@ -746,6 +888,7 @@ async function main(): Promise<void> {
   delete process.env['NODE_NOSTR_SECRET_KEY'];
   delete process.env['ARNS_DVM_SOLANA_SECRET_KEY'];
   delete process.env['GAS_STATION_SOLANA_SECRET_KEY'];
+  delete process.env['EVM_GAS_STATION_CONFIG_JSON'];
 
   // Graceful shutdown handlers
   let shuttingDown = false;

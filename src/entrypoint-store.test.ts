@@ -75,6 +75,7 @@ import {
   applyEnvOverlay,
   createTurboAdapter,
   resolveGasStationEnv,
+  resolveEvmGasStationEnv,
 } from './entrypoint-store.js';
 
 // ── Job counter tests ────────────────────────────────────────────────────────
@@ -279,6 +280,137 @@ describe('resolveGasStationEnv — GAS_STATION_CHANNEL_PROGRAM_ID', () => {
     delete process.env['GAS_STATION_SOLANA_SECRET_KEY'];
     process.env['GAS_STATION_CHANNEL_PROGRAM_ID'] = CHANNEL_PROGRAM_ID;
     expect(resolveGasStationEnv(process.env)).toBeUndefined();
+  });
+});
+
+// ── resolveEvmGasStationEnv — EVM_GAS_STATION_CONFIG_JSON (issue #68) ───────
+
+describe('resolveEvmGasStationEnv', () => {
+  const EVM_GAS_STATION_ENV_KEYS = [
+    'EVM_GAS_STATION_CONFIG_JSON',
+    'EVM_GAS_STATION_QUOTE_TTL_MS',
+    'EVM_GAS_STATION_MAX_GAS',
+  ];
+  let saved: Record<string, string | undefined>;
+
+  const FORWARDER = '0x111111111111111111111111111111111111111f';
+  const TOKEN_NETWORK = '0x222222222222222222222222222222222222222f';
+  const RELAYER_KEY = '0x' + '7'.repeat(64);
+
+  function validEntry(overrides: Record<string, unknown> = {}) {
+    return {
+      chainId: 84532,
+      rpcUrl: 'https://sepolia.base.org',
+      forwarderAddress: FORWARDER,
+      tokenNetworkAddress: TOKEN_NETWORK,
+      relayerPrivateKey: RELAYER_KEY,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    saved = {};
+    for (const key of EVM_GAS_STATION_ENV_KEYS) {
+      saved[key] = process.env[key];
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of EVM_GAS_STATION_ENV_KEYS) {
+      if (saved[key] === undefined) {
+        // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+        delete process.env[key];
+      } else {
+        process.env[key] = saved[key];
+      }
+    }
+  });
+
+  it('absent → job disabled (undefined)', () => {
+    expect(resolveEvmGasStationEnv(process.env)).toBeUndefined();
+  });
+
+  it('whitespace-only → treated as absent', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = '   ';
+    expect(resolveEvmGasStationEnv(process.env)).toBeUndefined();
+  });
+
+  it('a single valid chain entry is parsed and addresses are checksummed', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify([validEntry()]);
+    const config = resolveEvmGasStationEnv(process.env);
+    expect(config?.chains).toHaveLength(1);
+    expect(config?.chains[0]).toMatchObject({
+      chainId: 84532,
+      rpcUrl: 'https://sepolia.base.org',
+      relayerPrivateKey: RELAYER_KEY,
+    });
+  });
+
+  it('adding a second chain is a config entry, not a code change — multiple entries all parse', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify([
+      validEntry({ chainId: 84532 }),
+      validEntry({ chainId: 11_155_111, rpcUrl: 'https://sepolia.infura.io/v3/x' }),
+    ]);
+    const config = resolveEvmGasStationEnv(process.env);
+    expect(config?.chains.map((c) => c.chainId)).toEqual([84532, 11_155_111]);
+  });
+
+  it('malformed JSON throws', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = '{not json';
+    expect(() => resolveEvmGasStationEnv(process.env)).toThrow(/not valid JSON/);
+  });
+
+  it('an empty array throws (misconfiguration must not boot a silently-crippled relayer)', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = '[]';
+    expect(() => resolveEvmGasStationEnv(process.env)).toThrow(/non-empty JSON array/);
+  });
+
+  it('a non-array JSON value throws', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify(validEntry());
+    expect(() => resolveEvmGasStationEnv(process.env)).toThrow(/non-empty JSON array/);
+  });
+
+  it('a duplicate chainId throws', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify([
+      validEntry(),
+      validEntry({ rpcUrl: 'https://another-rpc.example' }),
+    ]);
+    expect(() => resolveEvmGasStationEnv(process.env)).toThrow(/duplicate chainId/);
+  });
+
+  it.each([
+    ['chainId missing', { chainId: undefined }, /chainId/],
+    ['chainId zero', { chainId: 0 }, /chainId/],
+    ['chainId negative', { chainId: -1 }, /chainId/],
+    ['chainId non-integer', { chainId: 1.5 }, /chainId/],
+    ['rpcUrl missing', { rpcUrl: undefined }, /rpcUrl/],
+    ['rpcUrl not a URL', { rpcUrl: 'not-a-url' }, /rpcUrl/],
+    ['rpcUrl wrong protocol', { rpcUrl: 'ftp://example.com' }, /rpcUrl/],
+    ['forwarderAddress missing', { forwarderAddress: undefined }, /forwarderAddress/],
+    ['forwarderAddress malformed', { forwarderAddress: '0xnope' }, /forwarderAddress/],
+    ['tokenNetworkAddress missing', { tokenNetworkAddress: undefined }, /tokenNetworkAddress/],
+    ['tokenNetworkAddress malformed', { tokenNetworkAddress: '0xnope' }, /tokenNetworkAddress/],
+    ['relayerPrivateKey missing', { relayerPrivateKey: undefined }, /relayerPrivateKey/],
+    ['relayerPrivateKey malformed', { relayerPrivateKey: '0xdead' }, /relayerPrivateKey/],
+  ])('rejects %s', (_label, override, pattern) => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify([validEntry(override)]);
+    expect(() => resolveEvmGasStationEnv(process.env)).toThrow(pattern);
+  });
+
+  it('EVM_GAS_STATION_QUOTE_TTL_MS overrides the default quote TTL', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify([validEntry()]);
+    process.env['EVM_GAS_STATION_QUOTE_TTL_MS'] = '30000';
+    const config = resolveEvmGasStationEnv(process.env);
+    expect(config?.quoteTtlMs).toBe(30_000);
+  });
+
+  it('EVM_GAS_STATION_MAX_GAS overrides the default gas cap', () => {
+    process.env['EVM_GAS_STATION_CONFIG_JSON'] = JSON.stringify([validEntry()]);
+    process.env['EVM_GAS_STATION_MAX_GAS'] = '500000';
+    const config = resolveEvmGasStationEnv(process.env);
+    expect(config?.maxGas).toBe(500_000n);
   });
 });
 
