@@ -8,7 +8,7 @@ For each branch:
 
 1. Run `git merge <branch> --no-edit`
 2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
-3. After resolving conflicts, run store's gate to verify everything works — `pnpm run typecheck`, `vitest run`, and `pnpm run build`. store has NO lint step (no eslint config); do not run eslint.
+3. After resolving conflicts, run store's gate to verify everything works — `pnpm lint`, `pnpm run typecheck`, `vitest run`, and `pnpm run build`. Lint is `eslint .` against the frozen `eslint-suppressions.json` allowlist: any NEW violation fails; do not add suppressions to get green.
 4. If tests fail, fix the issues before proceeding to the next branch
 
 After all branches are merged, make a single commit summarizing the merge.
