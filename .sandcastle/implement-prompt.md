@@ -37,13 +37,28 @@ If applicable, use RGR to complete the task.
 
 store is a single-package pnpm repo. Before committing, run store's real gate and make sure every command passes:
 
+- lint: `pnpm lint` (= `eslint .`)
 - typecheck: `pnpm run typecheck`
 - test: `vitest run`
 - build: `pnpm run build`
 
-There is NO lint step in store — do not run `eslint` (the repo has no eslint config). typecheck, test, and build are the whole gate.
+CI's `build` job runs all four (`pnpm build/typecheck/lint/test`) in parallel and fails if any
+of them fails, then runs the gate no-regression guard (`src/gate-regression-guard.ts` against
+the frozen `.sandcastle/gate-baseline.json`).
 
-Do not commit until typecheck, test, and build all pass.
+## Lint is gated against a frozen suppressions allowlist
+
+store DOES have a lint step: `eslint.config.js` (flat config — `@eslint/js` recommended +
+`typescript-eslint` strict/stylistic + `eslint-config-prettier`, scoped to `src/**/*.ts`), with
+the pre-existing violations frozen in `eslint-suppressions.json` via ESLint's native
+bulk-suppressions. The rules:
+
+- Any NEW violation fails `pnpm lint`. Fix it — do NOT add entries to
+  `eslint-suppressions.json` to get green.
+- If your change fixes a suppressed violation, ESLint fails on the now-unused suppression;
+  run `npx eslint . --prune-suppressions` and commit the shrunk `eslint-suppressions.json`.
+
+Do not commit until lint, typecheck, test, and build all pass.
 
 # COMMIT
 
@@ -71,4 +86,16 @@ ONLY WORK ON A SINGLE TASK.
 
 ## Context budget
 
-If you approach ~60% of your context window, STOP: write a structured handoff note (current state + remaining steps) to `.sandcastle/logs/handoff-<task-id>.md` and end your turn so a fresh agent continues. Do not push past ~60% — small, resumable units beat one degraded run.
+Operate as if your context is capped at **~200k tokens**, whatever your model's actual window
+is (org policy: toon-meta's `CLAUDE.md` → *Context budget policy* — the cap is absolute, not a
+percentage of the window, because a percentage means different things on different models).
+Treat ~200k as a hard ceiling, not a target, and do the real work well below it.
+
+Start preparing a handoff at roughly **120k** tokens of context, and hand off no later than
+roughly **160k** — never run to the ceiling. Handing off means: write a structured handoff note
+(goal and remaining work as a concrete task list; what has been done and where — files,
+branches, commits; key decisions and why; exact paths/line numbers instead of "see above") to
+`.sandcastle/logs/handoff-<task-id>.md`, **commit it on this branch** (use `git add -f` —
+`.sandcastle/.gitignore` ignores `logs/`, and the sandbox is destroyed when the run ends, so an
+uncommitted note is lost), and end your turn so a fresh agent continues. Small, resumable units
+beat one degraded run.
