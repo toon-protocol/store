@@ -9,8 +9,10 @@
 #
 # PRIVACY INVARIANT (enforced by construction):
 #   - store :3300 (store job backend) → NEVER host-published; only connector dials store:3300.
-#   - store :3400 (health) / connector admin :8081 / health :8080 → NEVER host-published.
-#   The only host-bound port is the edge :3000.
+#   - store :3400 (health) → NEVER host-published.
+#   The only host-bound port is the edge :3000. The connector has no other port
+#   to leak: since the move to the Rust connector its edge, operator surface and
+#   /metrics all share :3000, and the TypeScript node's :8080/:8081 are gone.
 #
 # Dev:  docker compose up --build   (builds store-connector locally from ./Dockerfile)
 # Prod: docker compose up           (pulls the pinned STORE_CONNECTOR_IMAGE)
@@ -24,20 +26,39 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CONNECTOR_TAG: ${CONNECTOR_TAG:-3.28.0}
-    environment:
-      CONFIG_FILE: /app/config/connector.yaml
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      # On-chain settlement key derived from this BIP-39 mnemonic at boot
-      # (overwrites connector.yaml's keyId). Empty → pre-funded anvil account-0.
-      TOON_MNEMONIC: ${TOON_MNEMONIC:-}
-      # Devnet serves a SELF-SIGNED cert — devnet-only shortcut for the
-      # connector's RPC/faucet calls. DEVNET-ONLY.
-      NODE_TLS_REJECT_UNAUTHORIZED: ${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+        CONNECTOR_TAG: ${CONNECTOR_TAG:-rust-sha-bc9749b}
+    # NO `environment:` block, deliberately. The Rust connector has no
+    # environment-variable layer at all (connector#755): every value comes from
+    # the baked ./connector.toml, so there is exactly one place any value comes
+    # from. The three variables that used to live here are all gone —
+    # CONFIG_FILE (the image's CMD already names the path), TOON_MNEMONIC (the
+    # settlement key is a mounted FILE now, derived outside the container), and
+    # NODE_TLS_REJECT_UNAUTHORIZED (a Node.js escape hatch with no equivalent;
+    # a self-signed RPC cert is now a hard TLS failure, so point the config at
+    # an RPC with a real chain of trust).
+    volumes:
+      # Two key files, provisioned two DIFFERENT ways — see ./connector.toml.
+      # In short: the signer is this node's ILP identity and holds no money, so
+      # it is fresh random material per box; the settlement key spends real
+      # testnet value and is the identity clients open their channels against,
+      # so it is derived from a seed you can reproduce. Both must exist and be
+      # readable by uid 10001 before the first `up -d` — a bind mount keeps its
+      # HOST ownership inside the container, so `chown 10001:10001` them or the
+      # container restart-loops on "Permission denied".
+      - ./signer.key:/app/data/signer.key:ro
+      - ./settlement.key:/app/data/settlement.key:ro
+      # The durable claim journal (connector#605). NAMED, not a host bind: the
+      # image ships /app/state owned by uid 10001, which is what a fresh named
+      # volume inherits on first mount and what a bind mount does not. Replaying
+      # this journal is what makes a channel's replay watermark survive a
+      # restart; without it, every claim a payer already spent becomes free
+      # service again.
+      - connector_state:/app/state
     ports:
       - '${EDGE_PORT:-3000}:3000' # paid POST /ilp edge (the env's TLS terminator fronts this)
-    expose:
-      - '8080' # health — internal only
+    # No `expose: 8080`. The client edge, the operator surface and /metrics all
+    # share :3000 on the Rust connector; the TypeScript node's separate health
+    # (:8080) and admin (:8081) ports do not exist.
     depends_on:
       store:
         condition: service_healthy
@@ -67,6 +88,12 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+
+volumes:
+  # The claim journal. Named so a fresh mount inherits the image's uid-10001
+  # ownership of /app/state; see the connector service's `volumes:` above for
+  # why it must outlive the container.
+  connector_state:
 
 networks:
   default:

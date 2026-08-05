@@ -1,13 +1,19 @@
 name: Publish store-connector image
 
 # Builds the store-connector image (deploy/Dockerfile: the published TOON
-# connector with this repo's deploy/connector.yaml baked in) and pushes it to
+# connector with this repo's deploy/connector.toml baked in) and pushes it to
 # GHCR. This is the payment-proxy image that runs in front of the store app
-# (RouteTermination: route g.connector.store -> http://store:3300).
+# (RouteTermination: route g.toon.ario -> http://store:3300/store).
 #
 # The store app image is published separately (publish-store-image.yml ->
 # ghcr.io/toon-protocol/store). This image bakes a PINNED connector
 # (CONNECTOR_TAG); bump it deliberately to adopt a newer connector.
+#
+# CONNECTOR_TAG must stay in lockstep with deploy/Dockerfile's own ARG default
+# and deploy/.env.example — three copies of one pin, and this is the one that
+# decides what actually gets published. Since connector#755 it names a Rust
+# build (`rust-sha-<short>`); a plain semver tag is the retired TypeScript node,
+# which reads YAML and cannot start on deploy/connector.toml.
 #
 # `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
 # publish semver tags for pinning, plus an immutable sha tag.
@@ -55,7 +61,7 @@ jobs:
           context: deploy
           file: deploy/Dockerfile
           build-args: |
-            CONNECTOR_TAG=3.28.0
+            CONNECTOR_TAG=rust-sha-bc9749b
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
