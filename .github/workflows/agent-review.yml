@@ -7,11 +7,18 @@
 #   and requires a structured verdict (toon-meta#275): the reviewer resolves the
 #   PR's target issue from its body's `Closes #n`, reviews against the issue's
 #   acceptance criteria, and must emit <review>{"verdict":"clean"|"blocking",
-#   ...}</review> — a malformed verdict FAILS the job. On "blocking" the runner
-#   posts the findings as a PR review and applies `needs:human` (both via the
-#   App token below — this workflow's own GITHUB_TOKEN stays read-only). It
-#   NEVER merges the PR and NEVER closes anything — a human still merges. This
-#   is the single-pass replacement for the old 4-round `review-round:*` loop
+#   ...}</review> — a malformed verdict FAILS the job. The verdict is then
+#   submitted FORMALLY as the factory-ops identity (toon-meta#282,
+#   FACTORY_OPS_TOKEN — provisioned + monitored under toon-meta#271): "clean" →
+#   a real APPROVE review (a machine verdict; see toon-meta's FACTORY.md,
+#   "What a factory-ops approval attests"), "blocking" → REQUEST_CHANGES with
+#   the findings plus `needs:human`. The approver must never be the PR author:
+#   the runner compares the token's login against the author before the
+#   reviewer runs and again at submission, and a missing/expired/wrong-identity
+#   token FAILS the job loudly instead of degrading to a COMMENTED review (the
+#   old loops' REVIEWER_TOKEN rot). This workflow's own GITHUB_TOKEN stays
+#   read-only. It NEVER merges the PR and NEVER closes anything. This is the
+#   single-pass replacement for the old 4-round `review-round:*` loop
 #   (store's pr-reviewer.yml).
 #
 #   Committing this file triggers nothing: pull_request-`labeled` workflows fire
@@ -128,6 +135,11 @@ jobs:
           SANDCASTLE_PR_NUMBER: ${{ github.event.pull_request.number }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The formal-verdict approver (toon-meta#282). HOST-ONLY: it is
+          # deliberately NOT forwarded into the sandbox (see
+          # .sandcastle/sandbox-secrets.ts) — the agent must never hold the
+          # credential that approves its own output.
+          FACTORY_OPS_TOKEN: ${{ secrets.FACTORY_OPS_TOKEN }}
         run: pnpm sandcastle:review
 
       # REDACT BEFORE UPLOAD — this repository is PUBLIC.
@@ -165,6 +177,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          FACTORY_OPS_TOKEN: ${{ secrets.FACTORY_OPS_TOKEN }}
         run: |
           set -euo pipefail
           [ -d .sandcastle ] || { echo "No .sandcastle directory — nothing to redact."; exit 0; }
@@ -175,7 +188,8 @@ jobs:
           # secret that contains another is not partially replaced).
           exact = sorted(
               (v for v in (os.environ.get(k, "") for k in
-                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY"))
+                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY",
+                            "FACTORY_OPS_TOKEN"))
                if v and len(v.strip()) >= 8),
               key=len, reverse=True,
           )
