@@ -3,21 +3,26 @@
 # WHAT THIS DOES (and does NOT do):
 #   Fires when a human applies the `agent:review` label to a PULL REQUEST. It
 #   runs the single-pass reviewer (`pnpm sandcastle:review`) against the PR's
-#   head branch, pushing any clarity/standards refinements back onto the PR. It
-#   NEVER merges the PR and NEVER closes anything — a human still merges. This is
-#   the single-pass replacement for the old 4-round `review-round:*` loop
+#   head branch, pushing any clarity/standards refinements back onto the PR,
+#   and requires a structured verdict (toon-meta#275): the reviewer resolves the
+#   PR's target issue from its body's `Closes #n`, reviews against the issue's
+#   acceptance criteria, and must emit <review>{"verdict":"clean"|"blocking",
+#   ...}</review> — a malformed verdict FAILS the job. On "blocking" the runner
+#   posts the findings as a PR review and applies `needs:human` (both via the
+#   App token below — this workflow's own GITHUB_TOKEN stays read-only). It
+#   NEVER merges the PR and NEVER closes anything — a human still merges. This
+#   is the single-pass replacement for the old 4-round `review-round:*` loop
 #   (store's pr-reviewer.yml).
 #
 #   Committing this file triggers nothing: pull_request-`labeled` workflows fire
-#   only from the default branch and only when someone applies the label.
+#   only when someone applies the label.
 #
-# VERIFY ON FIRST RUN — the standalone-review path:
-#   Sandcastle 0.12.0 only exercises the reviewer inside its parallel loop, on a
-#   fresh branch it just created. Running it standalone against an existing PR
-#   head branch is our interpretation (see .sandcastle/agent-review-pr.ts). On
-#   the first live run confirm: (1) the sandbox checks out the existing PR head
-#   rather than erroring on the ref, and (2) review-prompt.md's built-in
-#   {{TARGET_BRANCH}} resolves to `main` so the diff is non-empty.
+# STANDALONE-REVIEW MECHANICS (proven live on connector#634's first run):
+#   sandcastle checks the PR head branch out in its OWN worktree under
+#   .sandcastle/worktrees/, and git refuses the same branch in two worktrees —
+#   so the checkout below pins `ref: main`, never the PR head. The runner then
+#   materialises the PR head as a local branch itself (see
+#   .sandcastle/agent-review-pr.ts).
 #
 # Note: label events on PRs opened from FORKS run without secrets (GitHub
 # security), so this runner only works on same-repo PRs. That is expected for
@@ -85,8 +90,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Check out the PR head so the reviewer operates on the right branch.
-          ref: ${{ github.event.pull_request.head.ref }}
+          # Check out MAIN, not the PR head: sandcastle's branch strategy checks
+          # the PR head out in its own worktree under .sandcastle/worktrees/,
+          # and git refuses to check out one branch in two worktrees at once
+          # (WorktreeError "already checked out" — connector#634's first live
+          # run). The runner fetches the PR head into a local branch itself, and
+          # review-prompt.md's {{TARGET_BRANCH}} resolves to this checkout
+          # (main), giving the right diff base.
+          ref: main
 
       - uses: actions/setup-node@v4
         with:
