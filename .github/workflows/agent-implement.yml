@@ -181,6 +181,11 @@ jobs:
           # SANDCASTLE_AUTO_MERGE: "true"
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The formal-verdict approver (toon-meta#282). HOST-ONLY: it is
+          # deliberately NOT forwarded into the sandbox (see
+          # .sandcastle/sandbox-secrets.ts) — the agent must never hold the
+          # credential that approves its own output.
+          FACTORY_OPS_TOKEN: ${{ secrets.FACTORY_OPS_TOKEN }}
         run: pnpm sandcastle:implement
 
       # REDACT BEFORE UPLOAD — this repository is PUBLIC.
@@ -218,6 +223,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          FACTORY_OPS_TOKEN: ${{ secrets.FACTORY_OPS_TOKEN }}
         run: |
           set -euo pipefail
           [ -d .sandcastle ] || { echo "No .sandcastle directory — nothing to redact."; exit 0; }
@@ -228,7 +234,8 @@ jobs:
           # secret that contains another is not partially replaced).
           exact = sorted(
               (v for v in (os.environ.get(k, "") for k in
-                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY"))
+                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY",
+                            "FACTORY_OPS_TOKEN"))
                if v and len(v.strip()) >= 8),
               key=len, reverse=True,
           )
