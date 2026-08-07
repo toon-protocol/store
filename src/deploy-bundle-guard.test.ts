@@ -3,8 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'smol-toml';
 
-// Everything this test reads lives under deploy/ or a workflow file, both
-// siblings of src/ at the repo root.
+// Everything this test reads lives under deploy/, a sibling of src/ at the
+// repo root.
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const readRepoFile = (relativePath: string): string =>
   readFileSync(`${repoRoot}${relativePath}`, 'utf8');
@@ -56,6 +56,19 @@ const EXPECTED_ROUTE_PRICE = 1000;
 // literal's twin in connector's own devnet_configs_load.rs.
 const EXPECTED_CONNECTOR_TAG = 'rust-sha-440eab7';
 
+// Every place in the repo that names the pin: the three that decide what a
+// build actually pulls, plus deploy/README.md, which quotes the Dockerfile's
+// default in prose and so goes stale the same way.
+const CONNECTOR_TAG_SITES: { source: string; pattern: RegExp }[] = [
+  { source: 'deploy/Dockerfile', pattern: /^ARG CONNECTOR_TAG=(\S+)$/m },
+  {
+    source: 'deploy/docker-compose.yml',
+    pattern: /CONNECTOR_TAG: \$\{CONNECTOR_TAG:-(\S+)\}/,
+  },
+  { source: 'deploy/.env.example', pattern: /^CONNECTOR_TAG=(\S+)$/m },
+  { source: 'deploy/README.md', pattern: /default `(rust-sha-\S+)`/ },
+];
+
 describe('deploy bundle matches the live fleet (issue#83)', () => {
   it('settlement.evm points at the live ERC-2771 registry, token and decimals', () => {
     const { contract_address, token_address, decimals } =
@@ -103,26 +116,12 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
   });
 
   it('CONNECTOR_TAG agrees across every copy of the pin', () => {
-    const dockerfileMatch = readRepoFile('deploy/Dockerfile').match(
-      /^ARG CONNECTOR_TAG=(\S+)$/m
-    );
-    const composeMatch = readRepoFile('deploy/docker-compose.yml').match(
-      /CONNECTOR_TAG: \$\{CONNECTOR_TAG:-(\S+)\}/
-    );
-    const envExampleMatch = readRepoFile('deploy/.env.example').match(
-      /^CONNECTOR_TAG=(\S+)$/m
-    );
+    for (const { source, pattern } of CONNECTOR_TAG_SITES) {
+      const found = readRepoFile(source).match(pattern)?.[1];
 
-    const copies: [string, string | undefined][] = [
-      ['deploy/Dockerfile ARG default', dockerfileMatch?.[1]],
-      ['deploy/docker-compose.yml build-arg default', composeMatch?.[1]],
-      ['deploy/.env.example', envExampleMatch?.[1]],
-    ];
-
-    for (const [source, found] of copies) {
       expect(
         found,
-        `${source}: expected to find a CONNECTOR_TAG pin, found none`
+        `${source}: expected to find a CONNECTOR_TAG pin matching ${pattern}, found none`
       ).toBeDefined();
       expect(
         found,

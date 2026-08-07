@@ -13,12 +13,14 @@ name: Publish store-connector image
 # to make it a fourth copy of the literal, when deploy/Dockerfile's own ARG
 # default already decides what an un-overridden build produces. Omitting it
 # here means this job always publishes whatever deploy/Dockerfile pins — one
-# fewer place to keep in lockstep, not one more. CONNECTOR_TAG has three
-# copies total: deploy/Dockerfile's ARG default (the source of truth, and
-# what this workflow publishes), deploy/docker-compose.yml's build-arg default
-# (local `docker compose up --build`), and deploy/.env.example (what an
-# operator copies into `.env` to override either build without editing
-# tracked files). Since connector#755 it names a Rust build
+# fewer place to keep in lockstep, not one more. Three copies now decide a
+# tag: deploy/Dockerfile's ARG default (the source of truth, and what this
+# workflow publishes), deploy/docker-compose.yml's build-arg default (local
+# `docker compose up --build`), and deploy/.env.example (what an operator
+# copies into `.env` to override either build without editing tracked files).
+# deploy/README.md quotes that default in prose as a fourth mention that sets
+# nothing; src/deploy-bundle-guard.test.ts holds all four in lockstep and
+# fails the gate on any that drifts. Since connector#755 it names a Rust build
 # (`rust-sha-<short>`); a plain semver tag is the retired TypeScript node,
 # which reads YAML and cannot start on deploy/connector.toml.
 #
