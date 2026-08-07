@@ -32,7 +32,9 @@ const connectorToml = parse(
 ) as unknown as ConnectorToml;
 
 interface ComposeService {
-  ports?: string[];
+  // Both hold YAML scalars, so an unquoted entry parses as a number — hence the
+  // String() coercions below.
+  ports?: (string | number)[];
   expose?: (string | number)[];
 }
 
@@ -66,22 +68,28 @@ interface PublishedPort {
   resolved: string;
 }
 
+const describePort = ({ serviceName, entry, resolved }: PublishedPort): string =>
+  `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}")`;
+
 // Every host-published port in the bundle, flattened across services: the two
 // assertions below both walk this list, one checking its host side and one its
 // container side.
 const publishedPorts: PublishedPort[] = Object.entries(
   composeFile.services
 ).flatMap(([serviceName, service]) =>
-  (service.ports ?? []).map((entry) => ({
-    serviceName,
-    entry: String(entry),
-    resolved: substituteComposeVars(String(entry)),
-  }))
+  (service.ports ?? []).map((rawEntry) => {
+    const entry = String(rawEntry);
+    return { serviceName, entry, resolved: substituteComposeVars(entry) };
+  })
 );
 
 // The store's job backend and health ports. Only the connector dials them, over
 // the compose network — they belong under `expose:` and never under `ports:`.
 const PRIVATE_STORE_PORTS = ['3300', '3400'];
+
+// Host-IP segments that publish on every interface: `0.0.0.0` spelled out, and
+// the empty string a default-less `${EDGE_BIND}` expands to.
+const ALL_INTERFACE_BINDS = ['', '0.0.0.0'];
 
 // issue#83 / connector#695 / connector#811: the ERC-2771 (meta-tx-aware)
 // TokenNetworkRegistry, live on Base Sepolia since the 2026-08-06 cutover —
@@ -169,19 +177,19 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
   });
 
   it('every published port is host-IP-prefixed, never a bare 0.0.0.0 (issue#84)', () => {
-    for (const { serviceName, entry, resolved } of publishedPorts) {
-      const parts = resolved.split(':');
+    for (const port of publishedPorts) {
+      const segments = port.resolved.split(':');
+      const hostIp = segments[0];
 
       expect(
-        parts.length,
-        `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}"): expected a host-IP-prefixed mapping (HOST_IP:HOST_PORT:CONTAINER_PORT) — a bare "HOST_PORT:CONTAINER_PORT" publishes on 0.0.0.0, which is internet-reachable regardless of ufw`
+        segments.length,
+        `${describePort(port)}: expected a host-IP-prefixed mapping (HOST_IP:HOST_PORT:CONTAINER_PORT) — a bare "HOST_PORT:CONTAINER_PORT" publishes on 0.0.0.0, which is internet-reachable regardless of ufw`
       ).toBe(3);
 
-      const hostIp = parts[0];
       expect(
-        hostIp === '' || hostIp === '0.0.0.0',
-        `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}"): host IP segment "${hostIp}" publishes on all interfaces — bind to a specific host interface (e.g. 127.0.0.1) instead`
-      ).toBe(false);
+        ALL_INTERFACE_BINDS,
+        `${describePort(port)}: host IP segment "${hostIp}" publishes on all interfaces — bind to a specific host interface (e.g. 127.0.0.1) instead`
+      ).not.toContain(hostIp);
     }
   });
 
@@ -200,14 +208,12 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
       ).toContain(privatePort);
     }
 
-    for (const { serviceName, entry, resolved } of publishedPorts) {
-      const containerPort = resolved.split(':').pop();
-      for (const privatePort of PRIVATE_STORE_PORTS) {
-        expect(
-          containerPort,
-          `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}": container port ${privatePort} (store's job/health port) must never be host-published`
-        ).not.toBe(privatePort);
-      }
+    for (const port of publishedPorts) {
+      const containerPort = port.resolved.split(':').pop();
+      expect(
+        PRIVATE_STORE_PORTS,
+        `${describePort(port)}: container port ${containerPort} is one of the store's private job/health ports (${PRIVATE_STORE_PORTS.join(', ')}) and must never be host-published`
+      ).not.toContain(containerPort);
     }
   });
 
