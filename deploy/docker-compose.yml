@@ -14,6 +14,15 @@
 #   to leak: since the move to the Rust connector its edge, operator surface and
 #   /metrics all share :3000, and the TypeScript node's :8080/:8081 are gone.
 #
+# ⚠ DOCKER'S `ports:` PUBLISH BYPASSES ufw. Docker inserts its own rules into
+#   the DOCKER-USER/FORWARD iptables chains ahead of ufw's, so a `ports:` entry
+#   is reachable from the internet no matter what `ufw status` reports — a
+#   host firewall rule does NOT make a published port private. That is why
+#   every `ports:` entry below is prefixed with a host interface (127.0.0.1)
+#   instead of a bare port, which binds it to loopback and makes it reachable
+#   ONLY through the box's own reverse proxy / TLS terminator, not the network.
+#   Never "fix" an exposure here by adding a ufw rule — change the bind.
+#
 # Dev:  docker compose up --build   (builds store-connector locally from ./Dockerfile)
 # Prod: docker compose up           (pulls the pinned STORE_CONNECTOR_IMAGE)
 # =============================================================================
@@ -55,7 +64,11 @@ services:
       # service again.
       - connector_state:/app/state
     ports:
-      - '${EDGE_PORT:-3000}:3000' # paid POST /ilp edge (the env's TLS terminator fronts this)
+      # Host-IP-bound, matching the live fleet (127.0.0.1 behind nginx) — a
+      # bare '3000:3000' publishes on 0.0.0.0 and is internet-reachable
+      # regardless of ufw (see the warning above). Override EDGE_BIND if this
+      # box's reverse proxy runs somewhere other than loopback.
+      - '${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000' # paid POST /ilp edge (the env's TLS terminator fronts this)
     # No `expose: 8080`. The client edge, the operator surface and /metrics all
     # share :3000 on the Rust connector; the TypeScript node's separate health
     # (:8080) and admin (:8081) ports do not exist.
@@ -78,6 +91,17 @@ services:
       FEE_PER_JOB: ${FEE_PER_JOB:-10} # informational (connector enforces the flat route price)
       # Arweave wallet: base64(JSON JWK). Empty → ephemeral free-tier (≤100KB).
       STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
+      # The optional kind:5095/5096/5098 jobs (see entrypoint-store.ts's env
+      # mapping). All pass through empty by default, which the store treats
+      # identically to unset (job disabled) — so enabling one is ONE edit,
+      # setting it in .env, not also uncommenting a line here.
+      ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY:-}
+      ARNS_NETWORK: ${ARNS_NETWORK:-devnet}
+      GAS_STATION_SOLANA_SECRET_KEY: ${GAS_STATION_SOLANA_SECRET_KEY:-}
+      GAS_STATION_CHANNEL_PROGRAM_ID: ${GAS_STATION_CHANNEL_PROGRAM_ID:-}
+      EVM_GAS_STATION_CONFIG_JSON: ${EVM_GAS_STATION_CONFIG_JSON:-}
+      EVM_GAS_STATION_QUOTE_TTL_MS: ${EVM_GAS_STATION_QUOTE_TTL_MS:-}
+      EVM_GAS_STATION_MAX_GAS: ${EVM_GAS_STATION_MAX_GAS:-}
     expose:
       - '3300' # store job backend — PRIVATE (only the connector dials store:3300)
       - '3400' # health — internal
