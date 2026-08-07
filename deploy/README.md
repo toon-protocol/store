@@ -31,7 +31,7 @@ reverse-proxies to (RouteTermination).
 | -------------------- | ---------------------------------------------------------------------------------------- |
 | `Dockerfile`         | `store-connector` image: pinned Rust connector + baked `connector.toml`                   |
 | `connector.toml`     | connector config (route `g.toon.ario` → `http://store:3300/store`), devnet RPC baked in   |
-| `docker-compose.yml` | connector (payment proxy) + store (`POST /store` backend); only the edge `:3000` public   |
+| `docker-compose.yml` | connector (payment proxy) + store (`POST /store` backend); only the edge `:3000` host-published, on `EDGE_BIND` |
 | `.env.example`       | copy to `.env`; `STORE_NOSTR_SECRET_KEY` (required) + Arweave wallet + image pins         |
 
 ## Images
@@ -93,13 +93,19 @@ fail-closed, so a schema drift under you is a refuse-to-start.
    # STORE_NOSTR_SECRET_KEY is REQUIRED (the store won't boot without it):
    #   openssl rand -hex 32   → paste into STORE_NOSTR_SECRET_KEY
    # STORE_ARWEAVE_JWK_B64 is optional (empty → ephemeral free-tier, ≤100KB uploads).
+   #
+   # The kind:5095/5096/5098 jobs (ArNS buy, Solana gas station, EVM gas
+   # station) are OPTIONAL and OFF by default. Setting their variables in
+   # this .env (see .env.example's "Optional jobs" section) is the ONLY edit
+   # needed to enable one — docker-compose.yml passes all of them through
+   # already, so there is no docker-compose.yml line to uncomment.
    ```
 
 3. **Bring it up.**
 
    ```bash
    docker compose up --build -d      # builds store-connector locally; pulls the store app image
-   docker compose ps                 # only :3000 (edge) is host-bound
+   docker compose ps                 # only :3000 (edge) is host-bound, on EDGE_BIND (default 127.0.0.1)
    docker compose logs -f connector  # watch it load the routes + connect to settlement
    ```
 
@@ -196,4 +202,16 @@ gap.
   authenticate against — read that file's `[operator]` comment before enabling it
   on a **baked** config.
 - The only host-bound port is the edge **`:3000`** — fronted by the
-  environment's TLS terminator.
+  environment's TLS terminator, and bound to a host interface (`EDGE_BIND`,
+  default `127.0.0.1`), never a bare `0.0.0.0`.
+
+### ⚠ `docker compose`'s `ports:` bypasses ufw
+
+Docker manages its own iptables/nftables rules ahead of ufw's, so a service
+published via `ports:` is reachable from the internet **regardless of what
+`ufw status` shows** — an `ufw` rule that only allows loopback traffic does
+**not** make a `ports:`-published container private. This bundle keeps every
+published port host-IP-prefixed (`${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000`)
+so the edge is reachable only through this box's own reverse proxy, not by
+relying on the firewall to hide a `0.0.0.0` bind. `src/deploy-bundle-guard.test.ts`
+fails CI if a `ports:` entry ever goes back to a bare port.

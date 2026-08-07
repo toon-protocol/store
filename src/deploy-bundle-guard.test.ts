@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'smol-toml';
+import { parse as parseYaml } from 'yaml';
 
 // Everything this test reads lives under deploy/, a sibling of src/ at the
 // repo root.
@@ -29,6 +30,66 @@ interface ConnectorToml {
 const connectorToml = parse(
   readRepoFile('deploy/connector.toml')
 ) as unknown as ConnectorToml;
+
+interface ComposeService {
+  // Both hold YAML scalars, so an unquoted entry parses as a number — hence the
+  // String() coercions below.
+  ports?: (string | number)[];
+  expose?: (string | number)[];
+}
+
+interface ComposeFile {
+  services: Record<string, ComposeService>;
+}
+
+const composeFile = parseYaml(
+  readRepoFile('deploy/docker-compose.yml')
+) as unknown as ComposeFile;
+
+// A compose `ports:` entry is a string like
+// '${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000' — substitute each `${VAR}`
+// / `${VAR:-default}` the way compose would with nothing set in the
+// environment, so the result reads like the mapping Docker actually applies
+// (`HOST_IP:HOST_PORT:CONTAINER_PORT`), rather than naively splitting on ':'
+// and tripping over the colon inside `${VAR:-...}`. A variable with no default
+// expands to the empty string, i.e. an all-interfaces bind — which is exactly
+// what the assertions below reject.
+function substituteComposeVars(value: string): string {
+  return value.replace(
+    /\$\{[^}:]+(?::-([^}]*))?\}/g,
+    (_match, def: string | undefined) => def ?? ''
+  );
+}
+
+interface PublishedPort {
+  serviceName: string;
+  entry: string;
+  /** `entry` with every `${VAR...}` substituted — see substituteComposeVars. */
+  resolved: string;
+}
+
+const describePort = ({ serviceName, entry, resolved }: PublishedPort): string =>
+  `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}")`;
+
+// Every host-published port in the bundle, flattened across services: the two
+// assertions below both walk this list, one checking its host side and one its
+// container side.
+const publishedPorts: PublishedPort[] = Object.entries(
+  composeFile.services
+).flatMap(([serviceName, service]) =>
+  (service.ports ?? []).map((rawEntry) => {
+    const entry = String(rawEntry);
+    return { serviceName, entry, resolved: substituteComposeVars(entry) };
+  })
+);
+
+// The store's job backend and health ports. Only the connector dials them, over
+// the compose network — they belong under `expose:` and never under `ports:`.
+const PRIVATE_STORE_PORTS = ['3300', '3400'];
+
+// Host-IP segments that publish on every interface: `0.0.0.0` spelled out, and
+// the empty string a default-less `${EDGE_BIND}` expands to.
+const ALL_INTERFACE_BINDS = ['', '0.0.0.0'];
 
 // issue#83 / connector#695 / connector#811: the ERC-2771 (meta-tx-aware)
 // TokenNetworkRegistry, live on Base Sepolia since the 2026-08-06 cutover —
@@ -112,6 +173,47 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
         prices.size,
         `deploy/connector.toml: handler_url "${handlerUrl}" is reachable at ${prices.size} different prices (${[...prices].join(', ')}) — connector's insert_consistent_handler_price refuses this at config load`
       ).toBe(1);
+    }
+  });
+
+  it('every published port is host-IP-prefixed, never a bare 0.0.0.0 (issue#84)', () => {
+    for (const port of publishedPorts) {
+      const segments = port.resolved.split(':');
+      const hostIp = segments[0];
+
+      expect(
+        segments.length,
+        `${describePort(port)}: expected a host-IP-prefixed mapping (HOST_IP:HOST_PORT:CONTAINER_PORT) — a bare "HOST_PORT:CONTAINER_PORT" publishes on 0.0.0.0, which is internet-reachable regardless of ufw`
+      ).toBe(3);
+
+      expect(
+        ALL_INTERFACE_BINDS,
+        `${describePort(port)}: host IP segment "${hostIp}" publishes on all interfaces — bind to a specific host interface (e.g. 127.0.0.1) instead`
+      ).not.toContain(hostIp);
+    }
+  });
+
+  it("the store's job port (3300) and health port (3400) are internal-only — expose:, never ports: (issue#84)", () => {
+    const storeService = composeFile.services['store'];
+    expect(
+      storeService,
+      'deploy/docker-compose.yml: expected a "store" service'
+    ).toBeDefined();
+
+    const exposedPorts = (storeService?.expose ?? []).map(String);
+    for (const privatePort of PRIVATE_STORE_PORTS) {
+      expect(
+        exposedPorts,
+        `deploy/docker-compose.yml service "store": expected port ${privatePort} under expose: (found ${JSON.stringify(exposedPorts)})`
+      ).toContain(privatePort);
+    }
+
+    for (const port of publishedPorts) {
+      const containerPort = port.resolved.split(':').pop();
+      expect(
+        PRIVATE_STORE_PORTS,
+        `${describePort(port)}: container port ${containerPort} is one of the store's private job/health ports (${PRIVATE_STORE_PORTS.join(', ')}) and must never be host-published`
+      ).not.toContain(containerPort);
     }
   });
 
