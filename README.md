@@ -174,12 +174,12 @@ handler already suffices:
 The store itself is payment-oblivious; the channel contracts belong to the
 **connector** deployment. Since the 2026-07-19 public-chain cutover the devnet
 settles on public networks, and since the 2026-08-06 ERC-2771 cutover
-(`connector#695`) EVM settlement runs through the meta-tx-aware `TokenNetwork`
-+ trusted forwarder, not the pre-ERC-2771 deployment. Canonical
+(`connector#695`) EVM settlement runs through the meta-tx-aware
+`TokenNetwork` + trusted forwarder, not the pre-ERC-2771 deployment. Canonical
 machine-readable source: the apex's **kind:10032 announce** on the relay;
 human-readable: toon-client
-[`packages/rig/README.md` § "Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains)
-+ toon-meta [`docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md).
+[`packages/rig/README.md` § "Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains) +
+toon-meta [`docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md).
 Snapshot (devnet/testnet only — **TOON has no mainnet deployments**):
 
 | Chain / network | What | Id |

@@ -148,7 +148,7 @@ error by name, because the TOML parser is `deny_unknown_fields`.
 | `NODE_TLS_REJECT_UNAUTHORIZED=0`                   | no equivalent; use an RPC with a real chain of trust              |
 | connector health `:8080`, admin `:8081`            | one port: `:3000` carries the edge, the operator surface, metrics |
 | route prefix `g.proxy.store`                       | `g.toon.ario` (+ `g.toon.relay.ario`, `g.toon.store` aliases)     |
-| `selfAnnounce` block (kind:10032)                  | **no always-on equivalent — see below**                            |
+| `selfAnnounce` block (kind:10032)                  | **no always-on equivalent — see below**                           |
 | an outbound `g.proxy.relay` forward route          | gone — it existed only to carry the announce                      |
 | replay watermarks lived in process memory          | `state_dir = "/app/state"`, on a named volume                     |
 
@@ -158,7 +158,7 @@ accepts any nonce, and every claim a payer already spent becomes free service
 again (connector#605). That is why `docker-compose.yml` gained a
 `connector_state` named volume.
 
-### The kind:10032 self-announce did not survive AS AN ALWAYS-ON TIMER
+### The kind:10032 self-announce did not survive as an always-on timer
 
 The old `connector.yaml` carried a `selfAnnounce` block, and on this box it was
 the interesting one: because the store box does not front a relay, its announce
