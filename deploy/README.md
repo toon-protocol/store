@@ -31,7 +31,7 @@ reverse-proxies to (RouteTermination).
 | -------------------- | ---------------------------------------------------------------------------------------- |
 | `Dockerfile`         | `store-connector` image: pinned Rust connector + baked `connector.toml`                   |
 | `connector.toml`     | connector config (route `g.toon.ario` → `http://store:3300/store`), devnet RPC baked in   |
-| `docker-compose.yml` | connector (payment proxy) + store (`POST /store` backend); only the edge `:3000` public   |
+| `docker-compose.yml` | connector (payment proxy) + store (`POST /store` backend); only the edge `:3000` host-published, on `EDGE_BIND` |
 | `.env.example`       | copy to `.env`; `STORE_NOSTR_SECRET_KEY` (required) + Arweave wallet + image pins         |
 
 ## Images
@@ -211,7 +211,7 @@ Docker manages its own iptables/nftables rules ahead of ufw's, so a service
 published via `ports:` is reachable from the internet **regardless of what
 `ufw status` shows** — an `ufw` rule that only allows loopback traffic does
 **not** make a `ports:`-published container private. This bundle keeps every
-published port host-IP-prefixed (`${EDGE_BIND:-127.0.0.1}:${EDGE_PORT}:3000`)
+published port host-IP-prefixed (`${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000`)
 so the edge is reachable only through this box's own reverse proxy, not by
 relying on the firewall to hide a `0.0.0.0` bind. `src/deploy-bundle-guard.test.ts`
 fails CI if a `ports:` entry ever goes back to a bare port.

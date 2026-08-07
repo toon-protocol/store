@@ -45,13 +45,43 @@ const composeFile = parseYaml(
 ) as unknown as ComposeFile;
 
 // A compose `ports:` entry is a string like
-// '${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000' — resolve each
-// `${VAR:-default}` to its default so the result reads like the mapping
-// Docker actually applies (`HOST_IP:HOST_PORT:CONTAINER_PORT`), rather than
-// naively splitting on ':' and tripping over the colon inside `${VAR:-...}`.
-function resolveComposeVarDefaults(value: string): string {
-  return value.replace(/\$\{[^:}]+:-([^}]*)\}/g, (_match, def: string) => def);
+// '${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000' — substitute each `${VAR}`
+// / `${VAR:-default}` the way compose would with nothing set in the
+// environment, so the result reads like the mapping Docker actually applies
+// (`HOST_IP:HOST_PORT:CONTAINER_PORT`), rather than naively splitting on ':'
+// and tripping over the colon inside `${VAR:-...}`. A variable with no default
+// expands to the empty string, i.e. an all-interfaces bind — which is exactly
+// what the assertions below reject.
+function substituteComposeVars(value: string): string {
+  return value.replace(
+    /\$\{[^}:]+(?::-([^}]*))?\}/g,
+    (_match, def: string | undefined) => def ?? ''
+  );
 }
+
+interface PublishedPort {
+  serviceName: string;
+  entry: string;
+  /** `entry` with every `${VAR...}` substituted — see substituteComposeVars. */
+  resolved: string;
+}
+
+// Every host-published port in the bundle, flattened across services: the two
+// assertions below both walk this list, one checking its host side and one its
+// container side.
+const publishedPorts: PublishedPort[] = Object.entries(
+  composeFile.services
+).flatMap(([serviceName, service]) =>
+  (service.ports ?? []).map((entry) => ({
+    serviceName,
+    entry: String(entry),
+    resolved: substituteComposeVars(String(entry)),
+  }))
+);
+
+// The store's job backend and health ports. Only the connector dials them, over
+// the compose network — they belong under `expose:` and never under `ports:`.
+const PRIVATE_STORE_PORTS = ['3300', '3400'];
 
 // issue#83 / connector#695 / connector#811: the ERC-2771 (meta-tx-aware)
 // TokenNetworkRegistry, live on Base Sepolia since the 2026-08-06 cutover —
@@ -139,47 +169,44 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
   });
 
   it('every published port is host-IP-prefixed, never a bare 0.0.0.0 (issue#84)', () => {
-    for (const [serviceName, service] of Object.entries(composeFile.services)) {
-      for (const portEntry of service.ports ?? []) {
-        const resolved = resolveComposeVarDefaults(String(portEntry));
-        const parts = resolved.split(':');
+    for (const { serviceName, entry, resolved } of publishedPorts) {
+      const parts = resolved.split(':');
 
-        expect(
-          parts.length,
-          `deploy/docker-compose.yml service "${serviceName}" ports entry "${portEntry}" (resolves to "${resolved}"): expected a host-IP-prefixed mapping (HOST_IP:HOST_PORT:CONTAINER_PORT) — a bare "HOST_PORT:CONTAINER_PORT" publishes on 0.0.0.0, which is internet-reachable regardless of ufw`
-        ).toBe(3);
+      expect(
+        parts.length,
+        `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}"): expected a host-IP-prefixed mapping (HOST_IP:HOST_PORT:CONTAINER_PORT) — a bare "HOST_PORT:CONTAINER_PORT" publishes on 0.0.0.0, which is internet-reachable regardless of ufw`
+      ).toBe(3);
 
-        const hostIp = parts[0];
-        expect(
-          hostIp === '' || hostIp === '0.0.0.0',
-          `deploy/docker-compose.yml service "${serviceName}" ports entry "${portEntry}" (resolves to "${resolved}"): host IP segment "${hostIp}" publishes on all interfaces — bind to a specific host interface (e.g. 127.0.0.1) instead`
-        ).toBe(false);
-      }
+      const hostIp = parts[0];
+      expect(
+        hostIp === '' || hostIp === '0.0.0.0',
+        `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}"): host IP segment "${hostIp}" publishes on all interfaces — bind to a specific host interface (e.g. 127.0.0.1) instead`
+      ).toBe(false);
     }
   });
 
   it("the store's job port (3300) and health port (3400) are internal-only — expose:, never ports: (issue#84)", () => {
     const storeService = composeFile.services['store'];
-    expect(storeService, 'deploy/docker-compose.yml: expected a "store" service').toBeDefined();
+    expect(
+      storeService,
+      'deploy/docker-compose.yml: expected a "store" service'
+    ).toBeDefined();
 
     const exposedPorts = (storeService?.expose ?? []).map(String);
-    for (const privatePort of ['3300', '3400']) {
+    for (const privatePort of PRIVATE_STORE_PORTS) {
       expect(
         exposedPorts,
         `deploy/docker-compose.yml service "store": expected port ${privatePort} under expose: (found ${JSON.stringify(exposedPorts)})`
       ).toContain(privatePort);
     }
 
-    for (const [serviceName, service] of Object.entries(composeFile.services)) {
-      for (const portEntry of service.ports ?? []) {
-        const resolved = resolveComposeVarDefaults(String(portEntry));
-        const containerPort = resolved.split(':').pop();
-        for (const privatePort of ['3300', '3400']) {
-          expect(
-            containerPort,
-            `deploy/docker-compose.yml service "${serviceName}" ports entry "${portEntry}": container port ${privatePort} (store's job/health port) must never be host-published`
-          ).not.toBe(privatePort);
-        }
+    for (const { serviceName, entry, resolved } of publishedPorts) {
+      const containerPort = resolved.split(':').pop();
+      for (const privatePort of PRIVATE_STORE_PORTS) {
+        expect(
+          containerPort,
+          `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}": container port ${privatePort} (store's job/health port) must never be host-published`
+        ).not.toBe(privatePort);
       }
     }
   });
