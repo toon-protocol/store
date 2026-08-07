@@ -113,10 +113,10 @@ relayer private keys) — never logged, deleted from `process.env` after boot.
 
 Proven against a local chain (`src/evm-gas-station-handler.test.ts`) — no
 live-chain calls in tests, ever, same hard-safety rule as the Solana suite.
-Live devnet verification additionally needs `connector#695` (deploy the
-ERC-2771 `TokenNetwork` to devnet and repoint the advertised addresses),
-which has not landed yet; the "TOON payment-channel contracts" table below
-still lists the pre-ERC-2771 `TokenNetwork` address for that reason.
+`connector#695` (deploy the ERC-2771 `TokenNetwork` to devnet and repoint the
+advertised addresses) landed and broadcast 2026-08-06; the "TOON
+payment-channel contracts" table below carries the resulting `TokenNetwork`
+and forwarder addresses, not the pre-ERC-2771 deployment.
 
 ## kind:5094 confirmed for encrypted increment artifacts (issue #70, toon-meta#262 decision 13)
 
@@ -173,8 +173,11 @@ handler already suffices:
 
 The store itself is payment-oblivious; the channel contracts belong to the
 **connector** deployment. Since the 2026-07-19 public-chain cutover the devnet
-settles on public networks. Canonical machine-readable source: the apex's
-**kind:10032 announce** on the relay; human-readable: toon-client
+settles on public networks, and since the 2026-08-06 ERC-2771 cutover
+(`connector#695`) EVM settlement runs through the meta-tx-aware `TokenNetwork`
++ trusted forwarder, not the pre-ERC-2771 deployment. Canonical
+machine-readable source: the apex's **kind:10032 announce** on the relay;
+human-readable: toon-client
 [`packages/rig/README.md` § "Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains)
 + toon-meta [`docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md).
 Snapshot (devnet/testnet only — **TOON has no mainnet deployments**):
@@ -185,7 +188,7 @@ Snapshot (devnet/testnet only — **TOON has no mainnet deployments**):
 | Solana devnet | mock USDC SPL mint (6dp) | `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` |
 | Mina public devnet | canonical USDC token (6dp) | token `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d` · tokenId `9497120696276615621907376728658022802954262638363646162765282600447713419198` |
 | Mina public devnet | `PaymentChannel` zkApp | `B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf` |
-| Base Sepolia (`evm:84532`) | TokenNetworkRegistry / TokenNetwork / USDC | registry `0xcC9079adE929b168B54145f6d25262b64FAB9D5b` · TokenNetwork `0x1E95493fEF46707E034b4a1945f25a8C76A1823D` · USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` |
+| Base Sepolia (`evm:84532`) | TokenNetworkRegistry / TokenNetwork / ERC2771Forwarder / USDC | registry `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` · TokenNetwork `0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478` · forwarder `0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9` · USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` |
 
 To let the kind:5096 gas station co-sign a channel deposit/close/settle for
 that Solana program, set `GAS_STATION_CHANNEL_PROGRAM_ID` to the current row

@@ -42,10 +42,13 @@
 #     actually dial. `g.toon.store` is kept as an alias at the same price.
 #   * The old file described a `relay-connector` peer that "ABSORBS the g.proxy
 #     apex role" and an OUTBOUND-ONLY forward route existing solely so this box
-#     could pay the apex to publish its own kind:10032 announcement. All of that
-#     is gone: the Rust connector has NO self-announce feature (no such field
-#     exists in `crates/connector-config`; writing one fails config load), so
-#     the route that existed to carry it has nothing left to carry.
+#     could pay the apex to publish its own kind:10032 announcement. That route
+#     is gone: the Rust connector has no equivalent of the old always-on
+#     self-announce timer. It DOES have an `[announce]` section and a one-shot
+#     `connector announce` operator verb (added after this bundle's original
+#     Rust migration; see the pinned tag's docs/operators/announcing-a-node.md)
+#     — this file omits it deliberately, not because it is unsupported. See
+#     deploy/README.md's "kind:10032 self-announce" section before enabling it.
 #   * No `[[peers]]`, deliberately. The live fleet's node↔node links are PUBLIC
 #     and TLS-terminated by each box's own nginx — the apex reaches this store
 #     app the way any client on the open internet does, by terminating a route
@@ -166,10 +169,17 @@ price = 1000
 # is written against the channel the buyer opened on those contracts, so a node
 # pointed at a different registry cannot resolve it. Point them elsewhere only
 # if you are running your own fleet end to end.
+#
+# `0x8263BdD4…` is the ERC-2771 (meta-tx-aware) TokenNetworkRegistry, live
+# since the 2026-08-06 cutover (connector#695/#811). The pre-cutover registry
+# `0xcC9079ad…` still resolves on chain — it is not retired, since the one
+# peer channel opened before the cutover keeps settling there — but a new
+# channel resolves against THIS registry, so this is the one a client-edge-only
+# node like this bundle (no `[[peer_channels]]`) must point at.
 [settlement.evm]
 rpc_url = "https://base-sepolia-rpc.publicnode.com"
 # The deployed TokenNetworkRegistry (a factory, not a channel contract).
-contract_address = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
 # 6-decimal devnet USDC — the fleet-wide settlement asset (ADR 0010).
 token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 decimals = 6

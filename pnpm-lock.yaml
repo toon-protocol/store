@@ -64,6 +64,9 @@ devDependencies:
   eslint-config-prettier:
     specifier: ^9.0.0
     version: 9.1.2(eslint@9.39.5)
+  smol-toml:
+    specifier: ^1.7.1
+    version: 1.7.1
   tsx:
     specifier: ^4.19.2
     version: 4.23.1
@@ -11248,8 +11251,8 @@ packages:
       '@adraffy/ens-normalize': 1.11.1
       '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
-      '@scure/bip32': 1.6.2
-      '@scure/bip39': 1.5.4
+      '@scure/bip32': 1.7.0
+      '@scure/bip39': 1.6.0
       abitype: 1.0.8(typescript@5.9.3)(zod@3.25.76)
       eventemitter3: 5.0.1
       typescript: 5.9.3
@@ -12342,6 +12345,11 @@ packages:
     engines: {node: '>= 6.0.0', npm: '>= 3.0.0'}
     requiresBuild: true
     dev: false
+
+  /smol-toml@1.7.1:
+    resolution: {integrity: sha512-PPlsspAZ4jbMBu5DMFhfUGDQLu/vrL4SyBROVS37x8ynnVmFIs1VPBz1Co8Xks3TvpIaZXmU85y4DrQ+UyVFoQ==}
+    engines: {node: '>= 18'}
+    dev: true
 
   /socket.io-client@4.8.3:
     resolution: {integrity: sha512-uP0bpjWrjQmUt5DTHq9RuoCBdFJF10cdX9X+a368j/Ft0wmaVgxlrjvK3kjvgCODOMMOz9lcaRzxmso0bTWZ/g==}

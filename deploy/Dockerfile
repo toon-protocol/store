@@ -29,7 +29,7 @@
 #     refuse-to-start rather than a degraded run — which is the behaviour you
 #     want, but it means an undeliberate bump is an outage.
 # =============================================================================
-ARG CONNECTOR_TAG=rust-sha-bc9749b
+ARG CONNECTOR_TAG=rust-sha-440eab7
 FROM ghcr.io/toon-protocol/connector:${CONNECTOR_TAG}
 
 # Bake the store route config at the path the image's own CMD already names

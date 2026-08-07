@@ -26,7 +26,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CONNECTOR_TAG: ${CONNECTOR_TAG:-rust-sha-bc9749b}
+        CONNECTOR_TAG: ${CONNECTOR_TAG:-rust-sha-440eab7}
     # NO `environment:` block, deliberately. The Rust connector has no
     # environment-variable layer at all (connector#755): every value comes from
     # the baked ./connector.toml, so there is exactly one place any value comes

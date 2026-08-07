@@ -42,7 +42,7 @@ reverse-proxies to (RouteTermination).
 | `ghcr.io/toon-protocol/store-connector` | connector + this repo's `connector.toml` baked in         |
 
 The `store-connector` image bakes a **pinned** connector (`CONNECTOR_TAG`,
-default `rust-sha-bc9749b`) so the config schema is frozen against a known
+default `rust-sha-440eab7`) so the config schema is frozen against a known
 connector. The image's own version tracks this repo's release; bump
 `CONNECTOR_TAG` deliberately to adopt a newer connector.
 
@@ -148,7 +148,7 @@ error by name, because the TOML parser is `deny_unknown_fields`.
 | `NODE_TLS_REJECT_UNAUTHORIZED=0`                   | no equivalent; use an RPC with a real chain of trust              |
 | connector health `:8080`, admin `:8081`            | one port: `:3000` carries the edge, the operator surface, metrics |
 | route prefix `g.proxy.store`                       | `g.toon.ario` (+ `g.toon.relay.ario`, `g.toon.store` aliases)     |
-| `selfAnnounce` block (kind:10032)                  | **no equivalent — see below**                                     |
+| `selfAnnounce` block (kind:10032)                  | **no always-on equivalent — see below**                            |
 | an outbound `g.proxy.relay` forward route          | gone — it existed only to carry the announce                      |
 | replay watermarks lived in process memory          | `state_dir = "/app/state"`, on a named volume                     |
 
@@ -158,7 +158,7 @@ accepts any nonce, and every claim a payer already spent becomes free service
 again (connector#605). That is why `docker-compose.yml` gained a
 `connector_state` named volume.
 
-### The kind:10032 self-announce did not survive
+### The kind:10032 self-announce did not survive AS AN ALWAYS-ON TIMER
 
 The old `connector.yaml` carried a `selfAnnounce` block, and on this box it was
 the interesting one: because the store box does not front a relay, its announce
@@ -169,12 +169,20 @@ channel, on every refresh, to publish its own `kind:10032` peer info
 `announcePrice = 2000` figure came from, and why an outbound forward route to
 the apex existed at all.
 
-All of it is gone. The Rust connector has **no self-announce feature** — there is
-no such field in its config crate, and writing one fails config load rather than
-being ignored. So this bundle no longer pays anyone on a timer, and the forward
-route that existed solely to carry the announce is deleted. A deployment that
-wants to be discoverable publishes the event itself as an ordinary paid write. On
-the TOON devnet that job moved to a separate announcer sidecar.
+That specific shape is gone for good: there is no config field that makes the
+Rust connector pay a refresh on a timer, so this bundle's `connector.toml`
+carries no forward route and no `announcePrice` to carry it. What replaced it
+is not "nothing" but a different verb: the Rust connector has an `[announce]`
+config section and a one-shot `connector announce` operator command (see the
+pinned tag's `docs/operators/announcing-a-node.md` in the connector repo) that
+publishes a single `kind:10032` event, paid for out of this node's own
+`[settlement.evm]` identity like any other client write. This bundle's
+`connector.toml` doesn't configure `[announce]`, so out of the box this store
+still publishes nothing — but the reason is "not wired up here," not "the
+connector cannot do it." On the TOON devnet, self-announce for this box's own
+route currently runs through a separate announcer sidecar instead of
+`connector announce`; either is a config/operator choice now, not a capability
+gap.
 
 ## Privacy invariant
 
