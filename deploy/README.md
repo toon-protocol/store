@@ -46,6 +46,14 @@ default `rust-sha-440eab7`) so the config schema is frozen against a known
 connector. The image's own version tracks this repo's release; bump
 `CONNECTOR_TAG` deliberately to adopt a newer connector.
 
+**The `.env` variable of the same name is not a production control.** It only
+feeds `docker compose up --build` (a local build). The published image on GHCR
+is built by CI from `deploy/Dockerfile`'s own ARG default, with no build-arg
+override — see the workflow's header — so pulling `STORE_CONNECTOR_IMAGE` and
+running `up` without `--build` (the documented production path below) ignores
+`.env`'s `CONNECTOR_TAG` entirely. To adopt a newer connector in production,
+bump the ARG default in `deploy/Dockerfile` and cut a new release.
+
 **Read the tag carefully.** The `connector` package carries two different
 programs under one name. `rust-sha-<short>` and `rust-main` are the Rust
 connector, which reads `connector.toml`. Plain semver tags (`3.28.0`) and
