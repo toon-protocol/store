@@ -126,15 +126,16 @@ export async function mintAppToken(): Promise<MintedToken> {
   }
 
   const jwt = appJwt(appId, privateKey);
+  const repo = nameWithOwner();
 
   // The App is installed org-wide; ask GitHub which installation covers this
   // repo rather than hard-coding an installation id.
-  const installation = (await githubJson(`/repos/${nameWithOwner()}/installation`, jwt, "GET")) as {
+  const installation = (await githubJson(`/repos/${repo}/installation`, jwt, "GET")) as {
     id?: number;
   };
   if (typeof installation.id !== "number") {
     throw new Error(
-      `GitHub returned no installation id for ${nameWithOwner()} — is the App installed on this repo?`,
+      `GitHub returned no installation id for ${repo} — is the App installed on this repo?`,
     );
   }
 
