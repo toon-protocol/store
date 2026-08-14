@@ -162,7 +162,7 @@ error by name, because the TOML parser is `deny_unknown_fields`.
 | `CONFIG_FILE=/app/config/connector.yaml`           | nothing — the image's `CMD` already names the path                |
 | `NODE_TLS_REJECT_UNAUTHORIZED=0`                   | no equivalent; use an RPC with a real chain of trust              |
 | connector health `:8080`, admin `:8081`            | one port: `:3000` carries the edge, the operator surface, metrics |
-| route prefix `g.proxy.store`                       | `g.toon.ario` (+ `g.toon.store` alias)                            |
+| route prefix `g.proxy.store`                       | `g.toon.ario`, the one route the live box terminates              |
 | `selfAnnounce` block (kind:10032)                  | **no always-on equivalent — see below**                           |
 | an outbound `g.proxy.relay` forward route          | gone — it existed only to carry the announce                      |
 | replay watermarks lived in process memory          | `state_dir = "/app/state"`, on a named volume                     |

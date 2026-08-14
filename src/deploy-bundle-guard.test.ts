@@ -109,16 +109,20 @@ const EXPECTED_DECIMALS = 6;
 
 // deploy/connector.toml's own comment: 0.001 USDC in the smallest unit of a
 // 6-decimal asset, the flat per-object figure the fleet quotes for a store
-// upload — the same price on both route aliases, by design (see below).
+// upload.
 const EXPECTED_ROUTE_PRICE = 1000;
 
 // issue#88: the two-node fleet (docs/two-node-architecture.md, toon-meta repo)
-// retired the devnet apex, so the bundle no longer carries a relay-hop alias
-// (`g.toon.relay.ario`) that only ever described a path through it. Exactly
-// these two prefixes should remain — named as literals so losing one, or
-// silently regaining the relay-hop form, fails by name instead of passing
-// unnoticed. Sorted once here, so the assertion and its message agree.
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.store'].sort();
+// retired the devnet apex, and with it BOTH aliases that used to sit beside
+// this box's own prefix: `g.toon.relay.ario` (the relay-hop spelling — a path
+// through the apex that can no longer occur) and `g.toon.store` (owner
+// decision 2026-08-05, recorded in the live box's config — connector repo,
+// infra/linode-store/connector-rust.toml: it only mirrored the apex's own
+// `g.toon.store` forward; one name for one app). The live box terminates
+// exactly this one prefix — named as a literal so losing it, or silently
+// regaining a retired alias, fails by name instead of passing unnoticed.
+// Sorted once here, so the assertion and its message agree.
+const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario'].sort();
 
 // issue#83 (connector#848): the fleet's pin of record. Must be the earliest
 // tag carrying the announce-identity fix (issue #833/#839) — see this
@@ -168,7 +172,7 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
     }
   });
 
-  it("mounts exactly the two-node fleet's route prefixes — no relay-hop alias (issue#88)", () => {
+  it("mounts exactly the two-node fleet's route prefixes — no retired alias (issue#88)", () => {
     const foundPrefixes = connectorToml.routes
       .map((route) => route.prefix)
       .sort();

@@ -39,8 +39,12 @@
 #   * `g.proxy` was RENAMED to `g.toon`. Every prefix below moved.
 #   * The store app's own advertised prefix is `g.toon.ario` (Arweave), which is
 #     what the fleet's announcements point clients at and what published clients
-#     actually dial. `g.toon.store` is kept as an alias at the same price, for a
-#     client that addresses this box by its generic name.
+#     actually dial. The old `g.toon.store` alias is RETIRED (owner decision,
+#     2026-08-05, recorded in the live box's config — connector repo,
+#     infra/linode-store/connector-rust.toml): it only ever mirrored the
+#     apex's own `g.toon.store` forward, and with that forward gone the alias
+#     had nothing left to mirror. One name for one app; `g.toon.ario` is the
+#     survivor because it is the one compiled into shipped clients.
 #   * The old file described a `relay-connector` peer that forwarded an
 #     OUTBOUND-ONLY route so this box could pay to publish its own kind:10032
 #     announcement. That route is gone: the Rust connector has no equivalent of
@@ -100,16 +104,20 @@ state_dir = "/app/state"
 key_file = "/app/data/signer.key"
 
 # ── Routes ───────────────────────────────────────────────────────────────────
-# Static, explicit, durable (ADR 0006). Both prefixes terminate at the SAME
-# payment-oblivious store app, at the SAME price — the live store box in the
+# Static, explicit, durable (ADR 0006). ONE route — the live store box in the
 # two-node fleet (docs/two-node-architecture.md, toon-meta repo) terminates
-# exactly these two, for exactly these reasons:
+# exactly this one:
 #
 #   g.toon.ario    this box's own advertised prefix (Arweave); what the
-#                  fleet's kind:10032 announcements point clients at.
-#   g.toon.store   a plain alias for a client that addresses this box by its
-#                  generic name rather than the Arweave-specific one, priced
-#                  identically so neither name is a discount.
+#                  fleet's kind:10032 announcements point clients at and
+#                  what shipped clients compile in.
+#
+# Two aliases used to sit beside it and both are retired: `g.toon.relay.ario`
+# (the relay-hop spelling — described a path through the retired apex that can
+# no longer occur) and `g.toon.store` (owner decision 2026-08-05, recorded in
+# the live box's config: it only mirrored the apex's own `g.toon.store`
+# forward, and with that forward gone there was nothing left to mirror — one
+# name for one app). src/deploy-bundle-guard.test.ts pins the route set.
 #
 # `/store`, NOT the bare origin: `HttpAppClient::deliver` POSTs to exactly this
 # URL and the store app serves only `POST /store` (its HTTP backend endpoint,
@@ -118,10 +126,10 @@ key_file = "/app/data/signer.key"
 # A sender's own envelope `target` is resolved strictly BENEATH this path, never
 # in place of it (connector#596, ADR 0025).
 #
-# The prices MUST stay equal to each other. `insert_consistent_handler_price`
-# refuses a config where one handler_url is reachable at two prices — the
-# cheaper door would take every packet, which is an arbitrage between two doors
-# into one handler, not a discount.
+# If you add a second name for this same app, its price MUST equal this one's.
+# `insert_consistent_handler_price` refuses a config where one handler_url is
+# reachable at two prices — the cheaper door would take every packet, which is
+# an arbitrage between two doors into one handler, not a discount.
 #
 # `1000` is 0.001 USDC in the smallest unit of the settlement asset (6-decimal
 # USDC everywhere — ADR 0010), the flat per-object figure the fleet quotes for a
@@ -139,11 +147,6 @@ key_file = "/app/data/signer.key"
 
 [[routes]]
 prefix = "g.toon.ario"
-handler_url = "http://store:3300/store"
-price = 1000
-
-[[routes]]
-prefix = "g.toon.store"
 handler_url = "http://store:3300/store"
 price = 1000
 
