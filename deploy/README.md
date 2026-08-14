@@ -162,7 +162,7 @@ error by name, because the TOML parser is `deny_unknown_fields`.
 | `CONFIG_FILE=/app/config/connector.yaml`           | nothing — the image's `CMD` already names the path                |
 | `NODE_TLS_REJECT_UNAUTHORIZED=0`                   | no equivalent; use an RPC with a real chain of trust              |
 | connector health `:8080`, admin `:8081`            | one port: `:3000` carries the edge, the operator surface, metrics |
-| route prefix `g.proxy.store`                       | `g.toon.ario` (+ `g.toon.relay.ario`, `g.toon.store` aliases)     |
+| route prefix `g.proxy.store`                       | `g.toon.ario`, the one route the live box terminates              |
 | `selfAnnounce` block (kind:10032)                  | **no always-on equivalent — see below**                           |
 | an outbound `g.proxy.relay` forward route          | gone — it existed only to carry the announce                      |
 | replay watermarks lived in process memory          | `state_dir = "/app/state"`, on a named volume                     |
@@ -177,12 +177,13 @@ again (connector#605). That is why `docker-compose.yml` gained a
 
 The old `connector.yaml` carried a `selfAnnounce` block, and on this box it was
 the interesting one: because the store box does not front a relay, its announce
-took the **remote/paid** branch — it paid the apex over its own settlement
-channel, on every refresh, to publish its own `kind:10032` peer info
+took the **remote/paid** branch — it paid the node behind the `g.proxy.relay`
+route in the table above over its own settlement channel, on every refresh, to
+publish its own `kind:10032` peer info
 ([store#22](https://github.com/toon-protocol/store/issues/22),
 [relay#37](https://github.com/toon-protocol/relay/issues/37)). That is where the
-`announcePrice = 2000` figure came from, and why an outbound forward route to
-the apex existed at all.
+`announcePrice = 2000` figure came from, and why that outbound forward route
+existed at all.
 
 That specific shape is gone for good: there is no config field that makes the
 Rust connector pay a refresh on a timer, so this bundle's `connector.toml`
@@ -194,10 +195,13 @@ publishes a single `kind:10032` event, paid for out of this node's own
 `[settlement.evm]` identity like any other client write. This bundle's
 `connector.toml` doesn't configure `[announce]`, so out of the box this store
 still publishes nothing — but the reason is "not wired up here," not "the
-connector cannot do it." On the TOON devnet, self-announce for this box's own
-route currently runs through a separate announcer sidecar instead of
-`connector announce`; either is a config/operator choice now, not a capability
-gap.
+connector cannot do it." On the TOON devnet's two-node fleet
+(`docs/two-node-architecture.md` §2b.4, toon-meta repo), this box buys its
+`kind:10032` publish from the relay box's client edge like any other client —
+no shared credential, no peering, no inter-node fee (connector#871) — rather
+than paying the node that forward route once pointed at, which is retired;
+either the sidecar or `connector announce` is a config/operator choice now, not
+a capability gap.
 
 ## Privacy invariant
 
