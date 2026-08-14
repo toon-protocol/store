@@ -51,7 +51,7 @@
 #     not because it is unsupported. See deploy/README.md's "kind:10032
 #     self-announce" section before enabling it.
 #   * No `[[peers]]`, deliberately. In the two-node fleet
-#     (docs/two-node-architecture.md, connector repo) every node↔node link is
+#     (docs/two-node-architecture.md, toon-meta repo) every node↔node link is
 #     PUBLIC and TLS-terminated by each box's own nginx — another node reaches
 #     this store app the way any client on the open internet does, by paying
 #     its client edge and terminating a route at this box's public `/store`
@@ -102,7 +102,7 @@ key_file = "/app/data/signer.key"
 # ── Routes ───────────────────────────────────────────────────────────────────
 # Static, explicit, durable (ADR 0006). Both prefixes terminate at the SAME
 # payment-oblivious store app, at the SAME price — the live store box in the
-# two-node fleet (docs/two-node-architecture.md, connector repo) terminates
+# two-node fleet (docs/two-node-architecture.md, toon-meta repo) terminates
 # exactly these two, for exactly these reasons:
 #
 #   g.toon.ario    this box's own advertised prefix (Arweave); what the
@@ -132,10 +132,10 @@ key_file = "/app/data/signer.key"
 # `transport` is left at its default (`both`: HTTP one-shot AND BTP session), on
 # purpose. A store write is a one-shot request from an arbitrary buyer, so
 # unlike the relay box's own terminating `g.toon.relay` route — pinned
-# `transport = "btp"` for huddles' persistent 49 fps sessions
-# (docs/two-node-architecture.md §1.3 note 4, connector repo) — there is
-# nothing here to amortize a handshake against, and a stranger doing one
-# upload should not need a session.
+# `transport = "btp"` for huddles' persistent 49 fps sessions (connector#701;
+# the pin stays on that terminating route, docs/two-node-architecture.md §1.3
+# note 4, toon-meta repo) — there is nothing here to amortize a handshake
+# against, and a stranger doing one upload should not need a session.
 
 [[routes]]
 prefix = "g.toon.ario"

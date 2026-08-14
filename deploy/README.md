@@ -195,7 +195,7 @@ publishes a single `kind:10032` event, paid for out of this node's own
 `connector.toml` doesn't configure `[announce]`, so out of the box this store
 still publishes nothing — but the reason is "not wired up here," not "the
 connector cannot do it." On the TOON devnet's two-node fleet
-(`docs/two-node-architecture.md` §2b.4, connector repo), this box buys its
+(`docs/two-node-architecture.md` §2b.4, toon-meta repo), this box buys its
 `kind:10032` publish from the relay box's client edge like any other client —
 no shared credential, no peering, no inter-node fee (connector#871) — rather
 than paying a hub; either the sidecar or `connector announce` is a

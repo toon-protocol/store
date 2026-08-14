@@ -112,13 +112,13 @@ const EXPECTED_DECIMALS = 6;
 // upload — the same price on both route aliases, by design (see below).
 const EXPECTED_ROUTE_PRICE = 1000;
 
-// issue#88: the two-node fleet (docs/two-node-architecture.md, connector repo)
+// issue#88: the two-node fleet (docs/two-node-architecture.md, toon-meta repo)
 // retired the devnet apex, so the bundle no longer carries a relay-hop alias
 // (`g.toon.relay.ario`) that only ever described a path through it. Exactly
 // these two prefixes should remain — named as literals so losing one, or
 // silently regaining the relay-hop form, fails by name instead of passing
-// unnoticed.
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.store'];
+// unnoticed. Sorted once here, so the assertion and its message agree.
+const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.store'].sort();
 
 // issue#83 (connector#848): the fleet's pin of record. Must be the earliest
 // tag carrying the announce-identity fix (issue #833/#839) — see this
@@ -168,15 +168,17 @@ describe('deploy bundle matches the live fleet (issue#83)', () => {
     }
   });
 
-  it('mounts exactly the two-node fleet\'s route prefixes — no relay-hop alias (issue#88)', () => {
-    const foundPrefixes = connectorToml.routes.map((route) => route.prefix).sort();
+  it("mounts exactly the two-node fleet's route prefixes — no relay-hop alias (issue#88)", () => {
+    const foundPrefixes = connectorToml.routes
+      .map((route) => route.prefix)
+      .sort();
 
     expect(
       foundPrefixes,
       `deploy/connector.toml [[routes]]: expected exactly ${JSON.stringify(
-        [...EXPECTED_ROUTE_PREFIXES].sort()
+        EXPECTED_ROUTE_PREFIXES
       )}, found ${JSON.stringify(foundPrefixes)}`
-    ).toEqual([...EXPECTED_ROUTE_PREFIXES].sort());
+    ).toEqual(EXPECTED_ROUTE_PREFIXES);
   });
 
   it('routes sharing a handler_url share one price (a cheaper door is a free door)', () => {
