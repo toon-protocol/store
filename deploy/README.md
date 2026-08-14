@@ -177,12 +177,13 @@ again (connector#605). That is why `docker-compose.yml` gained a
 
 The old `connector.yaml` carried a `selfAnnounce` block, and on this box it was
 the interesting one: because the store box does not front a relay, its announce
-took the **remote/paid** branch — it paid a hub node over its own settlement
-channel, on every refresh, to publish its own `kind:10032` peer info
+took the **remote/paid** branch — it paid the node behind the `g.proxy.relay`
+route in the table above over its own settlement channel, on every refresh, to
+publish its own `kind:10032` peer info
 ([store#22](https://github.com/toon-protocol/store/issues/22),
 [relay#37](https://github.com/toon-protocol/relay/issues/37)). That is where the
-`announcePrice = 2000` figure came from, and why an outbound forward route to
-that hub existed at all.
+`announcePrice = 2000` figure came from, and why that outbound forward route
+existed at all.
 
 That specific shape is gone for good: there is no config field that makes the
 Rust connector pay a refresh on a timer, so this bundle's `connector.toml`
@@ -198,8 +199,9 @@ connector cannot do it." On the TOON devnet's two-node fleet
 (`docs/two-node-architecture.md` §2b.4, toon-meta repo), this box buys its
 `kind:10032` publish from the relay box's client edge like any other client —
 no shared credential, no peering, no inter-node fee (connector#871) — rather
-than paying a hub; either the sidecar or `connector announce` is a
-config/operator choice now, not a capability gap.
+than paying the node that forward route once pointed at, which is retired;
+either the sidecar or `connector announce` is a config/operator choice now, not
+a capability gap.
 
 ## Privacy invariant
 
