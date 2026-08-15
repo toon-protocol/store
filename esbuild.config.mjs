@@ -35,7 +35,10 @@ const result = await esbuild.build({
   // - @ar.io/sdk: OPTIONAL kind:5095 ArNS-buy dependency, loaded lazily via a
   //   variable import specifier (see src/arns-buy-handler.ts); kept external
   //   alongside its @solana/kit companion
-  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'arweave', 'o1js', '@ar.io/sdk', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'mina-fungible-token', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves'],
+  // - @dha-team/arbundles + x402-fetch: OPTIONAL x402 pay-per-upload deps,
+  //   loaded lazily via a variable import specifier (see
+  //   src/x402-upload-adapter.ts), same treatment as @ar.io/sdk
+  external: ['better-sqlite3', 'ethers', 'express', '@ardrive/turbo-sdk', 'arweave', 'o1js', '@ar.io/sdk', '@solana/kit', '@solana-program/token', '@toon-protocol/mina-zkapp', 'mina-signer', 'mina-fungible-token', 'socks-proxy-agent', 'fastify', '@fastify/cors', '@noble/curves', '@dha-team/arbundles', 'x402-fetch'],
 
   // The connector (@crosstown/connector) is CJS and its requireOptional() uses
   // require(packageName). When esbuild bundles CJS into ESM output, these

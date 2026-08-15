@@ -22,6 +22,22 @@
  *   STORE_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of an RSA JWK Arweave wallet.
  *                            Treated as secret — never logged.
  *   TURBO_TOKEN           -> Legacy fallback: raw JSON JWK for Arweave uploads.
+ *   STORE_X402_EVM_KEY_FILE -> OPTIONAL: path to a file holding a 0x-prefixed
+ *                            32-byte EVM private key that PAYS for uploads in
+ *                            USDC over x402 (see ./x402-upload-adapter). When
+ *                            set, uploads are paid per item at the bundler
+ *                            instead of drawn from prepaid Turbo credits.
+ *                            STORE_ARWEAVE_JWK_B64 is still REQUIRED: it signs
+ *                            the data item; this key only pays for it.
+ *                            Prefer the _FILE form so the key never enters the
+ *                            process environment. Treated as secret.
+ *   STORE_X402_EVM_KEY    -> OPTIONAL: the same key inline. Secret, never logged.
+ *   STORE_X402_UPLOAD_URL -> OPTIONAL: bundler endpoint
+ *                            (default https://upload.services.ar.io/v1/tx).
+ *   STORE_X402_NETWORK    -> OPTIONAL: x402 network name (default `base`, i.e.
+ *                            Base MAINNET, real money).
+ *   STORE_X402_MAX_PAYMENT -> OPTIONAL: hard per-upload ceiling in USDC base
+ *                            units (default 100000 = $0.10).
  *   ARNS_DVM_SOLANA_SECRET_KEY -> OPTIONAL: 128-char hex (64-byte Ed25519
  *                            keypair) of the DVM's funded Solana wallet.
  *                            When set, the kind:5095 ArNS brokered-buy job
@@ -106,6 +122,7 @@ import {
   createEvmGasStationHandler,
   type EvmChainConfig,
 } from './evm-gas-station-handler.js';
+import { X402UploadAdapter, resolveX402Env } from './x402-upload-adapter.js';
 
 // --- Job counter shim (5-minute sliding window) ---
 
@@ -204,6 +221,36 @@ async function arweaveAddressFromJwk(jwk: { n?: string }): Promise<string | unde
   }
 }
 
+/**
+ * Decode + validate a base64(JSON) Arweave RSA JWK.
+ *
+ * Shared by the Turbo credit path and the x402 path: both need the same wallet
+ * to SIGN data items, and they must agree on what counts as a valid JWK so a
+ * bad value fails the same way whichever path is selected.
+ */
+export function parseArweaveJwkB64(jwkB64: string): { kty?: string; n?: string; d?: string } {
+  let jwkJson: string;
+  try {
+    jwkJson = Buffer.from(jwkB64, 'base64').toString('utf-8');
+  } catch (err) {
+    throw new Error(
+      `STORE_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
+    );
+  }
+  let jwk: { kty?: string; n?: string; d?: string };
+  try {
+    jwk = JSON.parse(jwkJson);
+  } catch (err) {
+    throw new Error(
+      `STORE_ARWEAVE_JWK_B64 does not decode to valid JSON: ${err instanceof Error ? err.message : err}`
+    );
+  }
+  if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'RSA' || !jwk.n || !jwk.d) {
+    throw new Error('STORE_ARWEAVE_JWK_B64 is missing required RSA JWK fields (kty=RSA, n, d).');
+  }
+  return jwk;
+}
+
 interface CreateTurboAdapterResult {
   adapter: ArweaveUploadAdapter;
   /** Source of the credentials, for boot-log diagnostics. */
@@ -238,27 +285,7 @@ export async function createTurboAdapter(
 
   // ── Preferred: STORE_ARWEAVE_JWK_B64 (piped by the host orchestrator) ─────
   if (jwkB64) {
-    let jwkJson: string;
-    try {
-      jwkJson = Buffer.from(jwkB64, 'base64').toString('utf-8');
-    } catch (err) {
-      throw new Error(
-        `STORE_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
-      );
-    }
-    let jwk: { kty?: string; n?: string; d?: string };
-    try {
-      jwk = JSON.parse(jwkJson);
-    } catch (err) {
-      throw new Error(
-        `STORE_ARWEAVE_JWK_B64 does not decode to valid JSON: ${err instanceof Error ? err.message : err}`
-      );
-    }
-    if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'RSA' || !jwk.n || !jwk.d) {
-      throw new Error(
-        'STORE_ARWEAVE_JWK_B64 is missing required RSA JWK fields (kty=RSA, n, d).'
-      );
-    }
+    const jwk = parseArweaveJwkB64(jwkB64);
     const { TurboFactory, ArweaveSigner } = await importTurbo();
     const signer = new ArweaveSigner(
       jwk as unknown as ConstructorParameters<typeof ArweaveSigner>[0]
@@ -694,61 +721,112 @@ async function main(): Promise<void> {
   // The JWK env var is treated as secret material — do NOT log its value.
   const arweaveJwkB64 = process.env['STORE_ARWEAVE_JWK_B64'];
   const legacyTurboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
-  const turboResult = await createTurboAdapter(arweaveJwkB64, legacyTurboToken);
 
-  const sourceLabel =
-    turboResult.source === 'arweave-jwk-b64'
-      ? 'STORE_ARWEAVE_JWK_B64 (wallet-derived)'
-      : turboResult.source === 'turbo-token-legacy'
-        ? 'TURBO_TOKEN (legacy)'
-        : 'unauthenticated (free tier, ≤100KB)';
-  console.log(`[store] Arweave credit source: ${sourceLabel}`);
-  if (turboResult.source === 'unauthenticated-free-tier') {
-    console.warn(
-      '[store] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
-      ' Set STORE_ARWEAVE_JWK_B64 with a funded wallet to lift the size limit.' +
-      ' Do NOT fund the ephemeral address — it rotates on every restart.'
-    );
-  }
-  if (turboResult.arweaveAddress) {
-    console.log(`[store] Arweave address: ${turboResult.arweaveAddress}`);
-  }
+  // ── x402: pay AR.IO's bundler per upload in real USDC instead of credits ──
+  //
+  // Selected only when STORE_X402_EVM_KEY_FILE / STORE_X402_EVM_KEY is set, so
+  // every existing deployment is untouched. It REPLACES the credit path rather
+  // than supplementing it: the two draw on different pockets, and silently
+  // falling back from "spend USDC" to "spend prepaid credits" would be a
+  // wrong-pocket surprise. Both still need the JWK: it signs the data item.
+  const x402Env = resolveX402Env(process.env, (p) => readFileSync(p, 'utf-8'));
+  let uploadAdapter: ArweaveUploadAdapter;
+  let turboResult: Awaited<ReturnType<typeof createTurboAdapter>> | undefined;
 
-  // Best-effort boot-time credit balance probe (warning-only — do not refuse
-  // to start; operators may want the store running while they fund).
-  if (turboResult.client && typeof turboResult.client === 'object') {
-    try {
-      const probe = turboResult.client as { getBalance?: () => Promise<{ winc: string | bigint }> };
-      if (typeof probe.getBalance === 'function') {
-        const rawBalance = await probe.getBalance();
-        const wincStr = typeof rawBalance?.winc === 'bigint'
-          ? rawBalance.winc.toString()
-          : String(rawBalance?.winc ?? '0');
-        let wincBig: bigint;
-        try {
-          wincBig = BigInt(wincStr);
-        } catch {
-          wincBig = 0n;
-        }
-        console.log(
-          `[store] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
-        );
-        if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
-          console.warn(`[store] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`);
-        }
-      }
-    } catch (err) {
-      // Probe failure must not block boot — log and continue.
-      console.warn(
-        `[store] Could not probe Arweave credit balance: ${err instanceof Error ? err.message : err}`
+  if (x402Env) {
+    const jwkB64 = arweaveJwkB64?.trim();
+    if (!jwkB64) {
+      throw new Error(
+        'x402 uploads are configured but STORE_ARWEAVE_JWK_B64 is not set. ' +
+          'The Arweave JWK signs the data item; the EVM key only pays for it.'
       );
+    }
+    const jwk = parseArweaveJwkB64(jwkB64);
+    uploadAdapter = new X402UploadAdapter({
+      arweaveJwk: jwk,
+      evmPrivateKey: x402Env.evmPrivateKey,
+      uploadUrl: x402Env.uploadUrl,
+      network: x402Env.network,
+      maxPaymentBaseUnits: x402Env.maxPaymentBaseUnits,
+    });
+    const arweaveAddress = await arweaveAddressFromJwk(jwk);
+    console.log(
+      `[store] Arweave credit source: x402 pay-per-upload ` +
+        `(${x402Env.network}, key from ${x402Env.keySource})`
+    );
+    console.log(`[store] x402 upload endpoint: ${x402Env.uploadUrl}`);
+    console.log(
+      `[store] x402 max payment per upload: ${x402Env.maxPaymentBaseUnits.toString()} base units`
+    );
+    if (arweaveAddress) {
+      console.log(`[store] Arweave address (data-item signer): ${arweaveAddress}`);
+    }
+    console.log(
+      '[store] NOTE: uploads under the service free tier still cost nothing. ' +
+        'Payment happens only when the bundler answers 402.'
+    );
+  } else {
+    turboResult = await createTurboAdapter(arweaveJwkB64, legacyTurboToken);
+    uploadAdapter = turboResult.adapter;
+  }
+
+  // The credit-source banner and balance probe describe the Turbo credits
+  // pocket, which the x402 path does not use, so skip both when x402 is active.
+  if (turboResult) {
+    const sourceLabel =
+      turboResult.source === 'arweave-jwk-b64'
+        ? 'STORE_ARWEAVE_JWK_B64 (wallet-derived)'
+        : turboResult.source === 'turbo-token-legacy'
+          ? 'TURBO_TOKEN (legacy)'
+          : 'unauthenticated (free tier, ≤100KB)';
+    console.log(`[store] Arweave credit source: ${sourceLabel}`);
+    if (turboResult.source === 'unauthenticated-free-tier') {
+      console.warn(
+        '[store] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
+        ' Set STORE_ARWEAVE_JWK_B64 with a funded wallet to lift the size limit.' +
+        ' Do NOT fund the ephemeral address — it rotates on every restart.'
+      );
+    }
+    if (turboResult.arweaveAddress) {
+      console.log(`[store] Arweave address: ${turboResult.arweaveAddress}`);
+    }
+
+    // Best-effort boot-time credit balance probe (warning-only — do not refuse
+    // to start; operators may want the store running while they fund).
+    if (turboResult.client && typeof turboResult.client === 'object') {
+      try {
+        const probe = turboResult.client as { getBalance?: () => Promise<{ winc: string | bigint }> };
+        if (typeof probe.getBalance === 'function') {
+          const rawBalance = await probe.getBalance();
+          const wincStr = typeof rawBalance?.winc === 'bigint'
+            ? rawBalance.winc.toString()
+            : String(rawBalance?.winc ?? '0');
+          let wincBig: bigint;
+          try {
+            wincBig = BigInt(wincStr);
+          } catch {
+            wincBig = 0n;
+          }
+          console.log(
+            `[store] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
+          );
+          if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
+            console.warn(`[store] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`);
+          }
+        }
+      } catch (err) {
+        // Probe failure must not block boot — log and continue.
+        console.warn(
+          `[store] Could not probe Arweave credit balance: ${err instanceof Error ? err.message : err}`
+        );
+      }
     }
   }
 
   const chunkManager = new ChunkManager(); // in-memory, v1
 
   const arweaveConfig: ArweaveDvmConfig = {
-    turboAdapter: turboResult.adapter,
+    turboAdapter: uploadAdapter,
     chunkManager,
     arweaveTags: rawConfig.arweaveTags,
   };
