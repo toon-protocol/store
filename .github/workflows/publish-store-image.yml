@@ -12,6 +12,21 @@ name: Publish store image
 # `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
 # publish semver tags for pinning, plus an immutable sha tag.
 #
+# `release` is a second floating tag carrying the SAME digest as `latest`,
+# published under the same default-branch-only condition (issue #99,
+# toon-meta#403 — fleet-wide :release + label-scoped Watchtower). `latest`
+# was already effectively green-main-gated — the floating tags publish only
+# from the default branch (`enable={{is_default_branch}}`, so tag and manual
+# runs off `main` never move them), and merges to `main` only land after this
+# repo's own CI gate (`ci.yml`'s `CI OK` check) is green. `release` therefore
+# adds no new gating; it exists so the store box's Watchtower can watch the
+# one tag name every other fleet box uses instead of a store-specific
+# `:latest` convention — see the reference implementation on swap
+# (swap#131/#132). That Watchtower is label-scoped to the `store` container
+# only; the co-located connector-rust (baked into `store-connector`,
+# published by publish-store-connector-image.yml) stays deliberately pinned
+# and is untouched by this tag.
+#
 # Single-arch (amd64): the devnet Linode boxes are x86, and Dockerfile.store
 # cherry-picks prebuilt linux-x64-musl NAPI bindings (better-sqlite3, libsql).
 # No --build-context memvid is needed — this is the Arweave-only variant, which
@@ -48,10 +63,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/store
-          # `latest` tracks main; semver tags publish on vX.Y.Z; sha tags give
-          # an immutable handle.
+          # `latest` and `release` both track main (release is the fleet-wide
+          # Watchtower watch target, see header comment above); semver tags
+          # publish on vX.Y.Z; sha tags give an immutable handle.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=release,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
