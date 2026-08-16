@@ -44,13 +44,14 @@ reverse-proxies to (RouteTermination).
 `ghcr.io/toon-protocol/store` also publishes a floating `:release` tag
 (same digest as `:latest` on every push to `main`) — the fleet-wide
 Watchtower watch target (toon-meta#403). `:latest` was already effectively
-green-main-gated (this workflow only runs on pushes to `main`, which only
-land after CI is green), but the store box's label-scoped Watchtower should
-watch `:release`, matching the tag name every other fleet box uses, rather
-than a store-specific `:latest` convention. Repointing `STORE_IMAGE` and
-wiring the label-scoped Watchtower service into `docker-compose.yml` is
-tracked separately (toon-meta#403's "connector infra" child); this bundle
-still defaults `STORE_IMAGE` to `:latest` until that lands.
+green-main-gated (both floating tags publish only from the default branch,
+and merges to `main` only land after CI is green), but the store box's
+label-scoped Watchtower should watch `:release`, matching the tag name every
+other fleet box uses, rather than a store-specific `:latest` convention.
+Repointing `STORE_IMAGE` and wiring the label-scoped Watchtower service into
+the store box's compose set is tracked separately (toon-meta#403's "connector
+infra" child); this bundle still defaults `STORE_IMAGE` to `:latest` until
+that lands.
 
 The `store-connector` image bakes a **pinned** connector (`CONNECTOR_TAG`,
 default `rust-sha-440eab7`) so the config schema is frozen against a known
