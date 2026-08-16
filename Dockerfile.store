@@ -92,6 +92,11 @@ RUN set -eux; \
 # @solana/kit — the OPTIONAL kind:5095 ArNS-buy runtime deps, externalized in
 # esbuild and lazy-imported via a variable specifier by src/arns-buy-handler.ts
 # (without these the handler registers but every buy fails `arns_sdk_unavailable`).
+# Plus @dha-team/arbundles + x402-fetch — the OPTIONAL x402 pay-per-upload deps
+# (src/x402-upload-adapter.ts), also externalized and lazily imported. They
+# already arrive transitively via @ardrive/turbo-sdk; pinning them here at the
+# versions turbo-sdk resolves makes that arrival explicit rather than incidental,
+# so a future turbo-sdk bump cannot silently drop them.
 # Install the WHOLE closure at a self-consistent version set via npm (robust
 # native-binding + transitive resolution), then flatten into /runtime. libsql
 # ships a prebuilt linux-x64-musl NAPI binding for node:20-alpine.
@@ -102,7 +107,9 @@ RUN cd /tmp && npm init -y >/dev/null 2>&1 && \
       @ardrive/turbo-sdk@1.40.2 \
       arweave@1.15.5 \
       @ar.io/sdk@4.0.3 \
-      @solana/kit@6.10.0 && \
+      @solana/kit@6.10.0 \
+      @dha-team/arbundles@1.0.4 \
+      x402-fetch@1.2.0 && \
     cp -rL /tmp/node_modules/. /runtime/node_modules/ && \
     find /runtime/node_modules -name '*.d.ts' -delete && \
     find /runtime/node_modules -name '*.d.ts.map' -delete && \
