@@ -12,6 +12,20 @@ name: Publish store image
 # `latest` is (re)published on every push to main; version tags (vX.Y.Z) also
 # publish semver tags for pinning, plus an immutable sha tag.
 #
+# `release` is a second floating tag on the same push-to-main trigger (issue
+# #99, toon-meta#403 — fleet-wide :release + label-scoped Watchtower). This
+# workflow only runs on a push to `main`, and merges to `main` only land
+# after this repo's own CI gate (`ci.yml`'s `CI OK` check) is green, so
+# `latest` was already effectively green-main-gated before this tag existed.
+# `release` is added anyway, as the SAME digest under a second name, so the
+# store box's Watchtower can watch one tag name (`:release`) that matches
+# every other fleet box instead of a store-specific `:latest` convention —
+# see the reference implementation on swap (swap#131/#132). Watchtower is
+# label-scoped to the `store` container only; the co-located connector-rust
+# (baked into `store-connector`, published by
+# publish-store-connector-image.yml) stays deliberately pinned and is
+# untouched by this tag.
+#
 # Single-arch (amd64): the devnet Linode boxes are x86, and Dockerfile.store
 # cherry-picks prebuilt linux-x64-musl NAPI bindings (better-sqlite3, libsql).
 # No --build-context memvid is needed — this is the Arweave-only variant, which
@@ -48,10 +62,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/store
-          # `latest` tracks main; semver tags publish on vX.Y.Z; sha tags give
-          # an immutable handle.
+          # `latest` and `release` both track main (release is the fleet-wide
+          # Watchtower watch target, see header comment above); semver tags
+          # publish on vX.Y.Z; sha tags give an immutable handle.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=release,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
