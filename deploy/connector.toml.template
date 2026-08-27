@@ -137,67 +137,42 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # for and the URLs it is reachable on — and is what you replace when you stand
 # up your own. See deploy/README.md § "Make it yours".
 
-# ── Peering with the relay box ───────────────────────────────────────────────
-# The relay is the fleet's write ingress. Peering with it puts `g.toon.relay`
-# in this node's routing table, so a client already connected here can pay
-# THIS edge to reach it instead of opening a second channel of its own.
+# ── The relay leg ────────────────────────────────────────────────────────────
+# Two directions, and only one of them is written here.
 #
-# `endpoint`'s scheme selects the carriage — `wss://` is BTP. A row with no
-# endpoint would be accept-only; this one dials out.
+# INBOUND (`g.toon.relay.store`) terminates on this node. The relay names the
+# store's service under the relay's own prefix and forwards a packet addressed
+# there to us; we answer it. It is a static route because it is this node's own
+# app being served, exactly like `g.toon.ario`.
 #
-# `max_packet_amount` is the cap: the largest amount forwarded to this peer in
-# one packet (ADR 0042). There is no "unbounded" spelling, deliberately, and
-# `0` is refused by name rather than read as "disabled".
+# A forward does NOT rewrite the destination, so the packet arrives still
+# addressed `g.toon.relay.store` and needs a route of its own here. Without one
+# it would fall through to whatever else matches, which is how a pair of
+# mutually-forwarding routes becomes a paid ping-pong rather than a 404.
 #
-# `fee` is what this connector retains for carrying one packet there (ADR
-# 0061). It attaches to the peering, not to a route, because carrying a packet
-# is the same work whichever prefix was addressed.
-[[peers]]
-id                = "relay"
-endpoint          = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
-max_packet_amount = 100000
-fee               = 1
-
-# The channel the relay's claims are JUDGED against, and the key whose
-# signature is accepted on it. Nothing here authenticates the peering by a
-# shared string — ADR 0060 deleted that outright; the role is proved by this
-# binding plus a verified claim signature.
-[[peer_channels]]
-peer_id          = "relay"
-channel_id       = "0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d"
-counterparty_key = "0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308"
-chain_id         = 84532
-token_network    = "0xa79c3b1dbcea00a6d84735a134395d8ef6d6a478"
-
-# The channel this node PAYS FROM when it forwards to the relay: every
-# forwarded PREPARE carries a covering claim on it (ADR 0042). Deliberately
-# the SAME channel as the peer row above — CF-22 permits one channel in both
-# roles, the peer role judging what arrives and the pay role covering what
-# this node sends, and it is the deployed shape here: one hop, one channel,
-# funded from both sides.
-#
-# `client_edge_url` is where those claims are presented. The relay exposes no
-# peer carriage of its own, so this node pays it as an ordinary client — which
-# is what it already did to publish its announce.
-[[pay_channels]]
-peer_id         = "relay"
-channel_id      = "0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d"
-chain_id        = 84532
-token_network   = "0xa79c3b1dbcea00a6d84735a134395d8ef6d6a478"
-client_edge_url = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
-
-# The routing-table entry the peering exists for. A route is a prefix plus
-# EXACTLY ONE of `handler_url` (terminate here) or `peer_id` (forward there),
-# and a price is required on both branches.
-#
-# A forwarded route is priced at THIS client edge (ADR 0028): the relay
-# charges 1 for `g.toon.relay`, this node retains its `fee` of 1, so a client
-# pays 2 here. Longest prefix wins, so `g.toon.ario` above still terminates
-# locally and is unaffected.
+# The price MUST equal `g.toon.ario`'s, because the two share a `handler_url`
+# and the connector refuses a config where they differ
+# (`ConfigError::ConflictingHandlerPrice`) — the cheaper door would otherwise
+# take every packet.
 [[routes]]
-prefix  = "g.toon.relay"
-peer_id = "relay"
-price   = 2
+prefix      = "g.toon.relay.store"
+handler_url = "http://store:3300/store"
+price       = { base = 1000, per_kib = 10 }
+
+# OUTBOUND (`g.toon.store.relay`) is NOT here, deliberately. The peering with
+# the relay and the forwarded route that uses it are established at runtime
+# through the operator surface — `POST /peers` then `POST /routes/peers`
+# (ADR 0058) — which reads the counterparty's self-description, derives the
+# payment channel from the two participants and opens it on chain if absent.
+#
+# Writing them here instead would ALSO take the keys away from that surface:
+# a runtime write is refused outright when the configuration file owns the key
+# (CF-32), and a durable runtime row whose key config later claims is deleted
+# rather than shadowed (CF-33). Ownership is permanent, so the choice of which
+# table holds a peering is made once, here, by leaving it out.
+#
+# Read the live peering back with `GET /peers`; a `"source"` of `"runtime"` is
+# this arrangement working as intended.
 
 # What this node cannot introspect about itself: the addresses it answers for
 # and the public URLs it is reachable on. Clients read this back from

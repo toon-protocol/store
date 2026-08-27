@@ -163,24 +163,18 @@ const EXPECTED_ROUTE_PER_KIB = 10;
 // decision 2026-08-05 — one name for one app). The box terminates exactly this
 // one prefix; naming it as a literal means losing it, or silently regaining a
 // retired alias, fails by name instead of passing unnoticed.
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.relay'].sort();
+// Both prefixes TERMINATE here. `g.toon.ario` is this node's own name for its
+// app; `g.toon.relay.store` is the relay's name for the same app, which the
+// relay forwards to us — a forward does not rewrite the destination, so it
+// arrives under that name and needs a route of its own.
+//
+// The outbound leg (`g.toon.store.relay`, forwarded to the relay) is
+// deliberately NOT here: it is established at runtime through the operator
+// surface. See the template's "The relay leg" section.
+const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.relay.store'].sort();
 
-// The prefix this box terminates locally, and the one it forwards to its peer.
 const TERMINATED_PREFIX = 'g.toon.ario';
-const FORWARDED_PREFIX = 'g.toon.relay';
-
-// The relay charges 1 for g.toon.relay and this node retains its peering fee
-// of 1, so a client pays 2 at THIS edge (ADR 0028 — a forwarded route is
-// priced at the client edge). If the relay's price moves, this must too.
-const EXPECTED_RELAY_FEE = 1;
-const EXPECTED_FORWARDED_PRICE = 2;
-
-// One channel in both roles: judged against for what the relay sends, paid
-// from for what this node forwards. CF-22 permits exactly this, and the
-// channel is funded from both sides on Base Sepolia.
-const PEER_CHANNEL_ID =
-  '0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d';
-const RELAY_COUNTERPARTY_KEY = '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308';
+const RELAY_INBOUND_PREFIX = 'g.toon.relay.store';
 
 // The fleet's promotion tag. The store box follows the SAME moving tag the
 // rest of the fleet does, rather than an immutable `rust-sha-*` literal — the
@@ -209,6 +203,19 @@ describe('deploy/ bundle is internally consistent', () => {
   it('prices the store route as a schedule over payload length', () => {
     const terminated = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX);
     expect(terminated?.price).toEqual({
+      base: EXPECTED_ROUTE_BASE,
+      per_kib: EXPECTED_ROUTE_PER_KIB,
+    });
+  });
+
+  it('serves the relay\'s name for this app at the same price as our own', () => {
+    // Both prefixes reach one handler_url, and the connector refuses a config
+    // where two such routes disagree on price (ConflictingHandlerPrice) — the
+    // cheaper door would otherwise take every packet.
+    const inbound = connectorToml.routes.find((r) => r.prefix === RELAY_INBOUND_PREFIX);
+    expect(inbound, `${RELAY_INBOUND_PREFIX} must terminate here`).toBeDefined();
+    expect(inbound?.handler_url).toBe('http://store:3300/store');
+    expect(inbound?.price).toEqual({
       base: EXPECTED_ROUTE_BASE,
       per_kib: EXPECTED_ROUTE_PER_KIB,
     });
@@ -406,43 +413,36 @@ describe('deploy/ render.sh substitutes exactly what the templates need', () => 
   });
 });
 
-describe('deploy/ peers with the relay', () => {
-  it('declares the relay as a peer it can dial', () => {
-    const relay = connectorToml.peers?.find((p) => p.id === 'relay');
-    expect(relay, 'a [[peers]] row with id "relay" must exist').toBeDefined();
-    // The scheme selects the carriage; wss:// is BTP. A plaintext endpoint is
-    // refused outright by the connector (CF-18).
-    expect(relay?.endpoint).toMatch(/^wss:\/\//);
-    expect(relay?.fee).toBe(EXPECTED_RELAY_FEE);
-    // CF-19: a cap must be present and greater than zero — zero is not a
-    // smaller cap, it is a peering that can carry nothing.
-    expect(relay?.max_packet_amount ?? 0).toBeGreaterThan(0);
+describe('deploy/ leaves the relay peering to the operator surface', () => {
+  // ADR 0058 establishes a peering from the counterparty's URL at runtime:
+  // POST /peers reads its self-description, derives the payment channel and
+  // opens it on chain if absent, then POST /routes/peers adds the forwarded
+  // route. Both rows live in the durable runtime table, not here.
+  //
+  // This is not a style choice — it is an ownership one. A runtime write is
+  // refused outright when the config file owns the key (CF-32), and a durable
+  // runtime row whose key config later claims is DELETED rather than shadowed
+  // (CF-33). Ownership is permanent, so writing a peer row here would take the
+  // peering away from the surface that manages it, for good.
+
+  it('declares no peer, and no channel book, in the config file', () => {
+    expect(connectorToml.peers, 'a [[peers]] row here would claim the key from the operator surface').toBeUndefined();
+    expect(connectorToml.peer_channels).toBeUndefined();
+    expect(connectorToml.pay_channels).toBeUndefined();
   });
 
-  it('puts the relay in the routing table as a forwarded route', () => {
-    const forwarded = connectorToml.routes.find((r) => r.prefix === FORWARDED_PREFIX);
-    expect(forwarded, `a route for ${FORWARDED_PREFIX} must exist`).toBeDefined();
-    expect(forwarded?.peer_id).toBe('relay');
-    expect(forwarded?.handler_url).toBeUndefined();
-    // Priced at this client edge: the relay's own price plus our fee.
-    expect(forwarded?.price).toBe(EXPECTED_FORWARDED_PRICE);
+  it('declares no forwarded route in the config file', () => {
+    for (const route of connectorToml.routes) {
+      expect(
+        route.peer_id,
+        `route "${route.prefix}" forwards, and a forwarded route belongs to the runtime table`
+      ).toBeUndefined();
+    }
   });
 
-  it('binds the peering to a channel, not a shared secret', () => {
-    const bound = connectorToml.peer_channels?.find((c) => c.peer_id === 'relay');
-    expect(bound?.channel_id).toBe(PEER_CHANNEL_ID);
-    expect(bound?.counterparty_key.toLowerCase()).toBe(RELAY_COUNTERPARTY_KEY);
-  });
-
-  it('covers what it forwards with a claim on that same channel', () => {
-    // CF-22 permits one channel in both roles, and that is the deployed shape
-    // here. If these two ever name different channels it is deliberate, and
-    // this assertion is the place to say so.
-    const pay = connectorToml.pay_channels?.find((c) => c.peer_id === 'relay');
-    expect(pay?.channel_id).toBe(PEER_CHANNEL_ID);
-    // Where the covering claims are presented. The relay exposes no peer
-    // carriage, so this node pays it as an ordinary client.
-    expect(pay?.client_edge_url).toMatch(/^https:\/\//);
+  it('still accepts peer carriage, so a peering can be established at all', () => {
+    // A peering needs somewhere to arrive. The relay dials us.
+    expect(connectorTemplateCode).toMatch(/^\s*peer_expose\s*=\s*"btp"/m);
   });
 });
 
