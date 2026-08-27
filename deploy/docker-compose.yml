@@ -1,100 +1,58 @@
 # =============================================================================
-# store deploy — connector (payment proxy) + Arweave store backend. NO Caddy.
+# The TOON store box — one host, six containers
 # =============================================================================
-# The connector monetizes the kind:5094 blob-storage job; the store backend is
-# payment-oblivious. TLS is terminated by the deployment environment, which
-# reverse-proxies to the host-published edge (:3000).
+#   nginx      the public TLS edge (the only thing bound to a public port)
+#   connector  the payment proxy: meters + settles, then proxies to store
+#   store      the job backend: POST /store -> Arweave, payment-oblivious
+#   announce   publishes the kind:10032 self-announce so clients can find us
+#   certbot    renews the certificate
+#   watchtower recreates the three app containers when their tag moves
 #
-#   payer ──POST /ilp──▶ connector ──POST /store──▶ store:3300  (store backend; PRIVATE)
+#   internet ──▶ nginx :443 ──┬──▶ connector :4000 ──▶ store :3300 ──▶ Arweave
+#                             └──▶ store :3400  (health)
 #
-# PRIVACY INVARIANT (enforced by construction):
-#   - store :3300 (store job backend) → NEVER host-published; only connector dials store:3300.
-#   - store :3400 (health) → NEVER host-published.
-#   The only host-bound port is the edge :3000. The connector has no other port
-#   to leak: since the move to the Rust connector its edge, operator surface and
-#   /metrics all share :3000, and the TypeScript node's :8080/:8081 are gone.
-#
-# ⚠ DOCKER'S `ports:` PUBLISH BYPASSES ufw. Docker inserts its own rules into
-#   the DOCKER-USER/FORWARD iptables chains ahead of ufw's, so a `ports:` entry
-#   is reachable from the internet no matter what `ufw status` reports — a
-#   host firewall rule does NOT make a published port private. That is why
-#   every `ports:` entry below is prefixed with a host interface (127.0.0.1)
-#   instead of a bare port, which binds it to loopback and makes it reachable
-#   ONLY through the box's own reverse proxy / TLS terminator, not the network.
-#   Never "fix" an exposure here by adding a ufw rule — change the bind.
-#
-# Dev:  docker compose up --build   (builds store-connector locally from ./Dockerfile)
-# Prod: docker compose up           (pulls the pinned STORE_CONNECTOR_IMAGE)
+# Bring it up:  ./render.sh && docker compose up -d
+# See ./README.md — nothing here works without the key files and .env it lists.
 # =============================================================================
+
+name: store
 
 services:
-  # ── The payment proxy (connector + baked store route config) ────────────────
+  # ── The payment proxy ──────────────────────────────────────────────────────
+  # Published on the LOOPBACK only. nginx is what faces the internet; binding
+  # this to 0.0.0.0 would put the paid edge on the public internet past ufw
+  # (docker's iptables rules bypass ufw — see README § Privacy invariant).
   connector:
-    image: ${STORE_CONNECTOR_IMAGE:-ghcr.io/toon-protocol/store-connector:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        CONNECTOR_TAG: ${CONNECTOR_TAG:-rust-sha-440eab7}
-    # NO `environment:` block, deliberately. The Rust connector has no
-    # environment-variable layer at all (connector#755): every value comes from
-    # the baked ./connector.toml, so there is exactly one place any value comes
-    # from. The three variables that used to live here are all gone —
-    # CONFIG_FILE (the image's CMD already names the path), TOON_MNEMONIC (the
-    # settlement key is a mounted FILE now, derived outside the container), and
-    # NODE_TLS_REJECT_UNAUTHORIZED (a Node.js escape hatch with no equivalent;
-    # a self-signed RPC cert is now a hard TLS failure, so point the config at
-    # an RPC with a real chain of trust).
+    image: ghcr.io/toon-protocol/connector:rust-release
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
     volumes:
-      # Two key files, provisioned two DIFFERENT ways — see ./connector.toml.
-      # In short: the signer is this node's ILP identity and holds no money, so
-      # it is fresh random material per box; the settlement key spends real
-      # testnet value and is the identity clients open their channels against,
-      # so it is derived from a seed you can reproduce. Both must exist and be
-      # readable by uid 10001 before the first `up -d` — a bind mount keeps its
-      # HOST ownership inside the container, so `chown 10001:10001` them or the
-      # container restart-loops on "Permission denied".
+      - ./connector.toml:/app/config/connector.toml:ro
       - ./signer.key:/app/data/signer.key:ro
       - ./settlement.key:/app/data/settlement.key:ro
-      # The durable claim journal (connector#605). NAMED, not a host bind: the
-      # image ships /app/state owned by uid 10001, which is what a fresh named
-      # volume inherits on first mount and what a bind mount does not. Replaying
-      # this journal is what makes a channel's replay watermark survive a
-      # restart; without it, every claim a payer already spent becomes free
-      # service again.
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      - ./apex-store.secret:/app/data/apex-store.secret:ro
       - connector_state:/app/state
     ports:
-      # Host-IP-bound, matching the live fleet (127.0.0.1 behind nginx) — a
-      # bare '3000:3000' publishes on 0.0.0.0 and is internet-reachable
-      # regardless of ufw (see the warning above). Override EDGE_BIND if this
-      # box's reverse proxy runs somewhere other than loopback.
-      - '${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000' # paid POST /ilp edge (the env's TLS terminator fronts this)
-    # No `expose: 8080`. The client edge, the operator surface and /metrics all
-    # share :3000 on the Rust connector; the TypeScript node's separate health
-    # (:8080) and admin (:8081) ports do not exist.
-    depends_on:
-      store:
-        condition: service_healthy
+      - '127.0.0.1:4000:4000'
     restart: unless-stopped
 
-  # ── The Arweave store (payment-oblivious HTTP backend) ───────────────────────
-  # Published store image: it serves the plain-HTTP POST /store backend that the
-  # connector reverse-proxies to (RouteTermination). The job port (3300) and
-  # health (3400) are NOT published — only the connector dials store:3300 over the
-  # compose network, enforcing the privacy invariant.
+  # ── The job backend ────────────────────────────────────────────────────────
+  # No `ports:` at all. The connector reaches it over the compose network, and
+  # nginx serves its health endpoint; nothing about it should be reachable
+  # from off-box directly.
   store:
-    image: ${STORE_IMAGE:-ghcr.io/toon-protocol/store:latest}
+    image: ghcr.io/toon-protocol/store:release
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
     environment:
       NODE_NOSTR_SECRET_KEY: ${STORE_NOSTR_SECRET_KEY:?set STORE_NOSTR_SECRET_KEY in .env (64-char hex)}
-      HANDLER_PORT: '3300' # POST /store job backend — PRIVATE
-      BLS_PORT: '3400' # health — internal
-      FEE_PER_JOB: ${FEE_PER_JOB:-10} # informational (connector enforces the flat route price)
-      # Arweave wallet: base64(JSON JWK). Empty → ephemeral free-tier (≤100KB).
+      HANDLER_PORT: '3300'
+      BLS_PORT: '3400'
+      FEE_PER_JOB: ${FEE_PER_JOB:-10}
       STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
-      # The optional kind:5095/5096/5098 jobs (see entrypoint-store.ts's env
-      # mapping). All pass through empty by default, which the store treats
-      # identically to unset (job disabled) — so enabling one is ONE edit,
-      # setting it in .env, not also uncommenting a line here.
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Optional job kinds. Each stays unregistered while its variable is empty.
       ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY:-}
       ARNS_NETWORK: ${ARNS_NETWORK:-devnet}
       GAS_STATION_SOLANA_SECRET_KEY: ${GAS_STATION_SOLANA_SECRET_KEY:-}
@@ -102,23 +60,141 @@ services:
       EVM_GAS_STATION_CONFIG_JSON: ${EVM_GAS_STATION_CONFIG_JSON:-}
       EVM_GAS_STATION_QUOTE_TTL_MS: ${EVM_GAS_STATION_QUOTE_TTL_MS:-}
       EVM_GAS_STATION_MAX_GAS: ${EVM_GAS_STATION_MAX_GAS:-}
-    expose:
-      - '3300' # store job backend — PRIVATE (only the connector dials store:3300)
-      - '3400' # health — internal
+      # Node's default heap target assumes it owns the machine. This box is a
+      # 1GB nanode running six containers.
+      NODE_OPTIONS: --max-old-space-size=384
+    expose: ['3300', '3400']
+    volumes:
+      - store_data:/data
     healthcheck:
       test: ['CMD-SHELL', 'wget -q --spider http://localhost:3400/health || exit 1']
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Discovery ──────────────────────────────────────────────────────────────
+  # `connector announce` is a ONE-SHOT: it negotiates, signs and PAYS for one
+  # write, then exits. `restart: unless-stopped` on the bare subcommand would
+  # re-run it the instant it exits — a tight loop paying for a fresh announce
+  # as fast as the container can restart. Hence the sleep loop.
+  #
+  # It probes the relay edge before publishing: a Watchtower recreate restarts
+  # this and the connector in the same sweep, and firing one publish into a
+  # still-booting edge used to take devnet discovery dark for a full refresh
+  # interval.
+  #
+  # Runs the SAME image and the SAME connector.toml as the connector — the two
+  # must move together, or the older binary refuses to load a config the newer
+  # one wrote. That is why both carry the Watchtower label.
+  announce:
+    image: ghcr.io/toon-protocol/connector:rust-release
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -eu
+        THROUGH_URL="https://proxy.relay.devnet.toonprotocol.dev/ilp"
+        REFRESH_SECS="$${STORE_ANNOUNCE_REFRESH_SECS:-240}"
+        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
+        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
+        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
+        wait_for_edge() {
+          waited=0
+          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
+            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
+              echo "[announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
+              return 1
+            fi
+            echo "[announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
+            sleep "$$READY_POLL_SECS"
+            waited=$$((waited + READY_POLL_SECS))
+          done
+          return 0
+        }
+        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+        while true; do
+          wait_for_edge || true
+          echo "[announce] publishing g.toon.ario via g.toon.relay..."
+          if /usr/local/bin/connector announce \
+            --config /app/config/connector.toml \
+            "$$THROUGH_URL"; then
+            echo "[announce] OK -- g.toon.ario published; next refresh in $${REFRESH_SECS}s"
+            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+            SLEEP_SECS="$$REFRESH_SECS"
+          else
+            RC=$$?
+            echo "[announce] FAILED rc=$$RC -- g.toon.ario NOT published; retrying in $${BACKOFF_SECS}s"
+            SLEEP_SECS="$$BACKOFF_SECS"
+            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
+            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
+              BACKOFF_SECS="$$REFRESH_SECS"
+            fi
+          fi
+          sleep "$$SLEEP_SECS"
+        done
+    environment:
+      STORE_ANNOUNCE_REFRESH_SECS: '240'
+    volumes:
+      - ./connector.toml:/app/config/connector.toml:ro
+      - ./signer.key:/app/data/signer.key:ro
+      - ./settlement.key:/app/data/settlement.key:ro
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      - ./apex-store.secret:/app/data/apex-store.secret:ro
+      - announce_state:/app/state
+    restart: unless-stopped
+
+  # ── The TLS edge ───────────────────────────────────────────────────────────
+  # Deliberately NOT Watchtower-labelled. nginx holds the resolver that lets
+  # every other container survive being recreated at a new address; recreating
+  # it on an upstream nginx:alpine push would be an unreviewed change to the
+  # one component whose job is to outlive the others.
+  nginx:
+    image: nginx:alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+  # Holds the renewal timer; not Watchtower-labelled, same reasoning.
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
+  # ── Unattended updates ─────────────────────────────────────────────────────
+  # `--label-enable` means it ignores every container that does not carry the
+  # enable label, so it only ever touches connector, store and announce.
+  # Pinned, rather than floating on :latest — otherwise a future Watchtower
+  # release changes this box's deploy behaviour with nothing in git to point at
+  # (which is exactly the defect it exists to fix for everything else).
+  # Not labelled itself.
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    environment:
+      DOCKER_API_VERSION: '1.44'
+    command: ['--label-enable', '--interval', '60', '--cleanup']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:
-  # The claim journal. Named so a fresh mount inherits the image's uid-10001
-  # ownership of /app/state; see the connector service's `volumes:` above for
-  # why it must outlive the container.
+  # The claim watermark. Back this up; losing it hands every payer their
+  # already-spent claims back as free service.
   connector_state:
-
-networks:
-  default:
-    name: store_deploy_net
+  announce_state:
+  store_data:
+  certbot_conf:
+  certbot_www:

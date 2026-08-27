@@ -29,8 +29,8 @@ vi.mock('@toon-protocol/sdk', async (importOriginal) => {
     createNode: vi.fn(async () => ({
       identity: { pubkey: 'a'.repeat(64) },
       on: vi.fn(),
-      start: vi.fn(async () => {}),
-      stop: vi.fn(async () => {}),
+      start: vi.fn((): Promise<void> => Promise.resolve()),
+      stop: vi.fn((): Promise<void> => Promise.resolve()),
     })),
     createArweaveDvmHandler: vi.fn(() => vi.fn()),
     TurboUploadAdapter: TurboUploadAdapterStub,
@@ -276,7 +276,6 @@ describe('resolveGasStationEnv — GAS_STATION_CHANNEL_PROGRAM_ID', () => {
   });
 
   it('gas-station job stays disabled without GAS_STATION_SOLANA_SECRET_KEY, even with a channel program id set', () => {
-    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
     delete process.env['GAS_STATION_SOLANA_SECRET_KEY'];
     process.env['GAS_STATION_CHANNEL_PROGRAM_ID'] = CHANNEL_PROGRAM_ID;
     expect(resolveGasStationEnv(process.env)).toBeUndefined();

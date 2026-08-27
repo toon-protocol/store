@@ -1,242 +1,192 @@
-# store deploy — the Arweave store behind the TOON connector (payment proxy)
+# Running the store box
 
-The production-faithful deployment of this store: the **connector (payment proxy,
-"nginx for payments")** runs in front of the **payment-oblivious Arweave
-store**. The connector monetizes the kind:5094 blob-storage job via
-**RouteTermination** (the same model as the relay deploy), reverse-proxying a
-plain `POST /store` to the store backend. Settlement runs against the **shared
-live devnet**. **TLS is terminated by the deployment environment** (no Caddy
-here).
+This directory is the whole deployment. Everything the TOON devnet store box
+runs is here: the payment proxy, the job backend, TLS, discovery and unattended
+updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
 
 ```
-payer ──paid POST /ilp──▶ connector ──paid job (POST /store)──▶ store :3300  (store backend; PRIVATE)
-                            (terminates payment)                  └─ uploads blob to Arweave, returns {txId}
+                         ┌──────────────────────────────────────┐
+   client ──── :443 ────▶│ nginx          the only public port  │
+   (pays)                └───────┬──────────────────────┬───────┘
+                                 │                      │
+                    proxy.ario.* │                      │ dvm.*
+                                 ▼                      ▼
+                    ┌────────────────────┐    ┌──────────────────┐
+                    │ connector   :4000  │    │ store      :3400 │
+                    │ meters & settles   │    │ health           │
+                    └─────────┬──────────┘    └──────────────────┘
+                              │ POST /store (payment already proven)
+                              ▼
+                    ┌────────────────────┐
+                    │ store       :3300  │──▶ Arweave (via Turbo)
+                    └────────────────────┘
+
+   announce ──▶ publishes kind:10032 so clients can discover the above
+   certbot  ──▶ renews the certificate
+   watchtower ▶ recreates connector, store and announce when their tag moves
 ```
-
-The connector's config is **baked into the `store-connector` image** (see
-`Dockerfile` — `FROM ghcr.io/toon-protocol/connector` + `COPY connector.toml`).
-The store app image (`ghcr.io/toon-protocol/store`) is published separately and
-serves the payment-oblivious `POST /store` backend that the connector
-reverse-proxies to (RouteTermination).
-
-> **This bundle runs the Rust connector** (connector#755). It used to run the
-> TypeScript node pinned at `3.28.0`, reading a `connector.yaml`. The TOON devnet
-> cut over to the Rust connector on 2026-08-04 and stopped both TypeScript
-> containers, so that pin points at a node nobody runs. See
-> [Migrating from `3.28.0`](#migrating-from-3280) if you have an existing `.env`.
 
 ## Files
 
-| file                 | purpose                                                                                  |
-| -------------------- | ---------------------------------------------------------------------------------------- |
-| `Dockerfile`         | `store-connector` image: pinned Rust connector + baked `connector.toml`                   |
-| `connector.toml`     | connector config (route `g.toon.ario` → `http://store:3300/store`), devnet RPC baked in   |
-| `docker-compose.yml` | connector (payment proxy) + store (`POST /store` backend); only the edge `:3000` host-published, on `EDGE_BIND` |
-| `.env.example`       | copy to `.env`; `STORE_NOSTR_SECRET_KEY` (required) + Arweave wallet + image pins         |
+| File | What it is |
+|---|---|
+| `docker-compose.yml` | The six containers above. The only file that names an image tag. |
+| `connector.toml.template` | The payment proxy's config: what this node sells, at what price, and how it settles. Rendered to `connector.toml`. |
+| `nginx/node.conf.template` | The TLS edge. Rendered to `nginx/conf.d/node.conf`. |
+| `render.sh` | Fills both templates in from `.env`. |
+| `bootstrap.sh` | Fresh-host install: firewall, docker, render, start, TLS. |
+| `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
+| `.env.example` | Every variable, with what it is and how to generate it. |
 
-## Images
+`.env`, the rendered `connector.toml`, `nginx/conf.d/` and all key material are
+gitignored. **Only templates are committed.**
 
-| image                                   | what it is                                                |
-| --------------------------------------- | --------------------------------------------------------- |
-| `ghcr.io/toon-protocol/store`           | the normal store app (built by `publish-store-image.yml`) |
-| `ghcr.io/toon-protocol/store-connector` | connector + this repo's `connector.toml` baked in         |
+## Standing one up
 
-`ghcr.io/toon-protocol/store` also publishes a floating `:release` tag
-(same digest as `:latest` on every push to `main`) — the fleet-wide
-Watchtower watch target (toon-meta#403). `:latest` was already effectively
-green-main-gated (both floating tags publish only from the default branch,
-and merges to `main` only land after CI is green), but the store box's
-label-scoped Watchtower should watch `:release`, matching the tag name every
-other fleet box uses, rather than a store-specific `:latest` convention.
-Repointing `STORE_IMAGE` and wiring the label-scoped Watchtower service into
-the store box's compose set is tracked separately (toon-meta#403's "connector
-infra" child); this bundle still defaults `STORE_IMAGE` to `:latest` until
-that lands.
+**Before you start** you need a host, two DNS A-records pointing at it —
+`proxy.ario.<your-domain>` and `dvm.<your-domain>` — and four key files.
 
-The `store-connector` image bakes a **pinned** connector (`CONNECTOR_TAG`,
-default `rust-sha-440eab7`) so the config schema is frozen against a known
-connector. The image's own version tracks this repo's release; bump
-`CONNECTOR_TAG` deliberately to adopt a newer connector.
-
-**The `.env` variable of the same name is not a production control.** It only
-feeds `docker compose up --build` (a local build). The published image on GHCR
-is built by CI from `deploy/Dockerfile`'s own ARG default, with no build-arg
-override — see `publish-store-connector-image.yml`'s header — so pulling
-`STORE_CONNECTOR_IMAGE` and running `up` without `--build` (the documented
-production path below) ignores `.env`'s `CONNECTOR_TAG` entirely. To adopt a
-newer connector in production, bump the ARG default in `deploy/Dockerfile` and
-cut a new release.
-
-**Read the tag carefully.** The `connector` package carries two different
-programs under one name. `rust-sha-<short>` and `rust-main` are the Rust
-connector, which reads `connector.toml`. Plain semver tags (`3.28.0`) and
-`latest` are the **retired** TypeScript node, which reads `connector.yaml` and
-will not start on this bundle's config. Always pin an exact `rust-sha-`, never
-the floating `rust-main`: the parser is `deny_unknown_fields` and startup is
-fail-closed, so a schema drift under you is a refuse-to-start.
-
-## Drop-in steps
-
-1. **Generate the connector's two keys.** These are files, not environment
-   variables — there is no env layer on the Rust connector, and no
-   `TOON_MNEMONIC`.
-
-   ```bash
-   # This node's ILP signing identity (ADR 0012). Holds no money. Fresh random
-   # material per box — it must NOT collide with any other node's.
-   openssl rand -hex 32 > signer.key
-
-   # The settlement identity. This one spends real testnet value and is what
-   # clients open their payment channels AGAINST, so derive it from a seed you
-   # can reproduce rather than from `openssl rand`. The TOON fleet uses NIP-06
-   # m/44'/1237'/0'/0/0 — the NOSTR coin type, NOT the standard m/44'/60'.
-   # Deriving at m/44'/60' yields a valid address no channel was ever opened
-   # against, and a node that cannot resolve a single one.
-   #   ...derive it, then:
-   # printf '%s' "<64 hex chars>" > settlement.key
-
-   chmod 600 signer.key settlement.key
-   sudo chown 10001:10001 signer.key settlement.key   # the image runs as uid 10001
-   ```
-
-   Verify the derived settlement address **before** the first `up -d`. Both
-   files are gitignored (`deploy/*.key`).
-
-   > A bind-mounted file keeps its **host** ownership inside the container, so a
-   > root-owned `0600` key is unreadable to uid 10001 and the container
-   > restart-loops on "Permission denied". The `chown` is the fix — do not reach
-   > for `chmod 644`.
-
-2. **Set the store's identity + wallet.**
-
-   ```bash
-   cp .env.example .env
-   # STORE_NOSTR_SECRET_KEY is REQUIRED (the store won't boot without it):
-   #   openssl rand -hex 32   → paste into STORE_NOSTR_SECRET_KEY
-   # STORE_ARWEAVE_JWK_B64 is optional (empty → ephemeral free-tier, ≤100KB uploads).
-   #
-   # The kind:5095/5096/5098 jobs (ArNS buy, Solana gas station, EVM gas
-   # station) are OPTIONAL and OFF by default. Setting their variables in
-   # this .env (see .env.example's "Optional jobs" section) is the ONLY edit
-   # needed to enable one — docker-compose.yml passes all of them through
-   # already, so there is no docker-compose.yml line to uncomment.
-   ```
-
-3. **Bring it up.**
-
-   ```bash
-   docker compose up --build -d      # builds store-connector locally; pulls the store app image
-   docker compose ps                 # only :3000 (edge) is host-bound, on EDGE_BIND (default 127.0.0.1)
-   docker compose logs -f connector  # watch it load the routes + connect to settlement
-   ```
-
-   Production: pin `STORE_CONNECTOR_IMAGE` to a published tag and run
-   `docker compose up -d` (no `--build`).
-
-   **Startup is fail-closed.** A missing key file, an unwritable `/app/state`, or
-   a settlement registry that will not resolve the token is `exit 1` with the
-   reason — never a degraded run. If the connector exits immediately, the log
-   line names which of those it was.
-
-## Verify the paid round-trip
-
-Use the connector repo's store acceptance probe against this compose (run from
-the **connector repo root** — it needs the repo + native `libsql`):
+**1. Clone and configure.**
 
 ```bash
-CONNECTOR_ILP_URL=http://localhost:3000/ilp \
-EVM_RPC_URL=https://evm-rpc.devnet.toonprotocol.dev \
-FAUCET_URL=https://faucet.devnet.toonprotocol.dev \
-STORE_PROBE_URL=http://localhost:3300/store \
-  npx ts-node --project packages/connector/tsconfig.json \
-    scripts/app/ci-acceptance-probe-store.ts
+git clone https://github.com/toon-protocol/store /root/store
+cd /root/store/deploy
+cp .env.example .env
+$EDITOR .env          # every variable is documented in the file
 ```
 
-It funds a fresh wallet from the devnet faucet, opens an on-chain USDC channel
-toward the connector, signs a per-packet claim, and asserts: a paid `POST /ilp`
-carrying a signed kind:5094 event → FULFILL whose body is the store's
-`{ txId }`; an unpaid `POST /ilp` → REJECT; and the store backend (`:3300`) is
-NOT publicly reachable. The ephemeral free-tier returns a real Arweave tx id for
-≤100KB blobs without a funded wallet. (Against a public edge, point the URLs at
-the env's HTTPS hostnames instead of `localhost`.)
+**2. Generate the key material.** Four files, all `0600`, none of them ever
+committed:
 
-## Migrating from `3.28.0`
+```bash
+openssl rand -hex 32 > signer.key             # this node's ILP identity
+openssl rand -hex 32 > settlement.key         # the EVM settlement key
+openssl rand -hex 32 > settlement-solana.key  # the Solana settlement key
+openssl rand -hex 32 > apex-store.secret      # the shared secret for the relay peering
+chmod 600 *.key *.secret
+```
 
-If you have an existing `.env` and a running stack, these are the breaking
-differences. None of them fail quietly — a leftover YAML-ism is a config-load
-error by name, because the TOML parser is `deny_unknown_fields`.
+The signer key is the identity `GET /ilp/identity` answers with and that every
+client seals its packets to. Changing it makes this node a different node.
 
-| was                                                | now                                                               |
-| -------------------------------------------------- | ----------------------------------------------------------------- |
-| `deploy/connector.yaml`                            | `deploy/connector.toml` — a different config language             |
-| `CONNECTOR_TAG=3.28.0`                             | `CONNECTOR_TAG=rust-sha-…`; a semver tag is the retired node      |
-| `TOON_MNEMONIC` derives the settlement key at boot | derive it yourself; mount `settlement.key`                        |
-| `CONFIG_FILE=/app/config/connector.yaml`           | nothing — the image's `CMD` already names the path                |
-| `NODE_TLS_REJECT_UNAUTHORIZED=0`                   | no equivalent; use an RPC with a real chain of trust              |
-| connector health `:8080`, admin `:8081`            | one port: `:3000` carries the edge, the operator surface, metrics |
-| route prefix `g.proxy.store`                       | `g.toon.ario`, the one route the live box terminates              |
-| `selfAnnounce` block (kind:10032)                  | **no always-on equivalent — see below**                           |
-| an outbound `g.proxy.relay` forward route          | gone — it existed only to carry the announce                      |
-| replay watermarks lived in process memory          | `state_dir = "/app/state"`, on a named volume                     |
+**3. Bring it up.**
 
-That last row is the one worth dwelling on: without a durable claim journal, a
-restart resets every channel's replay watermark, a channel with no watermark
-accepts any nonce, and every claim a payer already spent becomes free service
-again (connector#605). That is why `docker-compose.yml` gained a
-`connector_state` named volume.
+```bash
+./bootstrap.sh
+```
 
-### The kind:10032 self-announce did not survive as an always-on timer
+That renders the config, starts the six containers, and requests a
+certificate. It is idempotent — re-run it to reconcile a box.
 
-The old `connector.yaml` carried a `selfAnnounce` block, and on this box it was
-the interesting one: because the store box does not front a relay, its announce
-took the **remote/paid** branch — it paid the node behind the `g.proxy.relay`
-route in the table above over its own settlement channel, on every refresh, to
-publish its own `kind:10032` peer info
-([store#22](https://github.com/toon-protocol/store/issues/22),
-[relay#37](https://github.com/toon-protocol/relay/issues/37)). That is where the
-`announcePrice = 2000` figure came from, and why that outbound forward route
-existed at all.
+**4. Go to production TLS.** `bootstrap.sh` starts on Let's Encrypt *staging*
+so a DNS mistake does not burn the real rate limit. Once
+`https://dvm.<domain>/health` answers (with a certificate warning), set
+`LETSENCRYPT_STAGING=0` in `.env` and re-run `./init-letsencrypt.sh`.
 
-That specific shape is gone for good: there is no config field that makes the
-Rust connector pay a refresh on a timer, so this bundle's `connector.toml`
-carries no forward route and no `announcePrice` to carry it. What replaced it
-is not "nothing" but a different verb: the Rust connector has an `[announce]`
-config section and a one-shot `connector announce` operator command (see the
-pinned tag's `docs/operators/announcing-a-node.md` in the connector repo) that
-publishes a single `kind:10032` event, paid for out of this node's own
-`[settlement.evm]` identity like any other client write. This bundle's
-`connector.toml` doesn't configure `[announce]`, so out of the box this store
-still publishes nothing — but the reason is "not wired up here," not "the
-connector cannot do it." On the TOON devnet's two-node fleet
-(`docs/two-node-architecture.md` §2b.4, toon-meta repo), this box buys its
-`kind:10032` publish from the relay box's client edge like any other client —
-no shared credential, no peering, no inter-node fee (connector#871) — rather
-than paying the node that forward route once pointed at, which is retired;
-either the sidecar or `connector announce` is a config/operator choice now, not
-a capability gap.
+## Checking it works
+
+```bash
+docker compose ps                                    # six services, store healthy
+curl https://dvm.<domain>/health                     # {"status":"ok","handlerKinds":[5094],...}
+curl https://proxy.ario.<domain>/ilp/identity        # the signer pubkey clients seal to
+docker compose logs announce --tail 20               # "[announce] OK -- g.toon.ario published"
+```
+
+To prove the paid path end to end, publish a blob with a TOON client pointed at
+`https://proxy.ario.<domain>/ilp`. The client pays 0.001 USDC, the connector
+settles it, and the store answers with an Arweave transaction id.
+
+## How updates arrive
+
+Nothing here is deployed by hand. Watchtower polls once a minute and recreates
+a container when the tag it follows changes digest.
+
+| Container | Follows | Moves when |
+|---|---|---|
+| `store` | `ghcr.io/toon-protocol/store:release` | every green merge to `main` in this repo |
+| `connector`, `announce` | `ghcr.io/toon-protocol/connector:rust-release` | a **supervised promotion** in the connector repo, never automatically |
+
+The difference is deliberate. The store's own image is this repo's to move; the
+connector's is the fleet's, and auto-moving it on green main once pushed
+unvalidated builds to two live boxes in about sixty seconds.
+
+`nginx` and `certbot` deliberately carry no Watchtower label. nginx holds the
+resolver that lets every other container survive being recreated at a new
+address, and certbot holds the renewal timer; neither should change because
+an upstream base image was pushed.
+
+**To roll back**, pin the immutable tag and bring it up:
+
+```bash
+docker compose up -d --no-deps \
+  -e STORE_IMAGE=ghcr.io/toon-protocol/store:sha-<known-good> store
+```
+
+Every superseded build stays pullable from GHCR by its own `sha-` /
+`rust-sha-` tag.
+
+**Config changes need a restart.** The connector reads `connector.toml` once at
+startup and holds it for the process lifetime — a bind mount is not a reload,
+and there is no environment-variable layer. After editing:
+
+```bash
+./render.sh && docker compose restart connector announce
+```
+
+The two must restart together: they share one config file and one binary
+version, and the parser rejects unknown keys, so a newer config against an
+older binary is a refuse-to-start.
+
+## Make it yours
+
+Most of `connector.toml.template` describes any app behind any connector. The
+part that is specific to the TOON devnet is fenced under **"THIS DEPLOYMENT"**
+at the bottom of the file — the relay peering, its payment channel, and the
+announce. Replace that block, then change three things above it:
+
+```toml
+[[routes]]
+prefix      = "g.example.myapp"          # the ILP address clients pay
+handler_url = "http://myapp:8080/jobs"   # your backend; the path is literal
+price       = 1000                       # smallest unit of the settlement token
+```
+
+Point `docker-compose.yml`'s `store` service at your own image, keep the
+health endpoint so compose can tell when it is ready, and the rest of this
+directory works unchanged.
 
 ## Privacy invariant
 
-- **store `:3300` (store job backend) is never host-published** — the only way in
-  is a paid `POST /ilp` to the connector. Enforcement is by construction
-  (`expose`, not `ports`).
-- **store `:3400` (health) is never host-published.**
-- **The connector publishes exactly one port, `:3000`.** There is no separate
-  health or admin port to leak. The operator surface that shares `:3000` is
-  omitted from `connector.toml` entirely, so there is nothing there to
-  authenticate against — read that file's `[operator]` comment before enabling it
-  on a **baked** config.
-- The only host-bound port is the edge **`:3000`** — fronted by the
-  environment's TLS terminator, and bound to a host interface (`EDGE_BIND`,
-  default `127.0.0.1`), never a bare `0.0.0.0`.
+The store backend is **payment-oblivious**: by the time a request reaches
+`POST /store` the payment is already proven, and the backend contains no ILP,
+claim or settlement logic. It never sees a payer's channel, balance or claim
+history. Keep it that way — that separation is what lets the store be
+restarted, rebuilt and rolled back without touching anything that holds money.
 
-### ⚠ `docker compose`'s `ports:` bypasses ufw
+### `ports:` bypasses ufw
 
-Docker manages its own iptables/nftables rules ahead of ufw's, so a service
-published via `ports:` is reachable from the internet **regardless of what
-`ufw status` shows** — an `ufw` rule that only allows loopback traffic does
-**not** make a `ports:`-published container private. This bundle keeps every
-published port host-IP-prefixed (`${EDGE_BIND:-127.0.0.1}:${EDGE_PORT:-3000}:3000`)
-so the edge is reachable only through this box's own reverse proxy, not by
-relying on the firewall to hide a `0.0.0.0` bind. `src/deploy-bundle-guard.test.ts`
-fails CI if a `ports:` entry ever goes back to a bare port.
+Docker manages its own iptables rules ahead of ufw's, so a container published
+with `ports:` is reachable from the internet **regardless of what `ufw status`
+shows**. A ufw rule allowing only loopback does **not** make a
+`ports:`-published container private.
+
+This bundle therefore keeps every published port host-IP-prefixed — the
+connector is `127.0.0.1:4000:4000`, and the store publishes nothing at all —
+so the paid edge is reachable only through this box's own reverse proxy rather
+than by trusting the firewall to hide a `0.0.0.0` bind.
+`src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
+
+## When the fleet moves past this tag
+
+`connector.toml.template` is written for `:rust-release` as promoted today.
+Two things change when the fleet promotes past connector#1165 and #1017, and
+both are refuse-to-start failures if they land in the wrong order:
+
+| Now | After |
+|---|---|
+| `[announce]` section + the `announce` container | `[node]` section; delete the container — the one-shot `connector announce` verb is gone and `GET /ilp` serves the self-description |
+| `[operator] bearer_token` / `write_keys` inline | `bearer_token_file` / `write_keys_file` pointing at mounted files |
+
+Land the config first, then move the tag. `src/deploy-bundle-guard.test.ts`
+asserts the current shape, so flip those two assertions in the same commit and
+CI will tell you if the bundle and the tag ever disagree.

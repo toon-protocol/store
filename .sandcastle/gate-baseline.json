@@ -9,11 +9,12 @@
     "ciRunEvent": "push"
   },
   "gateDefinition": {
-    "description": "typecheck / test / build, run as the single 'build' job in .github/workflows/ci.yml. store has NO eslint config, so there is no lint step in the gate (see CLAUDE.md / toon-meta#210).",
+    "description": "build / typecheck / lint / test, run in parallel as the single \"build\" job in .github/workflows/ci.yml, followed by the gate no-regression guard.",
     "steps": [
       "pnpm install --frozen-lockfile",
       "pnpm build",
       "pnpm typecheck",
+      "pnpm lint",
       "pnpm test"
     ]
   },
@@ -30,7 +31,7 @@
       "pnpm_test": 5
     },
     "fullWorkflowRunWallClockSeconds": 63,
-    "note": "fullWorkflowRunWallClockSeconds also includes the parallel, non-gate 'Devbox Environment Validation' job (devbox-validate); the gate itself is the 'build' job only."
+    "note": "fullWorkflowRunWallClockSeconds also includes the parallel, non-gate 'Devbox Environment Validation' job (devbox-validate); the gate itself is the 'build' job only. NOTE: captured 2026-07-22 against a gate that did not yet include `pnpm lint`; the lint step runs in parallel with the other three, so the wall-clock baseline is still the right thing to guard against."
   },
   "gatePerformance": {
     "runnerMinutesBilled": {
@@ -50,7 +51,7 @@
       }
     },
     "cacheHitRate": {
-      "value": 1.0,
+      "value": 1,
       "sampleSize": 10,
       "hits": 10,
       "method": "actions/setup-node@v4's built-in pnpm store cache. Checked the last 10 ci.yml 'build' job logs (`gh run view --job=<id> --log | grep 'Cache hit occurred'`) — all 10 hit the cache keyed on pnpm-lock.yaml."
@@ -58,20 +59,20 @@
   },
   "gateCorrectness": {
     "lint": {
-      "applicable": false,
-      "warnings": null,
-      "errors": null,
-      "note": "store has no eslint config today (toon-meta#210 repo-specific note: 'store — add the missing eslint config'). Adding that config is a separate, later child of this epic, not this baseline-capture issue."
+      "applicable": true,
+      "errors": 0,
+      "warnings": 5,
+      "note": "eslint.config.js exists and ci.yml runs `pnpm lint` as one of the four parallel gate steps. The 5 warnings are @typescript-eslint/no-non-null-assertion in test files, which the config deliberately relaxes from error to warn for **/*.test.ts. Refreshed locally; the speed figures above are still from the captured CI run and were NOT re-measured."
     },
     "typecheck": {
       "errors": 0,
-      "method": "pnpm run typecheck (tsc --noEmit) on commit 0f45a45 — clean, matches the repo's documented '0 typecheck debt'."
+      "method": "pnpm run typecheck (tsc --noEmit) — clean."
     },
     "test": {
-      "passed": 73,
+      "passed": 160,
       "failed": 0,
-      "files": 4,
-      "method": "pnpm test (vitest run) on commit 0f45a45."
+      "files": 8,
+      "method": "pnpm test (vitest run), refreshed after the sdk 3.3 / core 3.5 upgrade."
     }
   },
   "reproductionMethod": {

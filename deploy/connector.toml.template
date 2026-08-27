@@ -1,0 +1,153 @@
+# =============================================================================
+# Connector config for the TOON store box — rendered by ./render.sh
+# =============================================================================
+# The connector is the payment proxy in front of the store. It meters and
+# settles the payment, then reverse-proxies the job to the store over plain
+# HTTP. Everything the connector needs is in this one file.
+#
+# Three rules the parser enforces, worth knowing before you edit:
+#
+#   * One TOML file, read once at startup, immutable for the process
+#     lifetime. There is NO environment-variable layer — the only variable the
+#     connector reads is RUST_LOG. Editing this file does nothing until the
+#     container restarts (a bind mount is not a reload).
+#   * Unknown keys are a hard startup failure, and removed keys are refused by
+#     name. That is the behaviour you want — a stale config says so at boot
+#     instead of quietly doing nothing — but it means a config change and a
+#     connector upgrade must land in the right order. Land config first.
+#   * Every key that carries a secret is a PATH, never the value. The one
+#     exception is [operator] below, and that is a limitation of the pinned
+#     connector rather than a preference.
+#
+# ── This file targets `:rust-release` ────────────────────────────────────────
+# `docker-compose.yml` pins the connector to the fleet's promotion tag
+# `:rust-release`. Two keys here are written the way THAT build wants them,
+# and both change when the fleet promotes past connector#1165 / #1017:
+#
+#     [announce]        -> becomes [node], and the announce sidecar is deleted
+#                          (the one-shot `connector announce` verb is gone;
+#                          `GET /ilp` serves the self-description instead)
+#     [operator]        -> bearer_token / write_keys become
+#                          bearer_token_file / write_keys_file
+#
+# deploy/README.md § "When the fleet moves past this tag" has the full
+# checklist. src/deploy-bundle-guard.test.ts asserts the current shape, so CI
+# tells you if this file and that tag ever disagree.
+# =============================================================================
+
+# The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
+# share this port. Bound to 0.0.0.0 INSIDE the container only — docker-compose
+# publishes it on 127.0.0.1, and nginx is what faces the internet.
+client_edge_addr = "0.0.0.0:4000"
+
+# Where this node records which claims it has already been paid. This MUST be a
+# mounted volume: a watermark that dies with the container hands every payer
+# their spent claims back as free service.
+state_dir = "/app/state"
+
+# Expose the peer wire over BTP (websocket), which is what the relay box dials.
+peer_expose = "btp"
+
+# This node's signing identity. `GET /ilp/identity` answers with this key, and
+# every gift-wrapped packet is sealed to it.
+[signer]
+key_file = "/app/data/signer.key"
+
+
+# ── What this node sells ─────────────────────────────────────────────────────
+# One route per thing you serve. Longest matching prefix wins.
+#
+# `handler_url` is a RouteTermination: a paid packet for this prefix is
+# delivered as a plain HTTP POST to that exact URL. The `/store` suffix is
+# load-bearing — the store's backend serves POST /store, and a bare
+# `http://store:3300` comes back as F99 "app declined the delivery with HTTP
+# 404".
+#
+# `price` is a whole number of the SMALLEST UNIT of the settlement token, the
+# way a card terminal counts in cents. USDC has 6 decimals, so:
+#
+#     price = 1000       0.001 USDC     a tenth of a cent   <- this route
+#     price = 100000     0.10  USDC     ten cents
+#     price = 1000000    1.00  USDC     one dollar
+#
+# This is the seam to copy for your own app: point handler_url at your
+# backend, pick your prefix, pick your price.
+[[routes]]
+prefix      = "g.toon.ario"
+handler_url = "http://store:3300/store"
+price       = 1000
+
+
+# ── Getting paid ─────────────────────────────────────────────────────────────
+# Settlement is per-chain. A client pays in whichever of these it holds; the
+# connector verifies the claim against the chain named here.
+
+[settlement.evm]
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"  # TokenNetworkRegistry
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # USDC (6dp)
+decimals         = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"   # mock USDC (6dp)
+decimals      = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# Gates /metrics and the redeem endpoints. Without this section they are not
+# mounted at all (404, not 401) — which also means no way to redeem what you
+# have earned, so it is not optional in practice.
+#
+# On the pinned tag these are INLINE values, so the rendered connector.toml is
+# a secret: render.sh writes it 0600 and .gitignore keeps it out of git. Only
+# the template is committed. (On a newer connector they become *_file keys and
+# this stops being true.)
+[operator]
+bearer_token = "${OPERATOR_BEARER_TOKEN}"
+write_keys   = ["${OPERATOR_WRITE_KEY}"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# THIS DEPLOYMENT — the TOON devnet store box
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything above describes any store behind any connector. Everything below
+# is specific to this box's place in the TOON devnet, and is what you replace
+# when you stand up your own. See deploy/README.md § "Make it yours".
+
+# The relay box. The two boxes peer over one BTP session and carry traffic for
+# each other; this is the store box's half of that arrangement.
+[[peers]]
+id         = "apex-store"
+credential = { secret_file = "/app/data/apex-store.secret" }
+
+# The payment channel backing that peering, on Base Sepolia.
+[[peer_channels]]
+peer_id          = "apex-store"
+channel_id       = "0x0bfd0b88614d55e2c5cb633d15f849ef5fdc4d7bb02ca989e7afade642186b1a"
+counterparty_key = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF"
+chain_id         = 84532
+token_network    = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
+
+# The kind:10032 self-announce: how a client DISCOVERS that g.toon.ario exists,
+# what it costs, and which identity to seal to. Published through the relay
+# box, which is the fleet's write ingress, and paid for out of `pay_channel`.
+# The `announce` service in docker-compose.yml is what actually publishes it.
+[announce]
+addresses       = ["g.toon.ario"]
+http_endpoint   = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
+btp_endpoint    = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
+publish_to      = "g.toon.relay"
+publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+pay_channel     = "0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d"
+notice_id       = "2026-08-13-two-box-cutover"
+notice_severity = "action-required"
+notice_summary  = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
+notice_url      = "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md"
