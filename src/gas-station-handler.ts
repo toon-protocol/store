@@ -74,7 +74,6 @@ import {
   getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
-  getTransactionEncoder,
   signBytes,
 } from '@solana/kit';
 import type {

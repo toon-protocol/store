@@ -1,143 +1,87 @@
-# TOON store Container (esbuild-bundled Multi-Stage Build)
+# =============================================================================
+# TOON store — NIP-90 kind:5094 Arweave blob storage
+# =============================================================================
+# A payment-oblivious HTTP backend. It listens on 3300 for POST /store, uploads
+# the blob to Arweave via Turbo, and answers with the transaction id. The
+# connector runs in FRONT of it as the payment proxy and reverse-proxies to it
+# (RouteTermination); this process contains no ILP or payment logic at all.
 #
-# Purpose:
-#   Production-grade Arweave-only blob storage (NIP-90 kind:5094), the "store".
-#   Uploads the blob to Arweave via Turbo and returns the tx id. Built over
-#   src/entrypoint-store.ts, which wraps @toon-protocol/sdk's
-#   createArweaveDvmHandler and serves the payment-oblivious POST /store backend
-#   (3300). The connector runs in FRONT as the payment proxy and reverse-proxies
-#   to it (RouteTermination); this process has no ILP/connector logic.
+#   3300 — POST /store, the job backend the connector proxies to
+#   3400 — health endpoint (Hono)
 #
-# Layout note:
-#   This image is built against the carved single-package `store` repo
-#   (NOT the old pnpm monorepo). The repo root has src/, package.json,
-#   esbuild.config.mjs, tsconfig.json — there is NO packages/ or docker/ dir.
-#   Deps are consumed from npm (pinned semver), not workspace links.
+# Build from the repo root:
+#   docker build -f Dockerfile.store -t ghcr.io/toon-protocol/store:dev .
 #
-# Build from repo root:
-#   docker build -f Dockerfile.store -t ghcr.io/toon-protocol/store:latest .
-#
-# Ports:
-#   3300 - HTTP job port (http mode: POST /store; standalone: HTTP ILP handler)
-#   3400 - BLS / health endpoint (Hono)
+# ── One source of truth for versions ─────────────────────────────────────────
+# The runtime stage installs the production dependency closure straight from
+# package.json + pnpm-lock.yaml. It does not hand-copy module trees and does
+# not re-pin any package, so a dependency's version is written down exactly
+# once, in package.json, and `pnpm install` is what keeps the lockfile honest.
+# esbuild bundles src/ ONLY (`packages: 'external'`), so every dependency —
+# including the ones reached through a dynamic or variable import
+# (@ardrive/turbo-sdk, arweave, @ar.io/sdk, @solana/kit) — resolves from that
+# installed node_modules at runtime.
+# =============================================================================
 
-# -- Stage 1: Builder -------------------------------------------------------
-FROM node:20-alpine AS builder
+# -- Stage 1: build the bundle ------------------------------------------------
+FROM node:22-alpine AS builder
 
-LABEL maintainer="toon-protocol"
-LABEL description="TOON store - Arweave-only blob storage (NIP-90 kind:5094)"
+WORKDIR /app
 
-# Pin pnpm to match the repo's packageManager / lockfileVersion 6.0.
 RUN corepack enable && corepack prepare pnpm@8.15.9 --activate
 
-WORKDIR /app
-
-# Dependency manifests first (cache-friendly). Single package — no workspace
-# manifests to enumerate.
+# Manifests first, so a source-only change reuses the install layer.
 COPY package.json pnpm-lock.yaml ./
-
-# Install all deps (incl. devDeps: esbuild, typescript needed for the bundle).
-# The native runtime deps (@libsql/client, libsql, @ardrive/turbo-sdk) are
-# installed fresh in the assembly step below.
 RUN pnpm install --frozen-lockfile
 
-# Source + build config.
 COPY tsconfig.json esbuild.config.mjs ./
 COPY src/ ./src/
-
-# Bundle the entrypoints via the repo's own esbuild config. This emits
-# dist/entrypoint-store.js (ESM, minified) alongside the sdk/attestation
-# bundles; only the store bundle is shipped to the runtime stage. esbuild
-# externalizes native + dynamic-require deps (better-sqlite3, ethers, express,
-# @ardrive/turbo-sdk, arweave, @solana/kit, @solana-program/token, fastify,
-# @noble/curves, etc.) — see esbuild.config.mjs.
 RUN pnpm build
 
-# -- Assemble minimal runtime directory --------------------------------------
-RUN mkdir -p /runtime/node_modules
-
-# esbuild bundle (entrypoint-store.js) + ESM marker so the import.meta.url banner
-# (createRequire) resolves.
-RUN cp dist/entrypoint-store.js /runtime/ && \
-    echo '{"type":"module"}' > /runtime/package.json
-
-# Cherry-pick the remaining esbuild --external:* modules that the store bundle
-# can reach at runtime, resolved from pnpm's hoist trees. ethers/express are
-# the connector's dynamic-require HTTP/RPC plumbing; @solana/* come in
-# transitively from the sdk; fastify/@fastify/cors/@noble/curves/nostr-tools
-# back the bundle's externalized imports. Each pnpm hoist dir carries its own
-# transitive deps as siblings, so copying the hoist tree is sufficient.
-RUN set -eux; \
-    mkdir -p /runtime/node_modules; \
-    for pkg in ethers express fastify nostr-tools; do \
-      for hoist in $(ls -d node_modules/.pnpm/${pkg}@*/node_modules 2>/dev/null); do \
-        cp -rL "$hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
-      done; \
-    done; \
-    fcors_hoist=$(ls -d node_modules/.pnpm/@fastify+cors@*/node_modules 2>/dev/null | head -1); \
-    [ -n "$fcors_hoist" ] && cp -rL "$fcors_hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
-    noble_hoist=$(ls -d node_modules/.pnpm/@noble+curves@*/node_modules 2>/dev/null | head -1); \
-    [ -n "$noble_hoist" ] && cp -rL "$noble_hoist"/. /runtime/node_modules/ 2>/dev/null || true; \
-    # @solana v3 packages (transitive from sdk) + @solana-program/token
-    for store_dir in $(ls -d node_modules/.pnpm/@solana+*@3.0.*/node_modules 2>/dev/null); do \
-      cp -rL "$store_dir"/. /runtime/node_modules/ 2>/dev/null || true; \
-    done; \
-    sol_hoist=$(ls -d node_modules/.pnpm/@solana-program+token@*/node_modules 2>/dev/null | head -1); \
-    [ -n "$sol_hoist" ] && cp -rL "$sol_hoist"/. /runtime/node_modules/ 2>/dev/null || true
-
-# @libsql/client + libsql (connector >=3.8 moved its local settlement/claim
-# store off better-sqlite3 to libsql, lazy-required at runtime) and
-# @ardrive/turbo-sdk + arweave (the Arweave upload SDK, externalized in
-# esbuild and lazy-imported by createTurboAdapter). Also @ar.io/sdk +
-# @solana/kit — the OPTIONAL kind:5095 ArNS-buy runtime deps, externalized in
-# esbuild and lazy-imported via a variable specifier by src/arns-buy-handler.ts
-# (without these the handler registers but every buy fails `arns_sdk_unavailable`).
-# Install the WHOLE closure at a self-consistent version set via npm (robust
-# native-binding + transitive resolution), then flatten into /runtime. libsql
-# ships a prebuilt linux-x64-musl NAPI binding for node:20-alpine.
-RUN cd /tmp && npm init -y >/dev/null 2>&1 && \
-    npm install --omit=dev \
-      @libsql/client@0.14.0 \
-      libsql@0.4.7 \
-      @ardrive/turbo-sdk@1.40.2 \
-      arweave@1.15.5 \
-      @ar.io/sdk@4.0.3 \
-      @solana/kit@6.10.0 && \
-    cp -rL /tmp/node_modules/. /runtime/node_modules/ && \
-    find /runtime/node_modules -name '*.d.ts' -delete && \
-    find /runtime/node_modules -name '*.d.ts.map' -delete && \
-    find /runtime/node_modules -name '*.js.map' -delete && \
-    rm -rf /tmp/node_modules /tmp/package.json /tmp/package-lock.json
-
-# -- Stage 2: Runtime --------------------------------------------------------
-FROM node:20-alpine
-
-# Runtime support for native modules (libsql links libstdc++).
-RUN apk add --no-cache libstdc++
+# -- Stage 2: production dependency closure -----------------------------------
+FROM node:22-alpine AS deps
 
 WORKDIR /app
 
-# Non-root user, created before copying files.
+RUN corepack enable && corepack prepare pnpm@8.15.9 --activate
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --prod --frozen-lockfile --node-linker=hoisted
+
+# Strip what only a compiler or a human reads. Type declarations, source maps
+# and package docs are a large share of the installed tree and nothing at
+# runtime opens them. Files ONLY -- directory names like test/ and examples/
+# are real source in some packages (viem ships actions/test/), so pruning by
+# directory name silently breaks module resolution at boot.
+RUN find node_modules -type f \( -name "*.d.ts" -o -name "*.d.mts" -o -name "*.d.cts" \
+      -o -name "*.map" -o -name "*.md" -o -name "*.markdown" \) -delete
+
+# -- Stage 3: runtime ---------------------------------------------------------
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Non-root user, created before anything is copied in.
 RUN addgroup -g 1001 toon && \
     adduser -D -u 1001 -G toon toon && \
     mkdir -p /data && \
     chown toon:toon /data
 
-# Minimal runtime from the builder stage.
-COPY --from=builder --chown=toon:toon /runtime ./
+COPY --from=deps --chown=toon:toon /app/node_modules ./node_modules
+COPY --from=builder --chown=toon:toon /app/dist/entrypoint-store.js ./entrypoint-store.js
+
+# The bundle is ESM.
+RUN echo '{"type":"module"}' > /app/package.json && chown toon:toon /app/package.json
 
 ENV NODE_ENV=production
 ENV BLS_PORT=3400
 ENV HANDLER_PORT=3300
 
-# 3300 - HTTP ILP handler (connector free-forwards paid packets here)
-# 3400 - BLS / health endpoint
 EXPOSE 3300 3400
 
-# Persistent data (connector local store).
+# Arweave key material / working data.
 VOLUME /data
 
-# Health check targets the BLS port (3400).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD wget -q --spider http://localhost:${BLS_PORT}/health || exit 1
 

@@ -81,7 +81,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
 import { getAddress, isAddress } from 'ethers';
-import type { DvmHealthResponse } from '@toon-protocol/sdk';
+import type { StoreHealthResponse } from '@toon-protocol/sdk';
 import {
   createArweaveDvmHandler,
   type ArweaveDvmConfig,
@@ -132,7 +132,7 @@ export function createJobCounter(windowMs: number = 5 * 60 * 1000): JobCounter {
 
   function evict() {
     const cutoff = Date.now() - windowMs;
-    while (events.length > 0 && events[0]!.ts < cutoff) {
+    for (let head = events[0]; head !== undefined && head.ts < cutoff; head = events[0]) {
       events.shift();
     }
   }
@@ -219,10 +219,6 @@ export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
   legacyToken: string | undefined
 ): Promise<CreateTurboAdapterResult> {
-  // @ts-ignore — @ardrive/turbo-sdk is a transitive peer dep; under pnpm's strict
-  // node_modules layout it is not hoisted, so its types are not resolvable here.
-  // Use @ts-ignore (not @ts-expect-error) so this stays silent whether or not the
-  // package happens to be hoisted in a given install layout.
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
   // Treat an empty OR whitespace-only env var as ABSENT, not "present but
@@ -451,7 +447,9 @@ export function applyEnvOverlay(cfg: StoreConfig): StoreConfig {
   for (const [key, value] of Object.entries(env)) {
     const match = kindPricingPattern.exec(key);
     if (!match || value === undefined) continue;
-    const kind = parseInt(match[1]!, 10);
+    const rawKind = match[1];
+    if (rawKind === undefined) continue;
+    const kind = parseInt(rawKind, 10);
     if (!Number.isFinite(kind)) continue;
     try {
       const price = BigInt(value);
@@ -852,7 +850,7 @@ async function main(): Promise<void> {
 
   const blsApp = new Hono();
   blsApp.get('/health', (c) => {
-    const health: DvmHealthResponse = {
+    const health: StoreHealthResponse = {
       status: 'ok',
       version: '1.0.0',
       nodePubkey: safePubkey,
