@@ -38,10 +38,20 @@ const renderedConnectorToml = Object.entries(RENDER_SUBSTITUTIONS).reduce(
 /** A price is either a flat integer or a `{ base, per_kib }` schedule (ADR 0065). */
 type ConnectorPrice = number | { base: number; per_kib: number };
 
+/** A route is a prefix plus EXACTLY ONE of handler_url (terminate) or peer_id
+ *  (forward), and a price is required on both branches. */
 interface ConnectorRoute {
   prefix: string;
-  handler_url: string;
+  handler_url?: string;
+  peer_id?: string;
   price: ConnectorPrice;
+}
+
+interface ConnectorPeer {
+  id: string;
+  endpoint?: string;
+  max_packet_amount?: number;
+  fee?: number;
 }
 
 /** What a route charges for a packet with `payloadLen` bytes of payload. */
@@ -60,7 +70,9 @@ interface ConnectorToml {
   operator: Record<string, unknown>;
   node?: { addresses: string[]; http_endpoint: string; btp_endpoint: string };
   announce?: unknown;
-  peers?: unknown;
+  peers?: ConnectorPeer[];
+  peer_channels?: { peer_id: string; channel_id: string; counterparty_key: string }[];
+  pay_channels?: { peer_id: string; channel_id: string; client_edge_url: string }[];
 }
 
 const connectorToml = parse(renderedConnectorToml) as unknown as ConnectorToml;
@@ -151,7 +163,24 @@ const EXPECTED_ROUTE_PER_KIB = 10;
 // decision 2026-08-05 — one name for one app). The box terminates exactly this
 // one prefix; naming it as a literal means losing it, or silently regaining a
 // retired alias, fails by name instead of passing unnoticed.
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario'].sort();
+const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.relay'].sort();
+
+// The prefix this box terminates locally, and the one it forwards to its peer.
+const TERMINATED_PREFIX = 'g.toon.ario';
+const FORWARDED_PREFIX = 'g.toon.relay';
+
+// The relay charges 1 for g.toon.relay and this node retains its peering fee
+// of 1, so a client pays 2 at THIS edge (ADR 0028 — a forwarded route is
+// priced at the client edge). If the relay's price moves, this must too.
+const EXPECTED_RELAY_FEE = 1;
+const EXPECTED_FORWARDED_PRICE = 2;
+
+// One channel in both roles: judged against for what the relay sends, paid
+// from for what this node forwards. CF-22 permits exactly this, and the
+// channel is funded from both sides on Base Sepolia.
+const PEER_CHANNEL_ID =
+  '0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d';
+const RELAY_COUNTERPARTY_KEY = '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308';
 
 // The fleet's promotion tag. The store box follows the SAME moving tag the
 // rest of the fleet does, rather than an immutable `rust-sha-*` literal — the
@@ -178,18 +207,17 @@ describe('deploy/ bundle is internally consistent', () => {
   });
 
   it('prices the store route as a schedule over payload length', () => {
-    for (const route of connectorToml.routes) {
-      expect(
-        route.price,
-        `route "${route.prefix}" must price by size, not a flat figure`
-      ).toEqual({ base: EXPECTED_ROUTE_BASE, per_kib: EXPECTED_ROUTE_PER_KIB });
-    }
+    const terminated = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX);
+    expect(terminated?.price).toEqual({
+      base: EXPECTED_ROUTE_BASE,
+      per_kib: EXPECTED_ROUTE_PER_KIB,
+    });
   });
 
   it('charges more for a bigger upload', () => {
     // The whole point of the schedule. Guards against someone flattening it
     // back to an integer without noticing what it was for.
-    const price = connectorToml.routes[0]!.price;
+    const price = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX)!.price;
     expect(chargeFor(price, 1024)).toBeLessThan(chargeFor(price, 1024 * 1024));
     // base + per_kib * ceil(bytes/1024), rounded UP to the whole kibibyte
     expect(chargeFor(price, 1)).toBe(EXPECTED_ROUTE_BASE + EXPECTED_ROUTE_PER_KIB);
@@ -200,7 +228,9 @@ describe('deploy/ bundle is internally consistent', () => {
     // The connector POSTs to handler_url LITERALLY. A bare `http://store:3300`
     // reaches the backend and comes back F99 "app declined the delivery with
     // HTTP 404", because the backend serves POST /store.
-    for (const route of connectorToml.routes) {
+    const terminated = connectorToml.routes.filter((r) => r.handler_url !== undefined);
+    expect(terminated.length).toBeGreaterThan(0);
+    for (const route of terminated) {
       expect(
         route.handler_url,
         `route "${route.prefix}" handler_url must end in /store`
@@ -208,9 +238,22 @@ describe('deploy/ bundle is internally consistent', () => {
     }
   });
 
+  it('gives every route exactly one of handler_url or peer_id', () => {
+    for (const route of connectorToml.routes) {
+      const branches = [route.handler_url, route.peer_id].filter(
+        (b) => b !== undefined
+      );
+      expect(
+        branches.length,
+        `route "${route.prefix}" must have exactly one of handler_url / peer_id`
+      ).toBe(1);
+    }
+  });
+
   it('routes sharing a handler_url agree on price', () => {
     const priceByHandler = new Map<string, string>();
     for (const route of connectorToml.routes) {
+      if (route.handler_url === undefined) continue;
       const price = JSON.stringify(route.price);
       const seen = priceByHandler.get(route.handler_url);
       if (seen !== undefined) {
@@ -360,6 +403,46 @@ describe('deploy/ render.sh substitutes exactly what the templates need', () => 
   it('keeps the rendered connector.toml out of git', () => {
     // It carries the operator bearer token inline on this connector tag.
     expect(readRepoFile('deploy/.gitignore')).toMatch(/^connector\.toml$/m);
+  });
+});
+
+describe('deploy/ peers with the relay', () => {
+  it('declares the relay as a peer it can dial', () => {
+    const relay = connectorToml.peers?.find((p) => p.id === 'relay');
+    expect(relay, 'a [[peers]] row with id "relay" must exist').toBeDefined();
+    // The scheme selects the carriage; wss:// is BTP. A plaintext endpoint is
+    // refused outright by the connector (CF-18).
+    expect(relay?.endpoint).toMatch(/^wss:\/\//);
+    expect(relay?.fee).toBe(EXPECTED_RELAY_FEE);
+    // CF-19: a cap must be present and greater than zero — zero is not a
+    // smaller cap, it is a peering that can carry nothing.
+    expect(relay?.max_packet_amount ?? 0).toBeGreaterThan(0);
+  });
+
+  it('puts the relay in the routing table as a forwarded route', () => {
+    const forwarded = connectorToml.routes.find((r) => r.prefix === FORWARDED_PREFIX);
+    expect(forwarded, `a route for ${FORWARDED_PREFIX} must exist`).toBeDefined();
+    expect(forwarded?.peer_id).toBe('relay');
+    expect(forwarded?.handler_url).toBeUndefined();
+    // Priced at this client edge: the relay's own price plus our fee.
+    expect(forwarded?.price).toBe(EXPECTED_FORWARDED_PRICE);
+  });
+
+  it('binds the peering to a channel, not a shared secret', () => {
+    const bound = connectorToml.peer_channels?.find((c) => c.peer_id === 'relay');
+    expect(bound?.channel_id).toBe(PEER_CHANNEL_ID);
+    expect(bound?.counterparty_key.toLowerCase()).toBe(RELAY_COUNTERPARTY_KEY);
+  });
+
+  it('covers what it forwards with a claim on that same channel', () => {
+    // CF-22 permits one channel in both roles, and that is the deployed shape
+    // here. If these two ever name different channels it is deliberate, and
+    // this assertion is the place to say so.
+    const pay = connectorToml.pay_channels?.find((c) => c.peer_id === 'relay');
+    expect(pay?.channel_id).toBe(PEER_CHANNEL_ID);
+    // Where the covering claims are presented. The relay exposes no peer
+    // carriage, so this node pays it as an ordinary client.
+    expect(pay?.client_edge_url).toMatch(/^https:\/\//);
   });
 });
 

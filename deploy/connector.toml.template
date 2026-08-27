@@ -137,6 +137,68 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # for and the URLs it is reachable on — and is what you replace when you stand
 # up your own. See deploy/README.md § "Make it yours".
 
+# ── Peering with the relay box ───────────────────────────────────────────────
+# The relay is the fleet's write ingress. Peering with it puts `g.toon.relay`
+# in this node's routing table, so a client already connected here can pay
+# THIS edge to reach it instead of opening a second channel of its own.
+#
+# `endpoint`'s scheme selects the carriage — `wss://` is BTP. A row with no
+# endpoint would be accept-only; this one dials out.
+#
+# `max_packet_amount` is the cap: the largest amount forwarded to this peer in
+# one packet (ADR 0042). There is no "unbounded" spelling, deliberately, and
+# `0` is refused by name rather than read as "disabled".
+#
+# `fee` is what this connector retains for carrying one packet there (ADR
+# 0061). It attaches to the peering, not to a route, because carrying a packet
+# is the same work whichever prefix was addressed.
+[[peers]]
+id                = "relay"
+endpoint          = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+max_packet_amount = 100000
+fee               = 1
+
+# The channel the relay's claims are JUDGED against, and the key whose
+# signature is accepted on it. Nothing here authenticates the peering by a
+# shared string — ADR 0060 deleted that outright; the role is proved by this
+# binding plus a verified claim signature.
+[[peer_channels]]
+peer_id          = "relay"
+channel_id       = "0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d"
+counterparty_key = "0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308"
+chain_id         = 84532
+token_network    = "0xa79c3b1dbcea00a6d84735a134395d8ef6d6a478"
+
+# The channel this node PAYS FROM when it forwards to the relay: every
+# forwarded PREPARE carries a covering claim on it (ADR 0042). Deliberately
+# the SAME channel as the peer row above — CF-22 permits one channel in both
+# roles, the peer role judging what arrives and the pay role covering what
+# this node sends, and it is the deployed shape here: one hop, one channel,
+# funded from both sides.
+#
+# `client_edge_url` is where those claims are presented. The relay exposes no
+# peer carriage of its own, so this node pays it as an ordinary client — which
+# is what it already did to publish its announce.
+[[pay_channels]]
+peer_id         = "relay"
+channel_id      = "0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d"
+chain_id        = 84532
+token_network   = "0xa79c3b1dbcea00a6d84735a134395d8ef6d6a478"
+client_edge_url = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
+
+# The routing-table entry the peering exists for. A route is a prefix plus
+# EXACTLY ONE of `handler_url` (terminate here) or `peer_id` (forward there),
+# and a price is required on both branches.
+#
+# A forwarded route is priced at THIS client edge (ADR 0028): the relay
+# charges 1 for `g.toon.relay`, this node retains its `fee` of 1, so a client
+# pays 2 here. Longest prefix wins, so `g.toon.ario` above still terminates
+# locally and is unaffected.
+[[routes]]
+prefix  = "g.toon.relay"
+peer_id = "relay"
+price   = 2
+
 # What this node cannot introspect about itself: the addresses it answers for
 # and the public URLs it is reachable on. Clients read this back from
 # `GET /ilp` to discover the node.
