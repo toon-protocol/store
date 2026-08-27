@@ -1,12 +1,11 @@
 # =============================================================================
-# The TOON store box — one host, six containers
+# The TOON store box — one host, five containers
 # =============================================================================
 #   nginx      the public TLS edge (the only thing bound to a public port)
 #   connector  the payment proxy: meters + settles, then proxies to store
 #   store      the job backend: POST /store -> Arweave, payment-oblivious
-#   announce   publishes the kind:10032 self-announce so clients can find us
 #   certbot    renews the certificate
-#   watchtower recreates the three app containers when their tag moves
+#   watchtower recreates the two app containers when their tag moves
 #
 #   internet ──▶ nginx :443 ──┬──▶ connector :4000 ──▶ store :3300 ──▶ Arweave
 #                             └──▶ store :3400  (health)
@@ -31,7 +30,6 @@ services:
       - ./signer.key:/app/data/signer.key:ro
       - ./settlement.key:/app/data/settlement.key:ro
       - ./settlement-solana.key:/app/data/settlement-solana.key:ro
-      - ./apex-store.secret:/app/data/apex-store.secret:ro
       - connector_state:/app/state
     ports:
       - '127.0.0.1:4000:4000'
@@ -67,78 +65,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
-    restart: unless-stopped
-
-  # ── Discovery ──────────────────────────────────────────────────────────────
-  # `connector announce` is a ONE-SHOT: it negotiates, signs and PAYS for one
-  # write, then exits. `restart: unless-stopped` on the bare subcommand would
-  # re-run it the instant it exits — a tight loop paying for a fresh announce
-  # as fast as the container can restart. Hence the sleep loop.
-  #
-  # It probes the relay edge before publishing: a Watchtower recreate restarts
-  # this and the connector in the same sweep, and firing one publish into a
-  # still-booting edge used to take devnet discovery dark for a full refresh
-  # interval.
-  #
-  # Runs the SAME image and the SAME connector.toml as the connector — the two
-  # must move together, or the older binary refuses to load a config the newer
-  # one wrote. That is why both carry the Watchtower label.
-  announce:
-    image: ghcr.io/toon-protocol/connector:rust-release
-    labels:
-      com.centurylinklabs.watchtower.enable: 'true'
-    entrypoint: ['/bin/sh', '-c']
-    command:
-      - |
-        set -eu
-        THROUGH_URL="https://proxy.relay.devnet.toonprotocol.dev/ilp"
-        REFRESH_SECS="$${STORE_ANNOUNCE_REFRESH_SECS:-240}"
-        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
-        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
-        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
-        wait_for_edge() {
-          waited=0
-          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
-            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
-              echo "[announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
-              return 1
-            fi
-            echo "[announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
-            sleep "$$READY_POLL_SECS"
-            waited=$$((waited + READY_POLL_SECS))
-          done
-          return 0
-        }
-        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
-        while true; do
-          wait_for_edge || true
-          echo "[announce] publishing g.toon.ario via g.toon.relay..."
-          if /usr/local/bin/connector announce \
-            --config /app/config/connector.toml \
-            "$$THROUGH_URL"; then
-            echo "[announce] OK -- g.toon.ario published; next refresh in $${REFRESH_SECS}s"
-            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
-            SLEEP_SECS="$$REFRESH_SECS"
-          else
-            RC=$$?
-            echo "[announce] FAILED rc=$$RC -- g.toon.ario NOT published; retrying in $${BACKOFF_SECS}s"
-            SLEEP_SECS="$$BACKOFF_SECS"
-            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
-            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
-              BACKOFF_SECS="$$REFRESH_SECS"
-            fi
-          fi
-          sleep "$$SLEEP_SECS"
-        done
-    environment:
-      STORE_ANNOUNCE_REFRESH_SECS: '240'
-    volumes:
-      - ./connector.toml:/app/config/connector.toml:ro
-      - ./signer.key:/app/data/signer.key:ro
-      - ./settlement.key:/app/data/settlement.key:ro
-      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
-      - ./apex-store.secret:/app/data/apex-store.secret:ro
-      - announce_state:/app/state
     restart: unless-stopped
 
   # ── The TLS edge ───────────────────────────────────────────────────────────
@@ -189,7 +115,6 @@ volumes:
   # The claim watermark. Back this up; losing it hands every payer their
   # already-spent claims back as free service.
   connector_state:
-  announce_state:
   store_data:
   certbot_conf:
   certbot_www:

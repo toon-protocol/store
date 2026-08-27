@@ -21,25 +21,22 @@
 #
 # ── This file targets `:rust-release` ────────────────────────────────────────
 # `docker-compose.yml` pins the connector to the fleet's promotion tag
-# `:rust-release`. Two things here are written the way THAT build wants them,
-# and both are refuse-to-start failures on a newer connector (verified by
-# running this config against :rust-main):
+# `:rust-release`, which now carries ADR 0065 (a price is a schedule over
+# payload length) and ADR 0050/0060.
 #
-#     [[peers]] credential -> DELETED outright (ADR 0060). A peering is proven
-#                          by a verified claim on a [[peer_channels]] row, not
-#                          by a shared string. There is no replacement key.
-#     [announce]        -> becomes [node], keeping only addresses /
-#                          http_endpoint / btp_endpoint, and the announce
-#                          sidecar is deleted (ADR 0046 removed the verb;
-#                          `GET /ilp` serves the self-description instead)
+# What that means for this file, and why it looks the way it does:
 #
-# NOT breaking, though they read like it: [operator]'s inline bearer_token /
-# write_keys still work (the *_file variants are an addition), and `price` may
-# stay an integer (ADR 0065 adds `{ base, per_kib }` as an option).
+#   * `price` may be a `{ base, per_kib }` table. An older connector parses
+#     only a bare integer, so this file will NOT load on a build from before
+#     the promotion -- it is a TOML parse error, i.e. a refuse-to-start.
+#   * `[node]` replaced `[announce]`, and carries only the three keys below.
+#     The one-shot `connector announce` verb is gone (ADR 0046); `GET /ilp`
+#     serves the self-description instead, so there is no announce sidecar.
+#   * `[[peers]] credential` is deleted (ADR 0060). A peering is proven by a
+#     verified claim on a `[[peer_channels]]` row, not by a shared string.
 #
-# deploy/README.md § "When the fleet moves past this tag" has the full
-# checklist. src/deploy-bundle-guard.test.ts asserts the current shape, so CI
-# tells you if this file and that tag ever disagree.
+# deploy/README.md has the full record. src/deploy-bundle-guard.test.ts
+# asserts this shape, so CI tells you if the file and the tag ever disagree.
 # =============================================================================
 
 # The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
@@ -70,19 +67,29 @@ key_file = "/app/data/signer.key"
 # `http://store:3300` comes back as F99 "app declined the delivery with HTTP
 # 404".
 #
-# `price` is a whole number of the SMALLEST UNIT of the settlement token, the
-# way a card terminal counts in cents. USDC has 6 decimals, so:
+# `price` counts in the SMALLEST UNIT of the settlement token, the way a card
+# terminal counts in cents. USDC has 6 decimals, so 1,000,000 units are $1.
 #
-#     price = 1000       0.001 USDC     a tenth of a cent   <- this route
-#     price = 100000     0.10  USDC     ten cents
-#     price = 1000000    1.00  USDC     one dollar
+# It may be a flat integer, or a SCHEDULE over the payload length (ADR 0065):
+#
+#     price = 1000                            flat: every packet, one price
+#     price = { base = 1000, per_kib = 10 }   base, plus 10 per KiB of payload
+#
+# A blob store charges a schedule, because an upload can be any size and a
+# flat price bills a 50 MB object the same as a 1 KB one. `per_kib` is charged
+# per whole kibibyte, rounded up: base + per_kib * ceil(payload_len / 1024).
+#
+#       1 KB ->      1,010          1 MB ->     11,240
+#     100 KB ->      2,000         50 MB ->    513,000   (~$0.51)
+#
+# ~$10.7/GB, which tracks what permanent Arweave storage costs plus a margin.
 #
 # This is the seam to copy for your own app: point handler_url at your
 # backend, pick your prefix, pick your price.
 [[routes]]
 prefix      = "g.toon.ario"
 handler_url = "http://store:3300/store"
-price       = 1000
+price       = { base = 1000, per_kib = 10 }
 
 
 # ── Getting paid ─────────────────────────────────────────────────────────────
@@ -125,36 +132,15 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # ═════════════════════════════════════════════════════════════════════════════
 # THIS DEPLOYMENT — the TOON devnet store box
 # ═════════════════════════════════════════════════════════════════════════════
-# Everything above describes any store behind any connector. Everything below
-# is specific to this box's place in the TOON devnet, and is what you replace
-# when you stand up your own. See deploy/README.md § "Make it yours".
+# Everything above describes any store behind any connector. What follows is
+# specific to this box's place in the TOON devnet — the addresses it answers
+# for and the URLs it is reachable on — and is what you replace when you stand
+# up your own. See deploy/README.md § "Make it yours".
 
-# The relay box. The two boxes peer over one BTP session and carry traffic for
-# each other; this is the store box's half of that arrangement.
-[[peers]]
-id         = "apex-store"
-credential = { secret_file = "/app/data/apex-store.secret" }
-
-# The payment channel backing that peering, on Base Sepolia.
-[[peer_channels]]
-peer_id          = "apex-store"
-channel_id       = "0x0bfd0b88614d55e2c5cb633d15f849ef5fdc4d7bb02ca989e7afade642186b1a"
-counterparty_key = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF"
-chain_id         = 84532
-token_network    = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
-
-# The kind:10032 self-announce: how a client DISCOVERS that g.toon.ario exists,
-# what it costs, and which identity to seal to. Published through the relay
-# box, which is the fleet's write ingress, and paid for out of `pay_channel`.
-# The `announce` service in docker-compose.yml is what actually publishes it.
-[announce]
-addresses       = ["g.toon.ario"]
-http_endpoint   = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
-btp_endpoint    = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
-publish_to      = "g.toon.relay"
-publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
-pay_channel     = "0x53689fa291bc99f1b94574adaf198494bc895963052e113922329f3c8bae792d"
-notice_id       = "2026-08-13-two-box-cutover"
-notice_severity = "action-required"
-notice_summary  = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
-notice_url      = "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md"
+# What this node cannot introspect about itself: the addresses it answers for
+# and the public URLs it is reachable on. Clients read this back from
+# `GET /ilp` to discover the node.
+[node]
+addresses     = ["g.toon.ario"]
+http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
+btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"

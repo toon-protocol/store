@@ -1,8 +1,7 @@
 # Running the store box
 
 This directory is the whole deployment. Everything the TOON devnet store box
-runs is here: the payment proxy, the job backend, TLS, discovery and unattended
-updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
+runs is here: the payment proxy, the job backend, TLS and unattended updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
 
 ```
                          ┌──────────────────────────────────────┐
@@ -21,9 +20,11 @@ updates. `./bootstrap.sh` on a fresh Ubuntu host is the entire install.
                     │ store       :3300  │──▶ Arweave (via Turbo)
                     └────────────────────┘
 
-   announce ──▶ publishes kind:10032 so clients can discover the above
    certbot  ──▶ renews the certificate
-   watchtower ▶ recreates connector, store and announce when their tag moves
+   watchtower ▶ recreates connector and store when their tag moves
+
+   Discovery is GET /ilp on the connector, which serves the [node]
+   self-description — there is no announce sidecar.
 ```
 
 ## Files
@@ -44,7 +45,7 @@ gitignored. **Only templates are committed.**
 ## Standing one up
 
 **Before you start** you need a host, two DNS A-records pointing at it —
-`proxy.ario.<your-domain>` and `dvm.<your-domain>` — and four key files.
+`proxy.ario.<your-domain>` and `dvm.<your-domain>` — and three key files.
 
 **1. Clone and configure.**
 
@@ -55,15 +56,14 @@ cp .env.example .env
 $EDITOR .env          # every variable is documented in the file
 ```
 
-**2. Generate the key material.** Four files, all `0600`, none of them ever
+**2. Generate the key material.** Three files, all `0600`, none of them ever
 committed:
 
 ```bash
 openssl rand -hex 32 > signer.key             # this node's ILP identity
 openssl rand -hex 32 > settlement.key         # the EVM settlement key
 openssl rand -hex 32 > settlement-solana.key  # the Solana settlement key
-openssl rand -hex 32 > apex-store.secret      # the shared secret for the relay peering
-chmod 600 *.key *.secret
+chmod 600 *.key
 ```
 
 The signer key is the identity `GET /ilp/identity` answers with and that every
@@ -89,7 +89,7 @@ so a DNS mistake does not burn the real rate limit. Once
 docker compose ps                                    # six services, store healthy
 curl https://dvm.<domain>/health                     # {"status":"ok","handlerKinds":[5094],...}
 curl https://proxy.ario.<domain>/ilp/identity        # the signer pubkey clients seal to
-docker compose logs announce --tail 20               # "[announce] OK -- g.toon.ario published"
+curl https://proxy.ario.<domain>/ilp                  # the [node] self-description clients discover
 ```
 
 To prove the paid path end to end, publish a blob with a TOON client pointed at
@@ -104,7 +104,7 @@ a container when the tag it follows changes digest.
 | Container | Follows | Moves when |
 |---|---|---|
 | `store` | `ghcr.io/toon-protocol/store:release` | every green merge to `main` in this repo |
-| `connector`, `announce` | `ghcr.io/toon-protocol/connector:rust-release` | a **supervised promotion** in the connector repo, never automatically |
+| `connector` | `ghcr.io/toon-protocol/connector:rust-release` | a **supervised promotion** in the connector repo, never automatically |
 
 The difference is deliberate. The store's own image is this repo's to move; the
 connector's is the fleet's, and auto-moving it on green main once pushed
@@ -130,26 +130,30 @@ startup and holds it for the process lifetime — a bind mount is not a reload,
 and there is no environment-variable layer. After editing:
 
 ```bash
-./render.sh && docker compose restart connector announce
+./render.sh && docker compose restart connector
 ```
 
-The two must restart together: they share one config file and one binary
-version, and the parser rejects unknown keys, so a newer config against an
-older binary is a refuse-to-start.
+`connector.toml` and the connector's tag move together: the config uses a
+`{ base, per_kib }` price and a `[node]` section, and an older connector can
+parse neither. A config from the future against an older binary is a
+refuse-to-start, not a degraded run.
 
 ## Make it yours
 
 Most of `connector.toml.template` describes any app behind any connector. The
-part that is specific to the TOON devnet is fenced under **"THIS DEPLOYMENT"**
-at the bottom of the file — the relay peering, its payment channel, and the
-announce. Replace that block, then change three things above it:
+part specific to the TOON devnet is fenced under **"THIS DEPLOYMENT"** at the
+bottom — the `[node]` addresses and public URLs. Replace that block with your
+own, then change the route above it:
 
 ```toml
 [[routes]]
-prefix      = "g.example.myapp"          # the ILP address clients pay
-handler_url = "http://myapp:8080/jobs"   # your backend; the path is literal
-price       = 1000                       # smallest unit of the settlement token
+prefix      = "g.example.myapp"              # the ILP address clients pay
+handler_url = "http://myapp:8080/jobs"       # your backend; the path is literal
+price       = { base = 1000, per_kib = 10 }  # or a flat integer, if size doesn't matter
 ```
+
+Point the settlement sections at whatever chain and token you settle in, and
+generate your own `signer.key` — that key *is* your node's identity.
 
 Point `docker-compose.yml`'s `store` service at your own image, keep the
 health endpoint so compose can tell when it is ready, and the rest of this
@@ -176,51 +180,50 @@ so the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
 
-## When the fleet moves past this tag
+## Pricing
 
-`connector.toml.template` is written for `:rust-release` as promoted today.
-The list below was produced by running this bundle's rendered config against
-`ghcr.io/toon-protocol/connector:rust-main` and fixing what it refused, so it
-is what the connector actually says, not what the changelog implies.
-
-**These two are breaking.** The parser refuses removed keys *by name* and
-startup is fail-closed, so each one is a refuse-to-start until it is fixed:
-
-| Key | What to do | Why |
-|---|---|---|
-| `[[peers]] credential = { secret_file = … }` | **Delete the whole `credential` table.** There is no replacement key. | ADR 0060 — a peering is proven by a verified claim on one of its `[[peer_channels]]` rows, not by a string both operators wrote into their own config files. |
-| `[announce]` | **Rename to `[node]`** and keep only `addresses`, `http_endpoint`, `btp_endpoint`. Delete `publish_to`, `publish_btp_url`, `pay_channel` and every `notice_*` key. **Also delete the `announce` service** from `docker-compose.yml`. | ADR 0050 renames the section for what it holds rather than a verb; ADR 0046 removed the one-shot `connector announce` outright, and `GET /ilp` serves the self-description instead. |
-
-**These two are NOT breaking**, despite reading like it:
-
-- **`[operator] bearer_token` / `write_keys` inline still work.** The
-  `bearer_token_file` / `write_keys_file` variants added in connector#1017 are
-  an *addition*, not a replacement — the connector's own config tests exercise
-  both forms. Move to the file variants if you would rather the token not sit
-  in a rendered file; you do not have to.
-- **`price = 1000` still works.** ADR 0065 makes a price a schedule over
-  payload length, but an integer still deserializes as a flat price:
-  `price = 1000` and `price = { base = 1000, per_kib = 0 }` are the same value.
-
-### Charging by size
-
-Once the fleet is on a build with ADR 0065, a blob store is the obvious place
-to want it — this route bills one flat figure whether the upload is 1 KB or
-50 MB:
+The route bills a **schedule over payload length** (ADR 0065), not a flat
+figure — an upload can be any size, and one price for a 1 KB object and a
+50 MB one is the wrong shape for a blob store:
 
 ```toml
-[[routes]]
-prefix      = "g.toon.ario"
-handler_url = "http://store:3300/store"
-price       = { base = 1000, per_kib = 30 }   # base + 30 per KiB, rounded up
+price = { base = 1000, per_kib = 10 }   # base + 10 per KiB, rounded up
 ```
 
-Note that the store advertises its own `basePricePerByte` (10 µUSDC/byte by
-default) on `/health`, which has never matched this route's flat `1000`. That
-mismatch is only cosmetic while nothing bills per byte; if you switch this
-route to a schedule, reconcile the two so the advertised price and the charged
-price agree.
+| Upload | Charged | ≈ |
+|---|---|---|
+| 1 KB | 1,010 | $0.0010 |
+| 100 KB | 2,000 | $0.0020 |
+| 1 MB | 11,240 | $0.0112 |
+| 10 MB | 103,400 | $0.1034 |
+| 50 MB | 513,000 | $0.5130 |
 
-`src/deploy-bundle-guard.test.ts` asserts the current shape, so change those
-assertions in the same commit and CI will tell you if the bundle and the tag
-ever disagree.
+That is about **$10.7/GB**, which tracks what permanent Arweave storage costs
+plus a margin. Units are the settlement token's smallest unit; USDC has 6
+decimals, so 1,000,000 is $1.
+
+A flat integer (`price = 1000`) is still valid if you want one — it is exactly
+`{ base = 1000, per_kib = 0 }`.
+
+**One thing to know:** the store separately advertises `basePricePerByte` on
+`/health` (from `FEE_PER_JOB`, default 10). That figure is **informational**
+— the connector is what actually charges, using the schedule above. The two
+have never agreed, and the advertised field counts per *byte* where the route
+counts per *KiB*, so it cannot express this schedule exactly. Treat `/health`
+as a hint, and this route as the price.
+
+## This bundle and the connector tag move together
+
+`connector.toml.template` is written for `:rust-release` as promoted today,
+which carries ADR 0065, 0050 and 0060. Three things here will not load on an
+older connector, each a refuse-to-start rather than a degraded run:
+
+| This bundle uses | An older connector |
+|---|---|
+| `price = { base, per_kib }` | parses only a bare integer — TOML parse error |
+| `[node]` | wanted `[announce]`, and a `connector announce` sidecar with it |
+| no `[[peers]] credential` | — (the reverse: a *newer* connector refuses `credential` by name) |
+
+So a rollback below the promoted build needs the config rolled back with it.
+`src/deploy-bundle-guard.test.ts` asserts the current shape, so CI tells you
+if the bundle and the tag ever disagree.
