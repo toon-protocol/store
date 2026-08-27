@@ -35,11 +35,20 @@ const renderedConnectorToml = Object.entries(RENDER_SUBSTITUTIONS).reduce(
   CONNECTOR_TEMPLATE
 );
 
+/** A price is either a flat integer or a `{ base, per_kib }` schedule (ADR 0065). */
+type ConnectorPrice = number | { base: number; per_kib: number };
+
 interface ConnectorRoute {
   prefix: string;
   handler_url: string;
-  price: number;
+  price: ConnectorPrice;
 }
+
+/** What a route charges for a packet with `payloadLen` bytes of payload. */
+const chargeFor = (price: ConnectorPrice, payloadLen: number): number =>
+  typeof price === 'number'
+    ? price
+    : price.base + price.per_kib * Math.ceil(payloadLen / 1024);
 
 interface ConnectorToml {
   client_edge_addr: string;
@@ -49,7 +58,9 @@ interface ConnectorToml {
   };
   routes: ConnectorRoute[];
   operator: Record<string, unknown>;
-  node?: unknown;
+  node?: { addresses: string[]; http_endpoint: string; btp_endpoint: string };
+  announce?: unknown;
+  peers?: unknown;
 }
 
 const connectorToml = parse(renderedConnectorToml) as unknown as ConnectorToml;
@@ -127,9 +138,12 @@ const EXPECTED_TOKEN_ADDRESS = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
 // ADR 0010: the fleet-wide settlement asset is 6-decimal USDC everywhere.
 const EXPECTED_DECIMALS = 6;
 
-// 0.001 USDC in the smallest unit of a 6-decimal asset — the flat per-object
-// figure the fleet quotes for a store upload.
-const EXPECTED_ROUTE_PRICE = 1000;
+// The store bills a SCHEDULE, not a flat price: an upload can be any size, and
+// a flat figure charges a 50 MB object the same as a 1 KB one. `base` is the
+// floor every upload pays (0.001 USDC), `per_kib` the slope — together about
+// $10.7/GB, which tracks what permanent Arweave storage costs plus a margin.
+const EXPECTED_ROUTE_BASE = 1000;
+const EXPECTED_ROUTE_PER_KIB = 10;
 
 // issue#88: the two-node fleet retired the devnet apex, and with it BOTH
 // aliases that used to sit beside this box's prefix: `g.toon.relay.ario` (a
@@ -150,11 +164,11 @@ const EXPECTED_STORE_IMAGE = 'ghcr.io/toon-protocol/store:release';
 
 const WATCHTOWER_LABEL = 'com.centurylinklabs.watchtower.enable';
 
-// The three services that follow a moving tag, and therefore the three — and
-// only three — that Watchtower may recreate. nginx holds the resolver that
-// lets every other recreate self-heal; certbot holds the renewal timer;
-// Watchtower must not recreate itself.
-const WATCHED_SERVICES = ['announce', 'connector', 'store'].sort();
+// The two services that follow a moving tag, and therefore the two — and only
+// two — that Watchtower may recreate. nginx holds the resolver that lets every
+// other recreate self-heal; certbot holds the renewal timer; Watchtower must
+// not recreate itself.
+const WATCHED_SERVICES = ['connector', 'store'].sort();
 
 describe('deploy/ bundle is internally consistent', () => {
   it('terminates exactly the route prefixes the fleet expects', () => {
@@ -163,13 +177,23 @@ describe('deploy/ bundle is internally consistent', () => {
     );
   });
 
-  it('prices the store route at the fleet figure', () => {
+  it('prices the store route as a schedule over payload length', () => {
     for (const route of connectorToml.routes) {
       expect(
         route.price,
-        `route "${route.prefix}" price must be ${EXPECTED_ROUTE_PRICE}`
-      ).toBe(EXPECTED_ROUTE_PRICE);
+        `route "${route.prefix}" must price by size, not a flat figure`
+      ).toEqual({ base: EXPECTED_ROUTE_BASE, per_kib: EXPECTED_ROUTE_PER_KIB });
     }
+  });
+
+  it('charges more for a bigger upload', () => {
+    // The whole point of the schedule. Guards against someone flattening it
+    // back to an integer without noticing what it was for.
+    const price = connectorToml.routes[0]!.price;
+    expect(chargeFor(price, 1024)).toBeLessThan(chargeFor(price, 1024 * 1024));
+    // base + per_kib * ceil(bytes/1024), rounded UP to the whole kibibyte
+    expect(chargeFor(price, 1)).toBe(EXPECTED_ROUTE_BASE + EXPECTED_ROUTE_PER_KIB);
+    expect(chargeFor(price, 0)).toBe(EXPECTED_ROUTE_BASE);
   });
 
   it('points every terminated route at the backend\'s /store path', () => {
@@ -185,16 +209,17 @@ describe('deploy/ bundle is internally consistent', () => {
   });
 
   it('routes sharing a handler_url agree on price', () => {
-    const priceByHandler = new Map<string, number>();
+    const priceByHandler = new Map<string, string>();
     for (const route of connectorToml.routes) {
+      const price = JSON.stringify(route.price);
       const seen = priceByHandler.get(route.handler_url);
       if (seen !== undefined) {
         expect(
-          route.price,
+          price,
           `routes sharing ${route.handler_url} must agree on price`
         ).toBe(seen);
       }
-      priceByHandler.set(route.handler_url, route.price);
+      priceByHandler.set(route.handler_url, price);
     }
   });
 
@@ -219,12 +244,14 @@ describe('deploy/ bundle is internally consistent', () => {
 });
 
 describe('deploy/ tracks the fleet tags', () => {
-  it('runs the connector and its announce sidecar on the promotion tag', () => {
-    // These two share one connector.toml and one binary version. If they ever
-    // move independently, the older binary refuses to load a config the newer
-    // one wrote (the parser is deny_unknown_fields).
+  it('runs the connector on the promotion tag', () => {
     expect(composeFile.services['connector']?.image).toBe(EXPECTED_CONNECTOR_IMAGE);
-    expect(composeFile.services['announce']?.image).toBe(EXPECTED_CONNECTOR_IMAGE);
+  });
+
+  it('ships no announce sidecar', () => {
+    // ADR 0046 removed the one-shot `connector announce` verb the sidecar ran
+    // in a loop; `GET /ilp` serves the [node] self-description instead.
+    expect(composeFile.services['announce']).toBeUndefined();
   });
 
   it('runs the store on the tag green main moves', () => {
@@ -264,17 +291,24 @@ describe('deploy/ tracks the fleet tags', () => {
   });
 });
 
-describe('deploy/ config is loadable by the pinned connector', () => {
+describe('deploy/ config matches the promoted connector', () => {
   // The connector parser is deny_unknown_fields and startup is fail-closed, so
-  // a key a NEWER connector has removed is a refuse-to-start, not a degraded
-  // run. deploy/README.md § "When the fleet moves past this tag" carries the
-  // checklist, verified by running this config against :rust-main. Asserted
+  // a key a connector has removed is a refuse-to-start, not a degraded run.
+  // Verified by running this config against the promoted build. Asserted
   // against the parsed document and comment-stripped source, so prose that
-  // merely names a future key does not trip them.
+  // merely names a retired key does not trip them.
 
-  it('uses [announce], not the newer [node]', () => {
-    expect(connectorToml.node).toBeUndefined();
-    expect(connectorTemplateCode).not.toMatch(/^\s*\[node\]/m);
+  it('uses [node], not the retired [announce]', () => {
+    expect(connectorToml.announce).toBeUndefined();
+    expect(connectorTemplateCode).not.toMatch(/^\s*\[announce\]/m);
+    expect(connectorToml.node?.addresses).toEqual(['g.toon.ario']);
+  });
+
+  it('declares no peering shared secret', () => {
+    // ADR 0060 deleted `[[peers]] credential` by name — a peering is proven by
+    // a verified claim on a [[peer_channels]] row, not by a string both
+    // operators wrote into their own config files.
+    expect(connectorTemplateCode).not.toMatch(/credential/);
   });
 
   // NOTE: inline operator keys are not deprecated — a newer connector accepts
