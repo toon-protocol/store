@@ -87,7 +87,7 @@ key_file = "/app/data/signer.key"
 # This is the seam to copy for your own app: point handler_url at your
 # backend, pick your prefix, pick your price.
 [[routes]]
-prefix      = "g.toon.ario"
+prefix      = "g.toon.store"
 handler_url = "http://store:3300/store"
 price       = { base = 1000, per_kib = 10 }
 
@@ -138,38 +138,21 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # up your own. See deploy/README.md § "Make it yours".
 
 # ── The relay leg ────────────────────────────────────────────────────────────
-# Two directions, and only one of them is written here.
+# The route to the relay is NOT here, deliberately. The peering and the
+# forwarded route that uses it are established at runtime through the operator
+# surface — `POST /peers` then `POST /routes/peers` (ADR 0058) — which reads
+# the counterparty's self-description, derives the payment channel from the two
+# participants and opens it on chain if absent.
 #
-# INBOUND (`g.toon.relay.store`) terminates on this node. The relay names the
-# store's service under the relay's own prefix and forwards a packet addressed
-# there to us; we answer it. It is a static route because it is this node's own
-# app being served, exactly like `g.toon.ario`.
-#
-# A forward does NOT rewrite the destination, so the packet arrives still
-# addressed `g.toon.relay.store` and needs a route of its own here. Without one
-# it would fall through to whatever else matches, which is how a pair of
-# mutually-forwarding routes becomes a paid ping-pong rather than a 404.
-#
-# The price MUST equal `g.toon.ario`'s, because the two share a `handler_url`
-# and the connector refuses a config where they differ
-# (`ConfigError::ConflictingHandlerPrice`) — the cheaper door would otherwise
-# take every packet.
-[[routes]]
-prefix      = "g.toon.relay.store"
-handler_url = "http://store:3300/store"
-price       = { base = 1000, per_kib = 10 }
-
-# OUTBOUND (`g.toon.store.relay`) is NOT here, deliberately. The peering with
-# the relay and the forwarded route that uses it are established at runtime
-# through the operator surface — `POST /peers` then `POST /routes/peers`
-# (ADR 0058) — which reads the counterparty's self-description, derives the
-# payment channel from the two participants and opens it on chain if absent.
-#
-# Writing them here instead would ALSO take the keys away from that surface:
-# a runtime write is refused outright when the configuration file owns the key
+# Writing them here instead would ALSO take the keys away from that surface: a
+# runtime write is refused outright when the configuration file owns the key
 # (CF-32), and a durable runtime row whose key config later claims is deleted
 # rather than shadowed (CF-33). Ownership is permanent, so the choice of which
 # table holds a peering is made once, here, by leaving it out.
+#
+# The route is `g.toon.store.relay` — a name BENEATH this node's own address,
+# which is what makes it this node's to give. Longest prefix wins, so it takes
+# precedence over the `g.toon.store` termination above without disturbing it.
 #
 # Read the live peering back with `GET /peers`; a `"source"` of `"runtime"` is
 # this arrangement working as intended.
@@ -178,6 +161,6 @@ price       = { base = 1000, per_kib = 10 }
 # and the public URLs it is reachable on. Clients read this back from
 # `GET /ilp` to discover the node.
 [node]
-addresses     = ["g.toon.ario"]
+addresses     = ["g.toon.store"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"

@@ -163,18 +163,12 @@ const EXPECTED_ROUTE_PER_KIB = 10;
 // decision 2026-08-05 — one name for one app). The box terminates exactly this
 // one prefix; naming it as a literal means losing it, or silently regaining a
 // retired alias, fails by name instead of passing unnoticed.
-// Both prefixes TERMINATE here. `g.toon.ario` is this node's own name for its
-// app; `g.toon.relay.store` is the relay's name for the same app, which the
-// relay forwards to us — a forward does not rewrite the destination, so it
-// arrives under that name and needs a route of its own.
-//
-// The outbound leg (`g.toon.store.relay`, forwarded to the relay) is
-// deliberately NOT here: it is established at runtime through the operator
-// surface. See the template's "The relay leg" section.
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.ario', 'g.toon.relay.store'].sort();
+// This node terminates exactly one prefix: its own address. The route to the
+// relay (`g.toon.store.relay`) is a name beneath that address, established at
+// runtime through the operator surface — see the template's "The relay leg".
+const EXPECTED_ROUTE_PREFIXES = ['g.toon.store'].sort();
 
-const TERMINATED_PREFIX = 'g.toon.ario';
-const RELAY_INBOUND_PREFIX = 'g.toon.relay.store';
+const TERMINATED_PREFIX = 'g.toon.store';
 
 // The fleet's promotion tag. The store box follows the SAME moving tag the
 // rest of the fleet does, rather than an immutable `rust-sha-*` literal — the
@@ -208,18 +202,6 @@ describe('deploy/ bundle is internally consistent', () => {
     });
   });
 
-  it('serves the relay\'s name for this app at the same price as our own', () => {
-    // Both prefixes reach one handler_url, and the connector refuses a config
-    // where two such routes disagree on price (ConflictingHandlerPrice) — the
-    // cheaper door would otherwise take every packet.
-    const inbound = connectorToml.routes.find((r) => r.prefix === RELAY_INBOUND_PREFIX);
-    expect(inbound, `${RELAY_INBOUND_PREFIX} must terminate here`).toBeDefined();
-    expect(inbound?.handler_url).toBe('http://store:3300/store');
-    expect(inbound?.price).toEqual({
-      base: EXPECTED_ROUTE_BASE,
-      per_kib: EXPECTED_ROUTE_PER_KIB,
-    });
-  });
 
   it('charges more for a bigger upload', () => {
     // The whole point of the schedule. Guards against someone flattening it
@@ -351,7 +333,7 @@ describe('deploy/ config matches the promoted connector', () => {
   it('uses [node], not the retired [announce]', () => {
     expect(connectorToml.announce).toBeUndefined();
     expect(connectorTemplateCode).not.toMatch(/^\s*\[announce\]/m);
-    expect(connectorToml.node?.addresses).toEqual(['g.toon.ario']);
+    expect(connectorToml.node?.addresses).toEqual(['g.toon.store']);
   });
 
   it('declares no peering shared secret', () => {

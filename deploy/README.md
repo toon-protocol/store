@@ -186,8 +186,8 @@ Two prefixes, one terminated here and one forwarded to the relay:
 
 | Prefix | Where it goes | Client pays here |
 |---|---|---|
-| `g.toon.ario` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` |
-| `g.toon.relay` | forwarded → the relay box, over BTP | `2` |
+| `g.toon.store` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` |
+| `g.toon.store.relay` | forwarded → the relay box | `2` — runtime, see below |
 
 A route is a prefix plus **exactly one** of `handler_url` (terminate) or
 `peer_id` (forward), and a price is required on both branches. Longest prefix
