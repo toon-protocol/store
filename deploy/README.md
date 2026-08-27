@@ -180,6 +180,50 @@ so the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
 
+## The routing table
+
+Two prefixes, one terminated here and one forwarded to the relay:
+
+| Prefix | Where it goes | Client pays here |
+|---|---|---|
+| `g.toon.ario` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` |
+| `g.toon.relay` | forwarded → the relay box, over BTP | `2` |
+
+A route is a prefix plus **exactly one** of `handler_url` (terminate) or
+`peer_id` (forward), and a price is required on both branches. Longest prefix
+wins.
+
+### Peering with the relay
+
+The relay is the fleet's write ingress. Peering with it means a client already
+connected here can pay **this** edge to reach it, rather than opening a second
+channel of its own.
+
+The peering is bound to a **channel**, not a shared secret — ADR 0060 deleted
+the shared secret outright, and the role is proved by the channel binding plus
+a verified claim signature. One channel serves both roles, which CF-22
+explicitly permits and is the deployed shape here:
+
+- **`[[peer_channels]]`** — what the relay's claims are judged against, and the
+  key whose signature is accepted on them.
+- **`[[pay_channels]]`** — what this node pays *from*. Every forwarded PREPARE
+  carries a covering claim on it (ADR 0042).
+
+`0x53689fa2…` on Base Sepolia, funded from both sides. It is the same channel
+this box already used to pay for publishing its announce.
+
+**Pricing a forwarded route** (ADR 0028): it is priced at *this* client edge.
+The relay charges `1` for `g.toon.relay`, this node retains its peering `fee`
+of `1`, so a client pays `2` here. The fee attaches to the **peering**, not the
+route (ADR 0061) — carrying a packet is the same work whichever prefix was
+addressed.
+
+**The relay exposes no peer carriage of its own** (`peerCarriages: []` in its
+`GET /ilp`), so this node pays it as an ordinary client, which is what it
+already did to publish its announce. Nothing on the relay has to change for
+this to work. If the relay later sets `peer_expose`, the `[[peer_channels]]`
+row above is already what it needs to judge our claims.
+
 ## Pricing
 
 The route bills a **schedule over payload length** (ADR 0065), not a flat
