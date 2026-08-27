@@ -24,7 +24,6 @@
     "@solana/kit": "^6.8.0",
     "@toon-protocol/sdk": "^3.3.0",
     "arweave": "^1.15.5",
-    "ethers": "^6.17.0",
     "hono": "^4.11.10",
     "nostr-tools": "^2.20.0"
   },

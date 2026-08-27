@@ -52,14 +52,9 @@ services:
       FEE_PER_JOB: ${FEE_PER_JOB:-10}
       STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Optional job kinds. Each stays unregistered while its variable is empty.
+      # kind:5095 stays unregistered while its variable is empty.
       ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY:-}
       ARNS_NETWORK: ${ARNS_NETWORK:-devnet}
-      GAS_STATION_SOLANA_SECRET_KEY: ${GAS_STATION_SOLANA_SECRET_KEY:-}
-      GAS_STATION_CHANNEL_PROGRAM_ID: ${GAS_STATION_CHANNEL_PROGRAM_ID:-}
-      EVM_GAS_STATION_CONFIG_JSON: ${EVM_GAS_STATION_CONFIG_JSON:-}
-      EVM_GAS_STATION_QUOTE_TTL_MS: ${EVM_GAS_STATION_QUOTE_TTL_MS:-}
-      EVM_GAS_STATION_MAX_GAS: ${EVM_GAS_STATION_MAX_GAS:-}
       # Node's default heap target assumes it owns the machine. This box is a
       # 1GB nanode running six containers.
       NODE_OPTIONS: --max-old-space-size=384
