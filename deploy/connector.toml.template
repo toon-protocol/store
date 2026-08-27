@@ -138,24 +138,26 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # up your own. See deploy/README.md § "Make it yours".
 
 # ── The relay leg ────────────────────────────────────────────────────────────
-# The route to the relay is NOT here, deliberately. The peering and the
-# forwarded route that uses it are established at runtime through the operator
-# surface — `POST /peers` then `POST /routes/peers` (ADR 0058) — which reads
-# the counterparty's self-description, derives the payment channel from the two
-# participants and opens it on chain if absent.
+# This node has NO route to the relay, and that is deliberate.
 #
-# Writing them here instead would ALSO take the keys away from that surface: a
-# runtime write is refused outright when the configuration file owns the key
-# (CF-32), and a durable runtime row whose key config later claims is deleted
-# rather than shadowed (CF-33). Ownership is permanent, so the choice of which
-# table holds a peering is made once, here, by leaving it out.
+# A forward copies the destination through verbatim — `forward_via_peer_route`
+# builds `Prepare { amount, expires_at, ..prepare }` and changes nothing else.
+# So a forwarded prefix only reaches anywhere if the far side already routes
+# that exact name. A prefix beneath THIS node's address, such as
+# `g.toon.store.relay`, is not a name the relay routes and must not become one:
+# it would put a row for this node's naming in the relay's table.
 #
-# The route is `g.toon.store.relay` — a name BENEATH this node's own address,
-# which is what makes it this node's to give. Longest prefix wins, so it takes
-# precedence over the `g.toon.store` termination above without disturbing it.
+# The traffic that matters goes the other way. The relay carries packets TO
+# this node, addressed `g.toon.store` — the name above — and this node
+# terminates them. `peer_expose` is what lets that arrive: the relay dials, and
+# a peering is accepted here rather than opened from here.
 #
-# Read the live peering back with `GET /peers`; a `"source"` of `"runtime"` is
-# this arrangement working as intended.
+# If a route out ever is wanted, it takes the relay's OWN address as its prefix
+# and is established through the operator surface (`POST /peers`, then
+# `POST /routes/peers` — ADR 0058), never written here. A runtime write is
+# refused outright when the config file owns the key (CF-32), and ownership is
+# permanent (CF-33), so writing one here would take it from that surface for
+# good.
 
 # What this node cannot introspect about itself: the addresses it answers for
 # and the public URLs it is reachable on. Clients read this back from
