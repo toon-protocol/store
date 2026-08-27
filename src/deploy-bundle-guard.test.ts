@@ -65,6 +65,7 @@ interface ConnectorToml {
   state_dir: string;
   settlement: {
     evm: { contract_address: string; token_address: string; decimals: number };
+    solana: { program_id: string; token_address: string; decimals: number };
   };
   routes: ConnectorRoute[];
   operator: Record<string, unknown>;
@@ -149,6 +150,20 @@ const EXPECTED_TOKEN_ADDRESS = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
 
 // ADR 0010: the fleet-wide settlement asset is 6-decimal USDC everywhere.
 const EXPECTED_DECIMALS = 6;
+
+// The Solana half of the same settlement statement. connector#1212: the mock
+// USDC this node named until 2026-08-27 is still on chain and still holds its
+// supply, but its MINT AUTHORITY was a key held outside every repository and
+// it is lost -- so nobody can issue that token and nobody can refill a
+// treasury holding it. The devnet faucet's Solana leg served 503s for weeks
+// on that account. This mint's authority is the faucet box's own treasury, so
+// the faucet mints per drip and no irreplaceable key is left in the design.
+//
+// Squarely "a thing that has been wrong on a live box", and it went unnoticed
+// because only the EVM leg above was ever asserted here.
+const EXPECTED_SOLANA_PROGRAM_ID = '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip';
+const EXPECTED_SOLANA_TOKEN_ADDRESS =
+  '34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU';
 
 // The store bills a SCHEDULE, not a flat price: an upload can be any size, and
 // a flat figure charges a 50 MB object the same as a 1 KB one. `base` is the
@@ -272,6 +287,19 @@ describe('deploy/ bundle is internally consistent', () => {
     );
     expect(connectorToml.settlement.evm.token_address).toBe(EXPECTED_TOKEN_ADDRESS);
     expect(connectorToml.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
+  });
+
+  it('settles against the current Solana program, mint and decimals', () => {
+    // A claim resolves against ONE deployment (connector ADR 0053 binds the
+    // program into the signed message), so naming a different program or mint
+    // than the fleet does is a node that cannot settle what buyers opened.
+    expect(connectorToml.settlement.solana.program_id).toBe(
+      EXPECTED_SOLANA_PROGRAM_ID
+    );
+    expect(connectorToml.settlement.solana.token_address).toBe(
+      EXPECTED_SOLANA_TOKEN_ADDRESS
+    );
+    expect(connectorToml.settlement.solana.decimals).toBe(EXPECTED_DECIMALS);
   });
 
   it('keeps the claim watermark on a mounted volume', () => {
