@@ -266,18 +266,22 @@ describe('deploy/ tracks the fleet tags', () => {
 
 describe('deploy/ config is loadable by the pinned connector', () => {
   // The connector parser is deny_unknown_fields and startup is fail-closed, so
-  // a key from a NEWER connector is a refuse-to-start, not a degraded run.
-  // These two assertions flip when the fleet promotes past connector#1165 /
-  // connector#1017 — see deploy/README.md § "When the fleet moves past this
-  // tag". Asserted against the parsed document and comment-stripped source, so
-  // prose that merely names a future key does not trip them.
+  // a key a NEWER connector has removed is a refuse-to-start, not a degraded
+  // run. deploy/README.md § "When the fleet moves past this tag" carries the
+  // checklist, verified by running this config against :rust-main. Asserted
+  // against the parsed document and comment-stripped source, so prose that
+  // merely names a future key does not trip them.
 
   it('uses [announce], not the newer [node]', () => {
     expect(connectorToml.node).toBeUndefined();
     expect(connectorTemplateCode).not.toMatch(/^\s*\[node\]/m);
   });
 
-  it('uses inline operator credentials, not the newer *_file keys', () => {
+  // NOTE: inline operator keys are not deprecated — a newer connector accepts
+  // BOTH these and the *_file variants. This asserts what this bundle uses so
+  // the template and the rendered file cannot silently disagree, not that the
+  // *_file form is wrong.
+  it('uses inline operator credentials', () => {
     expect(Object.keys(connectorToml.operator).sort()).toEqual([
       'bearer_token',
       'write_keys',

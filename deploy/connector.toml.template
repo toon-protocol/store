@@ -21,14 +21,21 @@
 #
 # ── This file targets `:rust-release` ────────────────────────────────────────
 # `docker-compose.yml` pins the connector to the fleet's promotion tag
-# `:rust-release`. Two keys here are written the way THAT build wants them,
-# and both change when the fleet promotes past connector#1165 / #1017:
+# `:rust-release`. Two things here are written the way THAT build wants them,
+# and both are refuse-to-start failures on a newer connector (verified by
+# running this config against :rust-main):
 #
-#     [announce]        -> becomes [node], and the announce sidecar is deleted
-#                          (the one-shot `connector announce` verb is gone;
+#     [[peers]] credential -> DELETED outright (ADR 0060). A peering is proven
+#                          by a verified claim on a [[peer_channels]] row, not
+#                          by a shared string. There is no replacement key.
+#     [announce]        -> becomes [node], keeping only addresses /
+#                          http_endpoint / btp_endpoint, and the announce
+#                          sidecar is deleted (ADR 0046 removed the verb;
 #                          `GET /ilp` serves the self-description instead)
-#     [operator]        -> bearer_token / write_keys become
-#                          bearer_token_file / write_keys_file
+#
+# NOT breaking, though they read like it: [operator]'s inline bearer_token /
+# write_keys still work (the *_file variants are an addition), and `price` may
+# stay an integer (ADR 0065 adds `{ base, per_kib }` as an option).
 #
 # deploy/README.md § "When the fleet moves past this tag" has the full
 # checklist. src/deploy-bundle-guard.test.ts asserts the current shape, so CI

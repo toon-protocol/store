@@ -179,14 +179,48 @@ than by trusting the firewall to hide a `0.0.0.0` bind.
 ## When the fleet moves past this tag
 
 `connector.toml.template` is written for `:rust-release` as promoted today.
-Two things change when the fleet promotes past connector#1165 and #1017, and
-both are refuse-to-start failures if they land in the wrong order:
+The list below was produced by running this bundle's rendered config against
+`ghcr.io/toon-protocol/connector:rust-main` and fixing what it refused, so it
+is what the connector actually says, not what the changelog implies.
 
-| Now | After |
-|---|---|
-| `[announce]` section + the `announce` container | `[node]` section; delete the container — the one-shot `connector announce` verb is gone and `GET /ilp` serves the self-description |
-| `[operator] bearer_token` / `write_keys` inline | `bearer_token_file` / `write_keys_file` pointing at mounted files |
+**These two are breaking.** The parser refuses removed keys *by name* and
+startup is fail-closed, so each one is a refuse-to-start until it is fixed:
 
-Land the config first, then move the tag. `src/deploy-bundle-guard.test.ts`
-asserts the current shape, so flip those two assertions in the same commit and
-CI will tell you if the bundle and the tag ever disagree.
+| Key | What to do | Why |
+|---|---|---|
+| `[[peers]] credential = { secret_file = … }` | **Delete the whole `credential` table.** There is no replacement key. | ADR 0060 — a peering is proven by a verified claim on one of its `[[peer_channels]]` rows, not by a string both operators wrote into their own config files. |
+| `[announce]` | **Rename to `[node]`** and keep only `addresses`, `http_endpoint`, `btp_endpoint`. Delete `publish_to`, `publish_btp_url`, `pay_channel` and every `notice_*` key. **Also delete the `announce` service** from `docker-compose.yml`. | ADR 0050 renames the section for what it holds rather than a verb; ADR 0046 removed the one-shot `connector announce` outright, and `GET /ilp` serves the self-description instead. |
+
+**These two are NOT breaking**, despite reading like it:
+
+- **`[operator] bearer_token` / `write_keys` inline still work.** The
+  `bearer_token_file` / `write_keys_file` variants added in connector#1017 are
+  an *addition*, not a replacement — the connector's own config tests exercise
+  both forms. Move to the file variants if you would rather the token not sit
+  in a rendered file; you do not have to.
+- **`price = 1000` still works.** ADR 0065 makes a price a schedule over
+  payload length, but an integer still deserializes as a flat price:
+  `price = 1000` and `price = { base = 1000, per_kib = 0 }` are the same value.
+
+### Charging by size
+
+Once the fleet is on a build with ADR 0065, a blob store is the obvious place
+to want it — this route bills one flat figure whether the upload is 1 KB or
+50 MB:
+
+```toml
+[[routes]]
+prefix      = "g.toon.ario"
+handler_url = "http://store:3300/store"
+price       = { base = 1000, per_kib = 30 }   # base + 30 per KiB, rounded up
+```
+
+Note that the store advertises its own `basePricePerByte` (10 µUSDC/byte by
+default) on `/health`, which has never matched this route's flat `1000`. That
+mismatch is only cosmetic while nothing bills per byte; if you switch this
+route to a schedule, reconcile the two so the advertised price and the charged
+price agree.
+
+`src/deploy-bundle-guard.test.ts` asserts the current shape, so change those
+assertions in the same commit and CI will tell you if the bundle and the tag
+ever disagree.
