@@ -1,197 +1,183 @@
 # store
 
-TOON Protocol **store** — NIP-90 kind:5094 Arweave blob storage, plus three optional job kinds: kind:5095 ArNS brokered buy (gated by `ARNS_DVM_SOLANA_SECRET_KEY`), kind:5096 Solana gas-station co-sign/broadcast (gated by `GAS_STATION_SOLANA_SECRET_KEY`), and kind:5098 EVM gas-station meta-transaction relayer (gated by `EVM_GAS_STATION_CONFIG_JSON`). It uploads the blob to Arweave via Turbo and returns the tx id. Built from `Dockerfile.store` over `src/entrypoint-store.ts`, which wraps `@toon-protocol/sdk`'s `createArweaveDvmHandler`. It runs as a payment-oblivious `POST /store` backend (RouteTermination) behind the connector, which is the front-of-app payment proxy — see [`deploy/`](./deploy).
+**A paid Arweave blob store, and a worked example of putting any app behind the
+TOON connector.**
 
-## Status / follow-ups
-- Trimmed to store-only: the repo is now `Dockerfile.store` + `src/entrypoint-store.ts` + `src/store-backend.ts`. The other images' carried-over build contexts (`Dockerfile.{town,mill,townhouse-api,akash-*,oyster,nix,sdk-e2e,toon-client,…}`, their `src/entrypoint-*` files, and the `configs/`, `dev-fixtures/`, `akash-ator-probe/`, `townhouse-ator-sidecar/` dirs) have been removed.
-- Image-publish workflows: **`publish-store-image.yml`** (the store app → `ghcr.io/toon-protocol/store`) and **`publish-store-connector-image.yml`** (the connector-with-config payment proxy → `ghcr.io/toon-protocol/store-connector`). Consumers pinning the old `…/dvm` image must move to `…/store`.
-- Publishes no npm package (it's a container); kept `private`.
-
-> Extracted from the TOON monorepo with full git history preserved.
-
-## Getting started with Devbox
-
-[Devbox](https://github.com/jetify-com/devbox) pins the local toolchain to the exact
-versions CI uses — Node 22 and pnpm 8.15.x — so `pnpm build`, `pnpm test`, and
-`pnpm typecheck` run in a reproducible shell without touching your system packages.
-
-**Prerequisites:** [Install devbox](https://www.jetify.com/devbox/docs/installing_devbox/) (one-liner).
-
-```bash
-# Enter the pinned shell (downloads packages on first run via Nix)
-devbox shell
-
-# Inside the devbox shell, all tools are on PATH:
-node --version    # v22.x
-pnpm --version    # 8.15.x
-
-# Run the standard targets (defined as devbox scripts)
-devbox run build     # pnpm install --frozen-lockfile && pnpm build
-devbox run typecheck # pnpm typecheck
-devbox run test      # pnpm test
+```
+   client ──── pays ────▶ connector ──── POST /store ────▶ store ──▶ Arweave
+                          g.toon.ario     (payment already      returns a
+                          0.001 USDC       proven)              transaction id
 ```
 
-`.devbox/` (the Nix symlink/cache dir) is gitignored; `devbox.json` and `devbox.lock`
-are committed.
+## What this is
 
-## Public network ids — zkApps / programs the store's jobs touch
+The **store** answers NIP-90 `kind:5094` jobs: hand it bytes, it uploads them to
+Arweave via Turbo and returns the transaction id.
 
-The store's paid jobs execute against **public, third-party on-chain programs**.
-These ids are network-scoped; misconfiguring them silently targets the wrong
-registry. Canonical machine-readable source: **`@ar.io/sdk` ≥ 4.0.3 exports**
-(`DEVNET_PROGRAM_IDS`, `ARIO_*_PROGRAM_ID`); this table is the human-readable
-snapshot (verified live 2026-07-17).
+It is a plain HTTP server that knows nothing about payment. The **connector**
+sits in front as the payment proxy — it meters the request, settles it on-chain,
+and only then forwards the job over the local network. By the time anything
+reaches this code, the money is already collected.
 
-### ar.io Solana programs (kind:5095 arns-buy + kind:5096 whitelist)
+That split is the interesting part, and it is why this repo is worth reading
+even if you never store a blob: **`deploy/` is a complete, working deployment**
+of a paid service, and swapping the store for your own app is a three-line
+change.
 
-| Program | Solana **mainnet** | Solana **devnet** (`ARNS_NETWORK=devnet`, default) |
+## The contract
+
+Everything between the connector and your app is these two halves.
+
+**The connector's side** — one route in `connector.toml`:
+
+```toml
+[[routes]]
+prefix      = "g.toon.ario"                 # the ILP address clients pay
+handler_url = "http://store:3300/store"     # your backend — the path is literal
+price       = 1000                          # smallest unit of the token (0.001 USDC)
+```
+
+**Your side** — accept a POST, do the work, answer:
+
+```
+POST /store
+{ "event": { ...a signed Nostr event... } }
+
+→ 200 { "accept": true, "txId": "8ZWWEDIHqnGcsP0KSpdPeNIDvwR9G2ntZH7Y2Y5SoFE" }
+```
+
+The connector adds `X-TOON-Payer`, `X-TOON-Amount` and `X-TOON-Chain` headers
+that it has already validated. Your backend **trusts them and does not re-check
+them** — claim validation lives only in the connector.
+
+The event signature *is* still verified here, but for integrity, not
+authorization: it proves the request was not tampered with in transit.
+Permission was settled upstream by the payment. See
+[`src/store-backend.ts`](./src/store-backend.ts) — it is 210 lines, and it is
+the whole seam.
+
+## Job kinds
+
+`kind:5094` is always on. The other three register only when their credential is
+present, so a default deployment serves blob storage and nothing else.
+
+| Kind | What it does | Enabled by | Source |
+|---|---|---|---|
+| **5094** | Arweave blob storage | always on | [`entrypoint-store.ts`](./src/entrypoint-store.ts) |
+| **5095** | ArNS brokered name buy | `ARNS_DVM_SOLANA_SECRET_KEY` | [`arns-buy-handler.ts`](./src/arns-buy-handler.ts) |
+| **5096** | Solana gas station — co-signs and broadcasts | `GAS_STATION_SOLANA_SECRET_KEY` | [`gas-station-handler.ts`](./src/gas-station-handler.ts) |
+| **5098** | EVM gas station — ERC-2771 meta-transaction relayer | `EVM_GAS_STATION_CONFIG_JSON` | [`evm-gas-station-handler.ts`](./src/evm-gas-station-handler.ts) |
+
+Both gas stations follow the same security model: a dedicated fee-payer wallet,
+static inspection of the request, simulation with a cost cap, and a whitelist of
+what may be called. Neither will ever co-sign opening a payment channel or
+claiming from one — only depositing, closing and settling — so an agent can fund
+or reclaim its own channel without holding native gas, and nothing more.
+
+## Run it locally
+
+```bash
+pnpm install
+pnpm build
+NODE_NOSTR_SECRET_KEY=$(openssl rand -hex 32) pnpm start
+```
+
+Then:
+
+```bash
+curl localhost:3400/health
+# {"status":"ok","handlerKinds":[5094],"basePricePerByte":"10",...}
+```
+
+With no Arweave credentials it uploads on the free tier, which caps one upload
+at 100 KB. Set `STORE_ARWEAVE_JWK_B64` to a funded wallet to lift that.
+
+There is no connector in this loop — you are talking to the backend directly,
+which is exactly what the connector does once it has been paid.
+
+### With Devbox
+
+[Devbox](https://github.com/jetify-com/devbox) pins Node 22 and pnpm 8.15.x to
+the versions CI uses:
+
+```bash
+devbox shell
+devbox run build && devbox run test
+```
+
+## Configuration
+
+| Variable | Default | What it does |
 |---|---|---|
-| ario-core | `73YoECm6NKXpVRoe5f1Q9BcP5DJGPFUjnFy6AxBE5Nvh` | `8Njx9wPkXiNzDCgjwVsJFRjpAEV34gGW3n8DzX3V23m1` |
-| ario-gar | `89fNiiwgpFSPHKuqfNUkgYTYjtAJAhyqHjXmgXeppGpf` | `7WsDTrtZBsfKtnP33XkjuqXCY69JE7n4QVYpynqJCFxz` |
-| ario-arns (name registry) | `2yCUx5edFvUrkibYaUa2ZXWyx9kuJkS8CwyzsgHPWdZZ` | `6EZNezcg4rc5hnh8HG34vGquT3WpW5xXypzPb24uyEpp` |
-| ario-ant (ANT state) | `2MWexMHfMhGJwMHv9Qm9YAVCqjUFUJwDJAysW4oCUGk5` | `DbHbRwUD1oAn1mrDSqtWtvwGcNrmhWdD2g8L4xmeQ7NX` |
-| ario-ant-escrow | — (not exported for mainnet by the SDK) | `bttco5oAnBwCucG63iKokBJCZmNr493f3Ewe9LM3oTx` |
+| `NODE_NOSTR_SECRET_KEY` | *required* | This node's Nostr identity (64 hex chars) |
+| `HANDLER_PORT` | `3300` | The job backend the connector proxies to |
+| `BLS_PORT` | `3400` | Health endpoint |
+| `STORE_ARWEAVE_JWK_B64` | *(free tier)* | Base64 Arweave JWK; lifts the 100 KB cap |
+| `FEE_PER_JOB` | `10` | Advertised price per job |
+| `STORE_CONFIG_JSON` / `STORE_CONFIG_PATH` | — | Full config as JSON, in place of the variables above |
+| `LOG_LEVEL` | `info` | |
 
-- **ar.io has NO deployment on Solana's testnet cluster** — `devnet` and
-  `mainnet` are the only valid networks (toon-client#376/#381).
-- RPC per network: `https://api.mainnet-beta.solana.com` / `https://api.devnet.solana.com`.
+The four job-kind credentials are listed in
+[`deploy/.env.example`](./deploy/.env.example), which documents each one and how
+to generate it. All of them are treated as secrets: never logged, and deleted
+from `process.env` after boot.
 
-### Cluster-invariant programs (kind:5096 gas-station whitelist)
+## Deploy it
 
-| Program | Id (same on every cluster) |
-|---|---|
-| Metaplex Core (`MPL_CORE_PROGRAM`) | `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d` |
-| System Program | `11111111111111111111111111111111` |
-| ComputeBudget | `ComputeBudget111111111111111111111111111111` |
+[`deploy/`](./deploy) is the real thing — the six containers the TOON devnet
+store box actually runs, not a sketch of them. `./bootstrap.sh` on a fresh
+Ubuntu host is the entire install.
 
-The kind:5096 gas-station program whitelist = these three + the ar.io programs
-for the configured `ARNS_NETWORK` row above (assembled at runtime in
-`src/gas-station-handler.ts` from the SDK exports — the table is documentation,
-not the source of truth), **plus, optionally, the TOON payment-channel
-program** (issue #67) when `GAS_STATION_CHANNEL_PROGRAM_ID` is set — see the
-next section. Unlike the three above, that program id is NOT a hardcoded
-preset: instructions against it are further restricted to deposit / close /
-settle (`TOON_CHANNEL_DISCRIMINATORS` in `src/gas-station-handler.ts`) so an
-agent can fund or reclaim its own channel without holding SOL, without the
-gas station ever co-signing an open or a claim.
+Updates are unattended: a green merge to `main` publishes
+`ghcr.io/toon-protocol/store:release`, and Watchtower recreates the container
+within about a minute. The connector half follows the fleet's `:rust-release`
+promotion tag, which only ever moves under supervision.
 
-## kind:5098 — EVM gas-station meta-transaction relayer (issue #68, toon-meta#261 decision 9)
+## Develop
 
-The EVM half of gasless settle for agent payment channels: a client-signed
-ERC-2771 forward request (OpenZeppelin `ERC2771Forwarder`) for `TokenNetwork`
-deposit/close/settle is validated, submitted through the trusted forwarder,
-and paid for by a dedicated relayer wallet — the caller needs no native gas.
-Deliberately a real relayer, not native-gas dispensing, so every new EVM
-chain gets gasless settle at deploy time (`connector#694`, the contract half,
-merged the ERC-2771 `TokenNetwork` + forwarder deployment support).
+```bash
+pnpm build       # esbuild bundle of src/ (dependencies stay external)
+pnpm test        # vitest
+pnpm typecheck
+pnpm lint
+```
 
-**Mirrors the kind:5096 security model** (`src/evm-gas-station-handler.ts`
-doc comment has the full mapping) — no second security posture invented for
-the EVM leg:
+Tests live beside their source as `src/*.test.ts` and are of three kinds:
+unit tests per handler; one end-to-end protocol test
+(`kind-5094-encrypted-artifact.test.ts` — real events, real HTTP, real signature
+verification, stubbed only at the network edge); and
+`deploy-bundle-guard.test.ts`, which is not a unit test at all but a set of
+lint-like assertions that the committed deployment still says what the
+deployment means.
 
-| kind:5096 (Solana) | kind:5098 (EVM) |
-|---|---|
-| (a) dedicated fee-payer wallet | (a) dedicated relayer wallet, one per configured chain |
-| (b) static inspection (fee-payer slot rules) | (b) static inspection (`to` = configured `TokenNetwork`, `value`/`gas`/`deadline` caps) |
-| (c) simulation + balance-delta cap | (c) `estimateGas` on `forwarder.execute(request)` + gas cap |
-| (d) program whitelist | (d) function-selector whitelist: `setTotalDeposit`/`closeChannel`/`settleChannel` only — `openChannel`/`claimFromChannel` excluded, same rationale as kind:5096's `INITIALIZE_CHANNEL`/`CLAIM_FROM_CHANNEL` exclusion |
-| quote → execute + idempotency key | quote → execute + idempotency key |
-| machine-readable failure reasons | machine-readable failure reasons |
+**Tests never make live-chain calls.** The network is stubbed at the edge, always.
 
-Signature/nonce/deadline validity is delegated to the forwarder's own
-`verify(request)` view call rather than reimplemented offline — it is the one
-contract that actually knows its EIP-712 domain and the signer's current
-nonce.
+## The on-chain ids
 
-**Chain portability is the point**: adding a new EVM chain is one entry in
-`EVM_GAS_STATION_CONFIG_JSON` — a JSON array of
-`{chainId, rpcUrl, forwarderAddress, tokenNetworkAddress, relayerPrivateKey}`
-— not a code change. Optional `EVM_GAS_STATION_QUOTE_TTL_MS` /
-`EVM_GAS_STATION_MAX_GAS` override the default 120s quote TTL / 300,000 gas
-cap. All three env vars are treated as secret (the config JSON carries
-relayer private keys) — never logged, deleted from `process.env` after boot.
+Deliberately not tabulated here — they rotate, and a table in a README rots
+silently. Read them from the source that cannot:
 
-Proven against a local chain (`src/evm-gas-station-handler.test.ts`) — no
-live-chain calls in tests, ever, same hard-safety rule as the Solana suite.
-`connector#695` (deploy the ERC-2771 `TokenNetwork` to devnet and repoint the
-advertised addresses) landed and broadcast 2026-08-06; the "TOON
-payment-channel contracts" table below carries the resulting `TokenNetwork`
-and forwarder addresses, not the pre-ERC-2771 deployment.
+- **ar.io program ids** — the `@ar.io/sdk` exports (`ARIO_*_PROGRAM_ID`). The
+  `kind:5096` whitelist is assembled from them at runtime in
+  `src/gas-station-handler.ts`.
+- **The connector's settlement addresses** — the live `kind:10032` announce, or
+  `GET /ilp/identity` on a running node.
+- **What this deployment pins** — `deploy/connector.toml.template`, which is the
+  only place in this repo that hardcodes an address, because it is a
+  deployment, not documentation.
 
-## kind:5094 confirmed for encrypted increment artifacts (issue #70, toon-meta#262 decision 13)
+TOON has **no mainnet deployment**. Everything here is devnet or testnet.
 
-toon-meta#262 decision 13 routes every factory increment (a plan, a built
-artifact, a pack of git objects) through this store's existing `kind:5094` —
-uploaded **encrypted**, keyed by a per-increment key never known to this
-repo (hashlock delivery lives entirely in the buyer/provider clients; see
-`CLAUDE.md`). Confirmed end to end with no code changes — the existing
-handler already suffices:
+## How this fits together
 
-- **Size.** The single-packet path (`src/store-backend.ts` → SDK
-  `createArweaveDvmHandler`) has no store-side byte ceiling of its own — it
-  is bounded only by the configured Arweave/Turbo credit (unauthenticated
-  free tier: ≤100KB per upload; a funded `STORE_ARWEAVE_JWK_B64` wallet:
-  effectively uncapped). The chunked path (`uploadId`/`chunkIndex`/
-  `totalChunks` params, reassembled by the SDK's `ChunkManager`) caps at
-  **50MB per upload** by default (`ChunkManagerConfig.maxBytesPerUpload`,
-  not currently overridden in `src/entrypoint-store.ts`); the SDK's
-  `uploadBlobChunked()` client helper chunks at 500KB/packet, under the ILP
-  packet threshold. A plan (KB-scale) fits the single-packet path trivially;
-  a built artifact or git-object pack fits comfortably inside the 50MB
-  chunked ceiling for realistic increment sizes — raise
-  `maxBytesPerUpload` if a future increment needs more headroom.
-- **Opaque bytes.** `parseBlobStorageRequest` (`@toon-protocol/core`)
-  base64-decodes the event's `i` tag straight into a `Buffer` — it never
-  parses, sniffs, or otherwise assumes the bytes are readable. Content-type
-  sanitization (`sanitizeContentType`) falls back to
-  `application/octet-stream` for anything that isn't a well-formed MIME
-  token, which is exactly what an encrypted blob (no meaningful type to
-  declare) hits. The receipt returned to the caller
-  (`data` = base64(txId)) is passed through `store-backend.ts` unchanged.
-  Verified end to end (real event build/parse, real HTTP transport, real
-  signature verification, a stubbed-only-at-the-network-edge Turbo adapter)
-  in `src/kind-5094-encrypted-artifact.test.ts` with
-  `crypto.randomBytes` payloads — including a multi-chunk reassembly —
-  asserting the uploaded bytes are byte-for-byte identical to the input and
-  the receipt round-trips unmodified.
-- **Retrieval.** A buyer who did not upload the artifact fetches it by
-  txId — content-addressing means any gateway serving Arweave data serves
-  the same bytes. Retrieval is buyer-side, not this repo's concern, and
-  already goes through an ar.io-first ordered gateway list rather than a
-  single gateway: `@toon-protocol/arweave` (`toon-client` repo,
-  `packages/arweave/src/gateways.ts`) exports `ARWEAVE_GATEWAYS = ['https://ar-io.dev',
-  'https://arweave.net', 'https://permagate.io']` plus `arweaveUrls()` /
-  `arweaveGatewayCandidates()` helpers used by both the upload path (stamps
-  primary + fallback mirror URLs) and the render path (fails over to the
-  next gateway on error).
-- **Signature verification stays integrity-only.** `store-backend.ts`'s
-  `verifyEvent` check (skipped only in `devMode`) is unchanged by this
-  confirmation — it proves the event wasn't tampered with in transit, not
-  who may upload; payment already authorized the request upstream.
+The store is one repo of the **TOON Protocol** — pay-to-write Nostr over
+Interledger.
 
-### TOON payment-channel contracts (the connector in FRONT of this store)
+- **[connector](https://github.com/toon-protocol/connector)** — the payment
+  engine that runs in front of this. Claim validation lives there and only
+  there.
+- **[toon-meta](https://github.com/toon-protocol/toon-meta)** — shared docs,
+  agent skills, and the canonical project context.
 
-The store itself is payment-oblivious; the channel contracts belong to the
-**connector** deployment. Since the 2026-07-19 public-chain cutover the devnet
-settles on public networks, and since the 2026-08-06 ERC-2771 cutover
-(`connector#695`) EVM settlement runs through the meta-tx-aware
-`TokenNetwork` + trusted forwarder, not the pre-ERC-2771 deployment. Canonical
-machine-readable source: the apex's **kind:10032 announce** on the relay;
-human-readable: toon-client
-[`packages/rig/README.md` § "Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains) +
-toon-meta [`docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md).
-Snapshot (devnet/testnet only — **TOON has no mainnet deployments**):
-
-| Chain / network | What | Id |
-|---|---|---|
-| Solana devnet | payment-channel program (fixed public deployment) | `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` |
-| Solana devnet | mock USDC SPL mint (6dp) | `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` |
-| Mina public devnet | canonical USDC token (6dp) | token `B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d` · tokenId `9497120696276615621907376728658022802954262638363646162765282600447713419198` |
-| Mina public devnet | `PaymentChannel` zkApp | `B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf` |
-| Base Sepolia (`evm:84532`) | TokenNetworkRegistry / TokenNetwork / ERC2771Forwarder / USDC | registry `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` · TokenNetwork `0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478` · forwarder `0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9` · USDC `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` |
-
-To let the kind:5096 gas station co-sign a channel deposit/close/settle for
-that Solana program, set `GAS_STATION_CHANNEL_PROGRAM_ID` to the current row
-above — read it fresh from the live kind:10032 announce at deploy time, since
-this address belongs to the connector's deployment and rotates with it (see
-e.g. commits #64/#66 rotating other announce-derived addresses in this repo).
+This repo publishes no npm package. It is a container:
+`ghcr.io/toon-protocol/store`.

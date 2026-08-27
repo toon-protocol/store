@@ -1,0 +1,78 @@
+# Rendered by ../render.sh -> ./conf.d/node.conf. Edit the template, not the
+# rendered file.
+#
+# Two virtual hosts on one certificate:
+#   proxy.ario.${DOMAIN}  the paid ILP edge  -> connector:4000
+#   dvm.${DOMAIN}         the health surface -> store:3400
+
+limit_req_zone $binary_remote_addr zone=store:10m rate=200r/s;
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+map $host $backend {
+    default              "";
+    proxy.ario.${DOMAIN} "http://connector:4000";
+    dvm.${DOMAIN}        "http://store:3400";
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name proxy.ario.${DOMAIN} dvm.${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name proxy.ario.${DOMAIN} dvm.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CERT_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Docker's embedded DNS, re-resolved every 10s. This is load-bearing:
+    # nginx resolves a literal upstream hostname ONCE at config-parse time, so
+    # when Watchtower recreates the connector at a new address the edge 502s
+    # until someone reloads nginx. Going through a variable forces a runtime
+    # lookup instead, which is what makes unattended updates safe here.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location ^~ /admin { return 404; }
+
+    location = /ilp/identity {
+        add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
+        add_header Vary "Origin" always;
+        limit_req zone=store burst=400 nodelay;
+        set $upstream connector;
+        proxy_pass http://$upstream:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location / {
+        if ($backend = "") { return 404; }
+        limit_req zone=store burst=400 nodelay;
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+        client_max_body_size 4m;
+    }
+}
