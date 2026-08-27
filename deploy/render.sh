@@ -23,7 +23,20 @@ export CERT_NAME
 
 envsubst '${OPERATOR_BEARER_TOKEN} ${OPERATOR_WRITE_KEY}' \
   < connector.toml.template > connector.toml
+
+# This file carries the operator bearer token inline, so it must not be
+# world-readable — but the connector container runs as uid 10001, and a
+# root-owned 0600 file is unreadable to it ("failed to read config file:
+# Permission denied", then a restart loop). Hand it to that uid rather than
+# widening the mode.
 chmod 600 connector.toml
+if [ "$(id -u)" = 0 ]; then
+  chown "${CONNECTOR_UID:-10001}:${CONNECTOR_UID:-10001}" connector.toml
+else
+  echo "note: not running as root, so connector.toml stays owned by $(id -un)." >&2
+  echo "      The connector container runs as uid 10001 and will not be able to" >&2
+  echo "      read it. Fine for a local render; re-run as root on the box." >&2
+fi
 
 mkdir -p nginx/conf.d
 envsubst '${DOMAIN} ${CERT_NAME}' \
