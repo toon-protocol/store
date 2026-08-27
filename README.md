@@ -58,21 +58,27 @@ the whole seam.
 
 ## Job kinds
 
-`kind:5094` is always on. The other three register only when their credential is
+`kind:5094` is always on. `kind:5095` registers only when its credential is
 present, so a default deployment serves blob storage and nothing else.
 
 | Kind | What it does | Enabled by | Source |
 |---|---|---|---|
 | **5094** | Arweave blob storage | always on | [`entrypoint-store.ts`](./src/entrypoint-store.ts) |
 | **5095** | ArNS brokered name buy | `ARNS_DVM_SOLANA_SECRET_KEY` | [`arns-buy-handler.ts`](./src/arns-buy-handler.ts) |
-| **5096** | Solana gas station — co-signs and broadcasts | `GAS_STATION_SOLANA_SECRET_KEY` | [`gas-station-handler.ts`](./src/gas-station-handler.ts) |
-| **5098** | EVM gas station — ERC-2771 meta-transaction relayer | `EVM_GAS_STATION_CONFIG_JSON` | [`evm-gas-station-handler.ts`](./src/evm-gas-station-handler.ts) |
 
-Both gas stations follow the same security model: a dedicated fee-payer wallet,
-static inspection of the request, simulation with a cost cap, and a whitelist of
-what may be called. Neither will ever co-sign opening a payment channel or
-claiming from one — only depositing, closing and settling — so an agent can fund
-or reclaim its own channel without holding native gas, and nothing more.
+### The gas stations moved out
+
+`kind:5096` (Solana fee-payer co-sign) and `kind:5098` (EVM ERC-2771 relaying)
+now live in **[toon-protocol/gas-station](https://github.com/toon-protocol/gas-station)**.
+
+They were never storage. This node sells bytes it bought in bulk from Turbo; a
+gas station spends its own money, at whatever a chain charges that second, on a
+transaction a stranger wrote. That is a different security posture, a different
+thing to fund and monitor, and — as it turned out — a much smaller box. Sharing
+an image meant every store deploy was also a gas-station deploy, and the two
+had no reason to move together.
+
+A client that was paying `g.toon.ario` for a gas job wants `g.toon.gas` now.
 
 ## Run it locally
 
@@ -117,10 +123,10 @@ devbox run build && devbox run test
 | `STORE_CONFIG_JSON` / `STORE_CONFIG_PATH` | — | Full config as JSON, in place of the variables above |
 | `LOG_LEVEL` | `info` | |
 
-The four job-kind credentials are listed in
-[`deploy/.env.example`](./deploy/.env.example), which documents each one and how
-to generate it. All of them are treated as secrets: never logged, and deleted
-from `process.env` after boot.
+`kind:5095`'s credential is listed in
+[`deploy/.env.example`](./deploy/.env.example), which documents it and how to
+generate it. It is treated as a secret: never logged, and deleted from
+`process.env` after boot.
 
 ## Deploy it
 
@@ -157,9 +163,8 @@ deployment means.
 Deliberately not tabulated here — they rotate, and a table in a README rots
 silently. Read them from the source that cannot:
 
-- **ar.io program ids** — the `@ar.io/sdk` exports (`ARIO_*_PROGRAM_ID`). The
-  `kind:5096` whitelist is assembled from them at runtime in
-  `src/gas-station-handler.ts`.
+- **ar.io program ids** — the `@ar.io/sdk` exports (`ARIO_*_PROGRAM_ID`), which
+  `src/arns-buy-handler.ts` resolves at runtime.
 - **The connector's settlement addresses** — the live `kind:10032` announce, or
   `GET /ilp/identity` on a running node.
 - **What this deployment pins** — `deploy/connector.toml.template`, which is the
