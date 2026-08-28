@@ -182,12 +182,11 @@ than by trusting the firewall to hide a `0.0.0.0` bind.
 
 ## The routing table
 
-Two prefixes, one terminated here and one forwarded to the relay:
+One prefix, terminated here:
 
 | Prefix | Where it goes | Client pays here |
 |---|---|---|
-| `g.toon.ario` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` |
-| `g.toon.relay` | forwarded → the relay box, over BTP | `2` |
+| `g.toon.store` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` |
 
 A route is a prefix plus **exactly one** of `handler_url` (terminate) or
 `peer_id` (forward), and a price is required on both branches. Longest prefix
