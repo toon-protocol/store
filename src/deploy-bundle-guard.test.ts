@@ -141,8 +141,9 @@ const publishedPorts: PublishedPort[] = Object.entries(
 // ---------------------------------------------------------------------------
 
 // connector#695 / connector#811: the ERC-2771 (meta-tx-aware)
-// TokenNetworkRegistry, live on Base Sepolia since the 2026-08-06 cutover.
-const EXPECTED_CONTRACT_ADDRESS = '0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1';
+// TokenNetworkRegistry -- since 2026-08-28 the ADR 0059 cutover's (connector
+// docs/evm-deployment.md), whose TokenNetwork derives channel ids.
+const EXPECTED_CONTRACT_ADDRESS = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
 
 // connector#811: the mock USDC ERC-20 the fleet settles in.
 const EXPECTED_TOKEN_ADDRESS = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
