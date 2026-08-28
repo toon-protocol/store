@@ -15,9 +15,9 @@
 #     name. That is the behaviour you want — a stale config says so at boot
 #     instead of quietly doing nothing — but it means a config change and a
 #     connector upgrade must land in the right order. Land config first.
-#   * Every key that carries a secret is a PATH, never the value. The one
-#     exception is [operator] below, and that is a limitation of the pinned
-#     connector rather than a preference.
+#   * Every key that carries a secret is a PATH, never the value — the
+#     operator credentials included. Nothing in this file is a credential, so
+#     the rendered connector.toml is not a secret.
 #
 # ── This file targets an exact `rust-sha-` build ────────────────────────────
 # `docker-compose.yml` pins the connector to one immutable `rust-sha-` tag.
@@ -145,13 +145,22 @@ key_file = "/app/data/settlement-solana.key"
 # mounted at all (404, not 401) — which also means no way to redeem what you
 # have earned, so it is not optional in practice.
 #
-# These are INLINE values, so the rendered connector.toml is a secret:
-# render.sh writes it 0600 and .gitignore keeps it out of git. Only the
-# template is committed. (The pinned build also accepts *_file keys; this
-# bundle keeps the inline spelling, and the guard test asserts which.)
+# Both are FILE-VALUED, like every other credential this file names. The
+# values live in two files render.sh writes from .env (`OPERATOR_BEARER_TOKEN`
+# and `OPERATOR_WRITE_KEY`), 0600 and owned by uid 10001, mounted beside the
+# key files — so the rendered connector.toml holds paths and nothing else. A
+# section naming a file that is missing or empty is a refuse-to-start, never a
+# silently open surface.
+#
+# `write_keys_file` is the allowlist of RFC 9421 signing keys for operator
+# WRITES — `POST /peers`, `POST /routes/peers`, `POST /channels/:id/fund` —
+# one PUBLIC key per line, `#` comments allowed. The private half never lives
+# on this box; to sign a write from a shell, use the connector repo's
+# docs/operators/sign-write.sh. Revoke a key by deleting its line and
+# restarting.
 [operator]
-bearer_token = "${OPERATOR_BEARER_TOKEN}"
-write_keys   = ["${OPERATOR_WRITE_KEY}"]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file   = "/app/data/operator-write.keys"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

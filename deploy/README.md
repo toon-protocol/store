@@ -33,15 +33,16 @@ runs is here: the payment proxy, the job backend, TLS and unattended updates. `.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The six containers above. The only file that names an image tag. |
-| `connector.toml.template` | The payment proxy's config: what this node sells, at what price, and how it settles. Rendered to `connector.toml`. |
+| `connector.toml.template` | The payment proxy's config: what this node sells, at what price, and how it settles. Rendered to `connector.toml`. It names key and credential PATHS only, so it holds no secret. |
 | `nginx/node.conf.template` | The TLS edge. Rendered to `nginx/conf.d/node.conf`. |
-| `render.sh` | Fills both templates in from `.env`. |
+| `render.sh` | Fills the templates in from `.env`, and writes the operator surface's two credential files — `operator-bearer.token` and `operator-write.keys` — from `OPERATOR_BEARER_TOKEN` and `OPERATOR_WRITE_KEY`. |
 | `bootstrap.sh` | Fresh-host install: firewall, docker, render, start, TLS. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
 
-`.env`, the rendered `connector.toml`, `nginx/conf.d/` and all key material are
-gitignored. **Only templates are committed.**
+`.env`, the rendered `connector.toml`, `operator-bearer.token`,
+`operator-write.keys`, `nginx/conf.d/` and all key material are gitignored.
+**Only templates are committed.**
 
 ## Standing one up
 
@@ -87,7 +88,9 @@ so a DNS mistake does not burn the real rate limit. Once
 ## Checking it works
 
 ```bash
-docker compose ps                                    # six services, store healthy
+docker compose ps                                    # six services, connector and store healthy
+# the connector's healthcheck is GET /ilp/identity — 200 only once it is
+# serving AND has read its signer key, which "Up" alone does not prove
 curl https://dvm.<domain>/health                     # {"status":"ok","handlerKinds":[5094],...}
 curl https://proxy.ario.<domain>/ilp/identity        # the signer pubkey clients seal to
 curl https://proxy.ario.<domain>/ilp                  # the [node] self-description clients discover

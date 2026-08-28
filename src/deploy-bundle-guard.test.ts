@@ -17,9 +17,11 @@ const readRepoFile = (relativePath: string): string =>
   readFileSync(`${repoRoot}${relativePath}`, 'utf8');
 
 // ---------------------------------------------------------------------------
-// The connector config is a TEMPLATE. The rendered connector.toml carries the
-// operator bearer token, so it is gitignored and does not exist in CI — render
-// it here the way render.sh does, with placeholder secrets.
+// The connector config is a TEMPLATE. The rendered connector.toml is gitignored
+// and does not exist in CI, so render it here the way render.sh does. It holds
+// no credential any more — the operator surface's two values live in their own
+// files — but the substitution table stays, so a placeholder reintroduced to
+// the template has to be rendered here too rather than parsed as literal text.
 // ---------------------------------------------------------------------------
 
 const CONNECTOR_TEMPLATE = readRepoFile('deploy/connector.toml.template');
@@ -91,6 +93,8 @@ const connectorTemplateCode = CONNECTOR_TEMPLATE.split('\n')
 interface ComposeService {
   image?: string;
   labels?: Record<string, string>;
+  volumes?: string[];
+  healthcheck?: { test?: string[]; interval?: string; retries?: number };
   // Both hold YAML scalars, so an unquoted entry parses as a number — hence the
   // String() coercions below.
   ports?: (string | number)[];
@@ -407,16 +411,54 @@ describe('deploy/ config matches the pinned connector', () => {
     expect(connectorTemplateCode).not.toMatch(/credential/);
   });
 
-  // NOTE: inline operator keys are not deprecated — a newer connector accepts
-  // BOTH these and the *_file variants. This asserts what this bundle uses so
-  // the template and the rendered file cannot silently disagree, not that the
-  // *_file form is wrong.
-  it('uses inline operator credentials', () => {
+  // The operator surface's two credentials are FILE-VALUED, the way every
+  // other credential in this config is (the connector accepts both spellings).
+  // Inline values made the rendered connector.toml itself a secret; paths mean
+  // the only secret on the box is the file, which is the same shape the relay
+  // and gas-station bundles run.
+  it('names the operator credentials by path, never inline', () => {
     expect(Object.keys(connectorToml.operator).sort()).toEqual([
-      'bearer_token',
-      'write_keys',
+      'bearer_token_file',
+      'write_keys_file',
     ]);
-    expect(connectorTemplateCode).not.toMatch(/bearer_token_file|write_keys_file/);
+    expect(connectorToml.operator['bearer_token_file']).toBe(
+      '/app/data/operator-bearer.token'
+    );
+    expect(connectorToml.operator['write_keys_file']).toBe(
+      '/app/data/operator-write.keys'
+    );
+    // The inline spelling must not come back: it would put a live credential
+    // into the rendered file again.
+    expect(connectorTemplateCode).not.toMatch(/^\s*bearer_token\s*=/m);
+    expect(connectorTemplateCode).not.toMatch(/^\s*write_keys\s*=/m);
+  });
+
+  it('mounts both operator credential files read-only where the config names them', () => {
+    // A path the config names but the compose file does not mount is a
+    // refuse-to-start: the connector reads the section at boot, fail-closed.
+    const volumes = composeFile.services['connector']?.volumes ?? [];
+    for (const file of ['operator-bearer.token', 'operator-write.keys']) {
+      expect(
+        volumes,
+        `connector must mount ./${file} at /app/data/${file} read-only`
+      ).toContain(`./${file}:/app/data/${file}:ro`);
+    }
+  });
+
+  it('proves the connector is SERVING, not merely up', () => {
+    // `docker ps` showing "Up" says the process exists. GET /ilp/identity is
+    // unauthenticated and answers 200 only once the listener is bound and the
+    // signer key file has been read.
+    const healthcheck = composeFile.services['connector']?.healthcheck;
+    expect(healthcheck, 'the connector service needs a healthcheck').toBeDefined();
+    const test = (healthcheck?.test ?? []).join(' ');
+    expect(test).toContain('/ilp/identity');
+    // 127.0.0.1, never localhost: the listener is IPv4-only, and "localhost"
+    // in a container can resolve to ::1, where nothing answers.
+    expect(test).toContain('http://127.0.0.1:4000/ilp/identity');
+    expect(test, 'localhost can resolve to ::1 in a container').not.toContain(
+      'localhost'
+    );
   });
 });
 
@@ -453,9 +495,29 @@ describe('deploy/ render.sh substitutes exactly what the templates need', () => 
     expect(() => parse(renderedConnectorToml)).not.toThrow();
   });
 
-  it('keeps the rendered connector.toml out of git', () => {
-    // It carries the operator bearer token inline on this connector tag.
-    expect(readRepoFile('deploy/.gitignore')).toMatch(/^connector\.toml$/m);
+  it('keeps every rendered file, and both operator credentials, out of git', () => {
+    // connector.toml is only paths now, but the two files render.sh writes
+    // beside it are the real credentials — and neither matches the `*.key`
+    // rule already there.
+    const ignored = readRepoFile('deploy/.gitignore');
+    expect(ignored).toMatch(/^connector\.toml$/m);
+    expect(ignored).toMatch(/^operator-bearer\.token$/m);
+    expect(ignored).toMatch(/^operator-write\.keys$/m);
+  });
+
+  it('writes both operator credential files from the same .env variables', () => {
+    // The variable names did not change — operators already have them set.
+    expect(RENDER_SH).toMatch(/\$\{OPERATOR_BEARER_TOKEN\}.*>\s*operator-bearer\.token/s);
+    expect(RENDER_SH).toContain('${OPERATOR_WRITE_KEY}');
+    expect(RENDER_SH).toContain('> operator-write.keys');
+  });
+
+  it('hands both operator files to the container uid, 0600', () => {
+    // A root-owned 0600 file is unreadable to uid 10001 — "Permission denied",
+    // then a restart loop.
+    expect(RENDER_SH).toMatch(/chmod 600 .*operator-bearer\.token operator-write\.keys/);
+    expect(RENDER_SH).toMatch(/chown "\$\{CONNECTOR_UID:-10001\}/);
+    expect(RENDER_SH).toMatch(/not running as root/);
   });
 });
 
