@@ -58,13 +58,69 @@ the whole seam.
 
 ## Job kinds
 
-`kind:5094` is always on. `kind:5095` registers only when its credential is
-present, so a default deployment serves blob storage and nothing else.
+`kind:5094` is always on, and so is `kind:5095` — but only half of it. The
+credential gates spending, not the kind: `op=prepare` composes an unsigned
+transaction and needs no key, no RPC and no $ARIO, so it runs on any store.
+`op=buy` spends the operator's money, so without
+`ARNS_DVM_SOLANA_SECRET_KEY` it refuses by name and says the other op is
+available.
 
 | Kind | What it does | Enabled by | Source |
 |---|---|---|---|
 | **5094** | Arweave blob storage | always on | [`entrypoint-store.ts`](./src/entrypoint-store.ts) |
-| **5095** | ArNS brokered name buy | `ARNS_DVM_SOLANA_SECRET_KEY` | [`arns-buy-handler.ts`](./src/arns-buy-handler.ts) |
+| **5095** | ArNS brokered name buy (`op=buy`) | `ARNS_DVM_SOLANA_SECRET_KEY` | [`arns-buy-handler.ts`](./src/arns-buy-handler.ts) |
+| **5095** | ANT spawn composition (`op=prepare`) | always on | [`arns-ant-prepare.ts`](./src/arns-ant-prepare.ts) |
+
+### kind:5095 has two ops
+
+`op=buy` is the original job and stays the default, so a caller that sends no
+`op` tag is unaffected. It wants a `processId`: the MPL Core asset pubkey of an
+ANT the client already owns.
+
+Which was the problem. Spawning an ANT costs ~0.012 SOL of rent, and a TOON
+client holds ILP credit, not SOL — so `kind:5095` shipped with a precondition
+none of its callers could satisfy. `op=prepare` closes that. The store composes
+the spawn transaction, the **client** signs it, and the **gas station**
+([`g.toon.gas`](https://github.com/toon-protocol/gas-station)) pays for it and
+broadcasts it. Three parties, one transaction, and this store touches no key.
+
+```
+1. client -> gas station  quote (no draft)      -> feePayer
+2. client -> store        op=prepare            -> unsigned draft transaction
+3. client -> gas station  quote (with draft)    -> quoteId, recentBlockhash, maxLamports
+4. client -> store        op=prepare + blockhash-> the final transaction
+5. client                 signs mint + owner    (in place; never recompile)
+6. client -> gas station  execute               -> co-signed, broadcast
+7. client -> store        op=buy processId=mint -> the name is yours
+```
+
+Steps 2 and 4 are the same call — `recentBlockhash` is optional exactly so one
+implementation serves both. Two rounds are needed because the gas station
+requires a *signed* draft to price the job (an unpriced quote caps at 1,000,000
+lamports, and this transaction costs ~12.2M), and then requires the executed
+transaction to carry the blockhash *it* chose. A client that can patch 32 bytes
+into a serialized message can skip step 4.
+
+The transaction the store composes:
+
+```
+[0] ComputeBudget::SetComputeUnitLimit(400_000)
+[1] System::Transfer   feePayer -> owner, 9_242_880 lamports
+[2] MPL Core CreateV1  asset=mint  authority=owner  payer=feePayer
+[3] ario_ant::initialize  owner=owner
+```
+
+Instruction [1] is not a convenience. `ario_ant::initialize` has no payer
+account — its `owner` is the writable signer, so the ANT's three state PDAs are
+debited from the *client*. `CreateV1` does have a payer slot, so the asset's
+rent comes straight off the gas wallet. A zero-SOL client can only cover the
+PDA half if the fee payer hands it the lamports in the same atomic transaction.
+
+The ACL bootstrap is deliberately left out: ~61.4M lamports against a 20M
+per-job ceiling, and its instructions put the payer in an ar.io slot the gas
+station refuses outright. The ANT resolves without it — it just will not appear
+in "ANTs I own" registry lookups until the client bootstraps it with its own
+SOL, and that registry is an eventually-consistent index, not truth.
 
 ### The gas stations moved out
 

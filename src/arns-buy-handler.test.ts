@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { NostrEvent } from 'nostr-tools/pure';
 import {
   ARNS_BUY_KIND,
+  coerceTokenCost,
   createArnsBuyHandler,
   parseArnsBuyParams,
   type ArnsBuySdk,
@@ -344,19 +345,31 @@ describe('startStoreBackend kind dispatch', () => {
 describe('resolveArnsBuyEnv', () => {
   const HEX = 'ab'.repeat(64);
 
-  it('disabled when the key is absent or empty/whitespace', () => {
-    expect(resolveArnsBuyEnv({})).toBeUndefined();
-    expect(resolveArnsBuyEnv({ ARNS_DVM_SOLANA_SECRET_KEY: '' })).toBeUndefined();
-    expect(
-      resolveArnsBuyEnv({ ARNS_DVM_SOLANA_SECRET_KEY: '  \n' })
-    ).toBeUndefined();
+  // Always a config now: kind:5095 is always at least partly served, because
+  // `op=prepare` needs no credential. An absent key leaves the buy half unset.
+  it('yields a keyless config when the key is absent or empty/whitespace', () => {
+    for (const env of [
+      {},
+      { ARNS_DVM_SOLANA_SECRET_KEY: '' },
+      { ARNS_DVM_SOLANA_SECRET_KEY: '  \n' },
+    ]) {
+      const cfg = resolveArnsBuyEnv(env);
+      expect(cfg.network).toBe('devnet');
+      expect(cfg.solanaSecretKey).toBeUndefined();
+    }
+  });
+
+  it('honours ARNS_NETWORK even with no key', () => {
+    expect(resolveArnsBuyEnv({ ARNS_NETWORK: 'mainnet' }).network).toBe(
+      'mainnet'
+    );
   });
 
   it('defaults to devnet and decodes the 64-byte keypair', () => {
     const cfg = resolveArnsBuyEnv({ ARNS_DVM_SOLANA_SECRET_KEY: HEX });
-    expect(cfg?.network).toBe('devnet');
-    expect(cfg?.solanaSecretKey).toHaveLength(64);
-    expect(cfg?.solanaSecretKey[0]).toBe(0xab);
+    expect(cfg.network).toBe('devnet');
+    expect(cfg.solanaSecretKey).toHaveLength(64);
+    expect(cfg.solanaSecretKey?.[0]).toBe(0xab);
   });
 
   it('mainnet is explicit opt-in', () => {
@@ -364,7 +377,7 @@ describe('resolveArnsBuyEnv', () => {
       resolveArnsBuyEnv({
         ARNS_DVM_SOLANA_SECRET_KEY: HEX,
         ARNS_NETWORK: 'mainnet',
-      })?.network
+      }).network
     ).toBe('mainnet');
   });
 
@@ -378,5 +391,123 @@ describe('resolveArnsBuyEnv', () => {
         ARNS_NETWORK: 'testnet',
       })
     ).toThrow(/ARNS_NETWORK/);
+  });
+});
+
+// ── Hardening ───────────────────────────────────────────────────────────────
+
+describe('coerceTokenCost', () => {
+  it('passes integers and bigints through unchanged', () => {
+    expect(coerceTokenCost(2_291_718_480)).toBe(2_291_718_480n);
+    expect(coerceTokenCost(2_291_718_480n)).toBe(2_291_718_480n);
+    expect(coerceTokenCost(0)).toBe(0n);
+  });
+
+  it('rounds a fractional demand-factor cost up instead of throwing', () => {
+    // `BigInt(String(1.5))` is a SyntaxError, and it used to reach the caller
+    // at the quote step — killing a buy that had not yet spent anything.
+    expect(coerceTokenCost(1.5)).toBe(2n);
+    expect(coerceTokenCost(2_291_718_480.2)).toBe(2_291_718_481n);
+  });
+
+  it('rejects a non-numeric cost with a message that names the value', () => {
+    expect(() => coerceTokenCost('not-a-number')).toThrow(/non-numeric cost/);
+    expect(() => coerceTokenCost(Number.NaN)).toThrow(/non-numeric cost/);
+    expect(() => coerceTokenCost(-1)).toThrow(/non-numeric cost/);
+  });
+});
+
+describe('a store with no ArNS credential', () => {
+  // `op=prepare` spends nothing, so it does not need the key. Only `op=buy`
+  // does, and it must say so by name rather than failing on key bytes.
+  const keyless = () =>
+    createArnsBuyHandler({
+      network: 'devnet',
+      loadSdk: vi.fn(async () => {
+        throw new Error('the SDK must not be loaded without a credential');
+      }),
+    });
+
+  it('refuses op=buy with F00 and names the missing credential', async () => {
+    const res = await keyless()(
+      ctxFor(buyEvent({ name: 'anything', processId: CLIENT_ANT }))
+    );
+    expect(res).toMatchObject({ accept: false, code: 'F00' });
+    expect((res as { message: string }).message).toMatch(
+      /ARNS_DVM_SOLANA_SECRET_KEY/
+    );
+    expect((res as { message: string }).message).toMatch(/op=prepare/);
+  });
+
+  it('still serves op=prepare', async () => {
+    const handler = createArnsBuyHandler({
+      network: 'devnet',
+      loadSdk: vi.fn(async () => {
+        throw new Error('the SDK must not be loaded for a prepare');
+      }),
+    });
+    const res = await handler(
+      ctxFor(
+        buyEvent({
+          op: 'prepare',
+          name: 'toon-demo',
+          owner: '3EKkiwNLWqoUbzFkPrmKbtUB4EweE6f4STzevYUmezeL',
+          mint: '2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z',
+          feePayer: 'k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn',
+        })
+      )
+    );
+    expect(res.accept).toBe(true);
+  });
+});
+
+describe('buy idempotency', () => {
+  it('replays a completed buy instead of purchasing twice', async () => {
+    const sdk = stubSdk();
+    const handler = handlerWith(sdk);
+    const event = buyEvent({ name: 'ok-name', processId: CLIENT_ANT });
+
+    const first = decodeReceipt(await handler(ctxFor(event)));
+    const second = await handler(ctxFor(event));
+    const replayed = decodeReceipt(second) as ArnsBuyReceipt & {
+      replayed?: boolean;
+    };
+
+    expect(sdk.buyRecord).toHaveBeenCalledTimes(1);
+    expect(replayed.registryTxId).toBe(first.registryTxId);
+    expect(replayed.replayed).toBe(true);
+  });
+
+  it('a distinct job is not confused for a replay', async () => {
+    const sdk = stubSdk();
+    const handler = handlerWith(sdk);
+    await handler(ctxFor(buyEvent({ name: 'one', processId: CLIENT_ANT })));
+    await handler(
+      ctxFor({
+        ...buyEvent({ name: 'two', processId: CLIENT_ANT }),
+        id: 'f'.repeat(64),
+      })
+    );
+    expect(sdk.buyRecord).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed buy stays retryable', async () => {
+    const sdk = stubSdk({
+      buyRecord: vi
+        .fn<[unknown], Promise<{ id: string }>>()
+        .mockRejectedValueOnce(new Error('rpc flaked'))
+        .mockResolvedValue({ id: 'registry-tx-sig' }),
+    });
+    const handler = handlerWith(sdk);
+    const event = buyEvent({ name: 'ok-name', processId: CLIENT_ANT });
+
+    expect(await handler(ctxFor(event))).toMatchObject({
+      accept: false,
+      code: 'T00',
+    });
+    expect(decodeReceipt(await handler(ctxFor(event))).registryTxId).toBe(
+      'registry-tx-sig'
+    );
+    expect(sdk.buyRecord).toHaveBeenCalledTimes(2);
   });
 });

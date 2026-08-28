@@ -35,15 +35,31 @@ import type {
   StoreHandlerContext,
   StoreHandlerResponse,
 } from './store-backend.js';
+import {
+  ARNS_BUY_KIND,
+  ARNS_NAME_REGEX,
+  SOLANA_PUBKEY_REGEX,
+  paramTag,
+  type ArnsNameType,
+  type ArnsNetwork,
+} from './arns-params.js';
+import {
+  buildAntSpawnTransaction,
+  defaultLoadArnsPrepareDeps,
+  parseArnsAntPrepareParams,
+  type ArnsPrepareDeps,
+  type LoadArnsPrepareDeps,
+} from './arns-ant-prepare.js';
 
-/** The NIP-90 job kind for a brokered ArNS name purchase. */
-export const ARNS_BUY_KIND = 5095;
-
-/** A name registration kind: a time-boxed lease or a one-time permabuy. */
-export type ArnsNameType = 'lease' | 'permabuy';
-
-/** Which cluster's ar.io deployment to target (no testnet — ar.io has none). */
-export type ArnsNetwork = 'mainnet' | 'devnet';
+// The kind and the shared param vocabulary now live in ./arns-params (the buy
+// op imports the prepare op to dispatch to it, so anything prepare needed back
+// from here would be a cycle). Re-exported so callers keep one import site.
+export {
+  ARNS_BUY_KIND,
+  SOLANA_PUBKEY_REGEX,
+  type ArnsNameType,
+  type ArnsNetwork,
+};
 
 /** Parsed, validated job parameters (from the event's `param` tags). */
 export interface ArnsBuyParams {
@@ -131,6 +147,28 @@ interface RawSolanaKitModule {
 }
 
 /**
+ * Normalise whatever `getTokenCost` hands back into mARIO base units.
+ *
+ * The SDK types it `Promise<number>`, and the demand-factor arithmetic behind
+ * it is not guaranteed integral. The obvious `BigInt(String(cost))` throws a
+ * SyntaxError on `1.5` — and on anything ≥ 1e21, which stringifies as
+ * `"1e+21"` — which would take down an otherwise-fine buy at the QUOTE step,
+ * before any money moved. Round up: this figure exists so an operator can
+ * reconcile the flat route price against the name cost, and the buy's real
+ * price is set on chain regardless.
+ */
+export function coerceTokenCost(raw: unknown): bigint {
+  if (typeof raw === 'bigint') return raw;
+  const cost = Number(raw);
+  if (!Number.isFinite(cost) || cost < 0) {
+    throw new Error(
+      `getTokenCost returned a non-numeric cost: ${JSON.stringify(raw)}`
+    );
+  }
+  return BigInt(Math.ceil(cost));
+}
+
+/**
  * Default {@link LoadArnsBuySdk}: lazily import `@ar.io/sdk` + `@solana/kit`
  * (variable specifiers so esbuild leaves them dynamic — both are marked
  * external in esbuild.config.mjs) and build a WRITE client from the DVM's
@@ -196,7 +234,7 @@ export const defaultLoadArnsBuySdk: LoadArnsBuySdk = async (options) => {
   });
 
   return {
-    getTokenCost: async (args) => BigInt(String(await ario.getTokenCost(args))),
+    getTokenCost: async (args) => coerceTokenCost(await ario.getTokenCost(args)),
     buyRecord: async (args) => {
       if (typeof ario.buyRecord !== 'function') {
         throw new Error('the signed ARIO client exposes no buyRecord');
@@ -216,19 +254,7 @@ export const defaultLoadArnsBuySdk: LoadArnsBuySdk = async (options) => {
 // Param parsing
 // ---------------------------------------------------------------------------
 
-/** ArNS name rule: 1–51 chars, lowercase alnum + hyphens, no edge hyphens. */
-const ARNS_NAME_REGEX = /^(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,49}[a-z0-9])$/;
-/** Base58 Solana pubkey (32–44 chars, Bitcoin/Solana alphabet). */
-export const SOLANA_PUBKEY_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const MAX_LEASE_YEARS = 5;
-
-/** First value of a NIP-90 `['param', <key>, <value>]` tag, if present. */
-function paramTag(event: NostrEvent, key: string): string | undefined {
-  for (const tag of event.tags) {
-    if (tag[0] === 'param' && tag[1] === key) return tag[2];
-  }
-  return undefined;
-}
 
 /**
  * Parse + validate the kind:5095 job params from the event's `param` tags:
@@ -294,10 +320,21 @@ export function parseArnsBuyParams(event: NostrEvent): ArnsBuyParams {
 export interface ArnsBuyConfig {
   /** Which cluster's ar.io deployment the DVM buys on. */
   network: ArnsNetwork;
-  /** 64-byte Ed25519 Solana keypair of the DVM's funded payer wallet. */
-  solanaSecretKey: Uint8Array;
+  /**
+   * 64-byte Ed25519 Solana keypair of the DVM's funded payer wallet.
+   *
+   * Optional, because only `op=buy` spends. Without it the handler still
+   * serves `op=prepare` and refuses `op=buy` by name.
+   */
+  solanaSecretKey?: Uint8Array;
   /** SDK loader seam (tests inject a stub; defaults to the lazy import). */
   loadSdk?: LoadArnsBuySdk;
+  /**
+   * `op=prepare` deps seam (tests inject a stub; defaults to the lazy import).
+   * Separate from {@link loadSdk} on purpose — prepare needs no key, no RPC and
+   * no ARIO float, so a store that cannot buy can still compose.
+   */
+  loadPrepareDeps?: LoadArnsPrepareDeps;
 }
 
 /** The JSON receipt encoded (base64) into an accepted job's `data`. */
@@ -328,16 +365,37 @@ export function createArnsBuyHandler(
 ): (ctx: StoreHandlerContext) => Promise<StoreHandlerResponse> {
   let sdkPromise: Promise<ArnsBuySdk> | undefined;
   const loadSdk = config.loadSdk ?? defaultLoadArnsBuySdk;
-  const getSdk = () => {
+  const getSdk = (solanaSecretKey: Uint8Array) => {
     sdkPromise ??= loadSdk({
       network: config.network,
-      solanaSecretKey: config.solanaSecretKey,
+      solanaSecretKey,
     }).catch((err: unknown) => {
       // Let a later job retry (e.g. after the operator fixes the install).
       sdkPromise = undefined;
       throw err;
     });
     return sdkPromise;
+  };
+
+  // Idempotency: a kind:5095 job's Nostr event id is a content hash, so a
+  // retried job is already keyed for free. A replayed buy would otherwise
+  // re-attempt a real purchase and fail on chain (the ArnsRecord PDA already
+  // exists), turning a safe retry into a confusing T00. Successful receipts
+  // only — a failure should be retryable. Bounded, because an unbounded map on
+  // a long-lived container is a slow leak.
+  const replayable = new Map<string, ArnsBuyReceipt>();
+  const MAX_REPLAY_ENTRIES = 1_000;
+
+  let prepareDepsPromise: Promise<ArnsPrepareDeps> | undefined;
+  const loadPrepareDeps = config.loadPrepareDeps ?? defaultLoadArnsPrepareDeps;
+  const getPrepareDeps = () => {
+    prepareDepsPromise ??= loadPrepareDeps({ network: config.network }).catch(
+      (err: unknown) => {
+        prepareDepsPromise = undefined;
+        throw err;
+      }
+    );
+    return prepareDepsPromise;
   };
 
   return async (ctx) => {
@@ -349,6 +407,66 @@ export function createArnsBuyHandler(
       );
     }
 
+    // Two ops on one kind. `buy` is the default so every pre-existing caller —
+    // which sent no `op` tag at all — keeps working untouched.
+    const op = paramTag(event, 'op') ?? 'buy';
+    if (op !== 'buy' && op !== 'prepare') {
+      return ctx.reject(
+        'F00',
+        `invalid op ${JSON.stringify(op)} — expected buy | prepare`
+      );
+    }
+
+    if (op === 'prepare') {
+      let deps: ArnsPrepareDeps;
+      try {
+        deps = await getPrepareDeps();
+      } catch (err) {
+        return ctx.reject(
+          'T00',
+          `arns-buy failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      let prepareParams;
+      try {
+        prepareParams = parseArnsAntPrepareParams(event, deps.defaultTarget);
+      } catch (err) {
+        return ctx.reject(
+          'F00',
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+      try {
+        const receipt = await buildAntSpawnTransaction(
+          prepareParams,
+          deps,
+          config.network
+        );
+        return {
+          accept: true,
+          data: Buffer.from(JSON.stringify(receipt), 'utf8').toString('base64'),
+        };
+      } catch (err) {
+        return ctx.reject(
+          'T00',
+          `arns-buy failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    // Only `op=buy` spends, so only `op=buy` needs the credential. Refuse by
+    // name here rather than letting the SDK loader fail with something about
+    // key bytes — the caller's problem is the operator's configuration.
+    const solanaSecretKey = config.solanaSecretKey;
+    if (solanaSecretKey === undefined) {
+      return ctx.reject(
+        'F00',
+        `kind:${ARNS_BUY_KIND} op=buy is not enabled on this store — the ` +
+          'operator has not set ARNS_DVM_SOLANA_SECRET_KEY. op=prepare needs ' +
+          'no credential and is available.'
+      );
+    }
+
     let params: ArnsBuyParams;
     try {
       params = parseArnsBuyParams(event);
@@ -356,8 +474,20 @@ export function createArnsBuyHandler(
       return ctx.reject('F00', err instanceof Error ? err.message : String(err));
     }
 
+    const replayKey = paramTag(event, 'idempotencyKey') ?? event.id;
+    const replay = replayable.get(replayKey);
+    if (replay !== undefined) {
+      return {
+        accept: true,
+        data: Buffer.from(
+          JSON.stringify({ ...replay, replayed: true }),
+          'utf8'
+        ).toString('base64'),
+      };
+    }
+
     try {
-      const sdk = await getSdk();
+      const sdk = await getSdk(solanaSecretKey);
 
       // Quote first (free read) so the receipt records what the buy cost.
       const quotedMario = await sdk.getTokenCost({
@@ -400,6 +530,11 @@ export function createArnsBuyHandler(
         registryTxId: receipt.id,
         syncAttributesTxId,
       };
+      if (replayable.size >= MAX_REPLAY_ENTRIES) {
+        const oldest = replayable.keys().next();
+        if (!oldest.done) replayable.delete(oldest.value);
+      }
+      replayable.set(replayKey, result);
       return {
         accept: true,
         data: Buffer.from(JSON.stringify(result), 'utf8').toString('base64'),
