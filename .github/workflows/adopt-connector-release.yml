@@ -246,9 +246,26 @@ jobs:
           <sub>Opened automatically by `.github/workflows/adopt-connector-release.yml`.</sub>
           MD
 
-          gh pr create --base main --head "$BRANCH" \
-            --title "deploy: adopt connector release $HANDLE" \
-            --body-file /tmp/pr-body.md
+          # The branch is already pushed, so the work is not lost if this fails.
+          # It CAN fail for one reason that is a repository setting rather than
+          # anything about this change: "Allow GitHub Actions to create and
+          # approve pull requests" (Settings -> Actions -> General) is off by
+          # default for an organisation, and with it off `GITHUB_TOKEN` may push
+          # a branch but not open a pull request for it. Say so, with the URL
+          # that opens it by hand, rather than leaving a bare GraphQL error --
+          # this step runs at most once per release, so nobody will be looking
+          # at it with the context fresh.
+          if ! gh pr create --base main --head "$BRANCH" \
+                 --title "deploy: adopt connector release $HANDLE" \
+                 --body-file /tmp/pr-body.md; then
+            echo "::error::The pin bump is pushed to $BRANCH, but this job could not open a pull request for it."
+            echo "::error::If the reason above is 'GitHub Actions is not permitted to create or approve pull requests',"
+            echo "::error::that is a setting, not a defect: enable 'Allow GitHub Actions to create and approve pull"
+            echo "::error::requests' for this repository or the organisation. Note it also permits a workflow to"
+            echo "::error::APPROVE a pull request, which is the half worth thinking about before turning it on."
+            echo "::error::Until then, open it by hand: https://github.com/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
+            exit 1
+          fi
 
           gh pr merge --auto --squash "$BRANCH" \
             || echo "::warning::auto-merge unavailable here -- the PR is open for a human to merge."
