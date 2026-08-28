@@ -191,21 +191,28 @@ const RELAYS_NAME_FOR_US = 'g.toon.relay.store';
 
 const TERMINATED_PREFIX = 'g.toon.store';
 
-// The fleet's promotion tag. The store box follows the SAME moving tag the
-// rest of the fleet does, rather than an immutable `rust-sha-*` literal — the
-// pin of record lives in the promotion (connector's promote-to-fleet.yml), and
-// a box pinned to a sha would sit out every fleet promotion silently.
-const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-release';
+// One immutable connector build, pinned here and in docker-compose.yml
+// together. This box used to follow the fleet's `:rust-release` pointer on the
+// theory that the pin of record lived in the promotion; nothing moves that
+// pointer any more (connector ADR 0068 — a node repository pins the connector
+// it runs, in one place, guarded there), so following it meant standing still
+// at connector 8708caf, before connector#1230 — and a peering established by
+// POST /peers could accept but never pay. The relay leg this box opened
+// (`g.toon.store.relay`) forwarded for free on that build. Bumping this
+// literal and the compose tag in one reviewed commit is how the connector
+// moves now.
+const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-sha-c714551';
 
 // Moved by publish-store-image.yml on every green main, watched by Watchtower.
 const EXPECTED_STORE_IMAGE = 'ghcr.io/toon-protocol/store:release';
 
 const WATCHTOWER_LABEL = 'com.centurylinklabs.watchtower.enable';
 
-// The two services that follow a moving tag, and therefore the two — and only
-// two — that Watchtower may recreate. nginx holds the resolver that lets every
-// other recreate self-heal; certbot holds the renewal timer; Watchtower must
-// not recreate itself.
+// The two app services, and therefore the two — and only two — that
+// Watchtower may recreate: the store follows a moving tag, and the connector
+// keeps the label so a bumped pin is picked up on the next `up -d`. nginx
+// holds the resolver that lets every other recreate self-heal; certbot holds
+// the renewal timer; Watchtower must not recreate itself.
 const WATCHED_SERVICES = ['connector', 'store'].sort();
 
 describe('deploy/ bundle is internally consistent', () => {
@@ -318,9 +325,15 @@ describe('deploy/ bundle is internally consistent', () => {
   });
 });
 
-describe('deploy/ tracks the fleet tags', () => {
-  it('runs the connector on the promotion tag', () => {
-    expect(composeFile.services['connector']?.image).toBe(EXPECTED_CONNECTOR_IMAGE);
+describe('deploy/ pins the connector and follows the store tag', () => {
+  it('pins one immutable rust-sha- build, never the retired :rust-release pointer', () => {
+    // Nothing moves `:rust-release` any more (connector ADR 0068); a bundle
+    // following it stands still. The literal here and in docker-compose.yml
+    // are the two places a bump has to land, together.
+    const image = composeFile.services['connector']?.image;
+    expect(image).toBe(EXPECTED_CONNECTOR_IMAGE);
+    expect(image).toMatch(/:rust-sha-[0-9a-f]{7}$/);
+    expect(readRepoFile('deploy/docker-compose.yml')).not.toContain('rust-release');
   });
 
   it('ships no announce sidecar', () => {
@@ -333,11 +346,11 @@ describe('deploy/ tracks the fleet tags', () => {
     expect(composeFile.services['store']?.image).toBe(EXPECTED_STORE_IMAGE);
   });
 
-  it('pins no immutable rust-sha- literal anywhere in the bundle', () => {
-    // The bundle follows :rust-release. A stray rust-sha- pin somewhere would
-    // mean part of the box sits out fleet promotions with nothing to notice it.
+  it('carries the pin literal in docker-compose.yml and nowhere else in the bundle', () => {
+    // One pin, one place. A second rust-sha- literal in the template, the env
+    // example or the README is a stale copy waiting to be read as the truth
+    // after the next bump; the docs say `rust-sha-` generically instead.
     for (const file of [
-      'deploy/docker-compose.yml',
       'deploy/connector.toml.template',
       'deploy/.env.example',
       'deploy/README.md',
@@ -348,7 +361,12 @@ describe('deploy/ tracks the fleet tags', () => {
     }
   });
 
-  it('labels exactly the services that follow a moving tag', () => {
+  it('says out loud how the pin is bumped', () => {
+    expect(CONNECTOR_TEMPLATE).toMatch(/targets an exact `rust-sha-` build/);
+    expect(readRepoFile('deploy/README.md')).toMatch(/^## Bumping the connector pin/m);
+  });
+
+  it('labels exactly the two app services for Watchtower', () => {
     const labelled = Object.entries(composeFile.services)
       .filter(([, service]) => service.labels?.[WATCHTOWER_LABEL] === 'true')
       .map(([name]) => name)
@@ -366,10 +384,10 @@ describe('deploy/ tracks the fleet tags', () => {
   });
 });
 
-describe('deploy/ config matches the promoted connector', () => {
+describe('deploy/ config matches the pinned connector', () => {
   // The connector parser is deny_unknown_fields and startup is fail-closed, so
   // a key a connector has removed is a refuse-to-start, not a degraded run.
-  // Verified by running this config against the promoted build. Asserted
+  // Verified by booting the pinned image on this config. Asserted
   // against the parsed document and comment-stripped source, so prose that
   // merely names a retired key does not trip them.
 

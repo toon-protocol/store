@@ -136,8 +136,9 @@ Ubuntu host is the entire install.
 
 Updates are unattended: a green merge to `main` publishes
 `ghcr.io/toon-protocol/store:release`, and Watchtower recreates the container
-within about a minute. The connector half follows the fleet's `:rust-release`
-promotion tag, which only ever moves under supervision.
+within about a minute. The connector half is an immutable `rust-sha-` pin,
+bumped by a reviewed commit in `deploy/` (nothing moves the old `:rust-release`
+pointer any more — connector ADR 0068).
 
 ## Develop
 

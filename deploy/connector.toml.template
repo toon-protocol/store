@@ -19,24 +19,36 @@
 #     exception is [operator] below, and that is a limitation of the pinned
 #     connector rather than a preference.
 #
-# ── This file targets `:rust-release` ────────────────────────────────────────
-# `docker-compose.yml` pins the connector to the fleet's promotion tag
-# `:rust-release`, which now carries ADR 0065 (a price is a schedule over
-# payload length) and ADR 0050/0060.
+# ── This file targets an exact `rust-sha-` build ────────────────────────────
+# `docker-compose.yml` pins the connector to one immutable `rust-sha-` tag.
+# It used to follow the fleet's `:rust-release` pointer; nothing moves that
+# pointer any more (connector ADR 0068 — a node repository pins the connector
+# it runs, in one place, guarded there), so following it meant standing still
+# on a build whose runtime peerings could accept but never pay (connector#1230).
 #
-# What that means for this file, and why it looks the way it does:
+# Bumping the pin is a reviewed commit here: change the image tag in
+# docker-compose.yml and the matching literal in
+# src/deploy-bundle-guard.test.ts together, land this file's changes FIRST if
+# the new build wants a different schema, then move the tag. The parser is
+# `deny_unknown_fields` and startup is fail-closed, so a schema drift under you
+# is a refuse-to-start, never a degraded run.
 #
-#   * `price` may be a `{ base, per_kib }` table. An older connector parses
-#     only a bare integer, so this file will NOT load on a build from before
-#     the promotion -- it is a TOML parse error, i.e. a refuse-to-start.
+# What the pinned build wants of this file, and why it looks the way it does:
+#
+#   * `price` may be a `{ base, per_kib }` table (ADR 0065). An older
+#     connector parses only a bare integer, so this file will NOT load on a
+#     build from before that -- it is a TOML parse error, i.e. a refuse-to-start.
 #   * `[node]` replaced `[announce]`, and carries only the three keys below.
 #     The one-shot `connector announce` verb is gone (ADR 0046); `GET /ilp`
 #     serves the self-description instead, so there is no announce sidecar.
 #   * `[[peers]] credential` is deleted (ADR 0060). A peering is proven by a
 #     verified claim on a `[[peer_channels]]` row, not by a shared string.
+#   * `[node]` endpoints are required exactly when `peer_expose` opens that
+#     carriage (connector#1232). This file opens BTP and declares both.
 #
-# deploy/README.md has the full record. src/deploy-bundle-guard.test.ts
-# asserts this shape, so CI tells you if the file and the tag ever disagree.
+# deploy/README.md § "Bumping the connector pin" has the procedure.
+# src/deploy-bundle-guard.test.ts asserts this shape and the pin, so CI tells
+# you if the file and the tag ever disagree.
 # =============================================================================
 
 # The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
@@ -133,10 +145,10 @@ key_file = "/app/data/settlement-solana.key"
 # mounted at all (404, not 401) — which also means no way to redeem what you
 # have earned, so it is not optional in practice.
 #
-# On the pinned tag these are INLINE values, so the rendered connector.toml is
-# a secret: render.sh writes it 0600 and .gitignore keeps it out of git. Only
-# the template is committed. (On a newer connector they become *_file keys and
-# this stops being true.)
+# These are INLINE values, so the rendered connector.toml is a secret:
+# render.sh writes it 0600 and .gitignore keeps it out of git. Only the
+# template is committed. (The pinned build also accepts *_file keys; this
+# bundle keeps the inline spelling, and the guard test asserts which.)
 [operator]
 bearer_token = "${OPERATOR_BEARER_TOKEN}"
 write_keys   = ["${OPERATOR_WRITE_KEY}"]
