@@ -5,7 +5,7 @@ TOON connector.**
 
 ```
    client ──── pays ────▶ connector ──── POST /store ────▶ store ──▶ Arweave
-                          g.toon.ario     (payment already      returns a
+                          g.toon.store    (payment already      returns a
                           0.001 USDC       proven)              transaction id
 ```
 
@@ -32,7 +32,7 @@ Everything between the connector and your app is these two halves.
 
 ```toml
 [[routes]]
-prefix      = "g.toon.ario"                 # the ILP address clients pay
+prefix      = "g.toon.store"                # the ILP address clients pay
 handler_url = "http://store:3300/store"     # your backend — the path is literal
 price       = 1000                          # smallest unit of the token (0.001 USDC)
 ```
@@ -78,7 +78,7 @@ thing to fund and monitor, and — as it turned out — a much smaller box. Shar
 an image meant every store deploy was also a gas-station deploy, and the two
 had no reason to move together.
 
-A client that was paying `g.toon.ario` for a gas job wants `g.toon.gas` now.
+A client that was paying `g.toon.store` for a gas job wants `g.toon.gas` now.
 
 ## Run it locally
 
