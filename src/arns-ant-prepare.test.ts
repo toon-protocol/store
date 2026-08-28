@@ -295,6 +295,23 @@ describe('buildAntSpawnTransaction', () => {
     expect(create.indices.filter((i) => i === 0)).toHaveLength(1);
   });
 
+  // The bug this exists to prevent: MPL Core defaults an unset `owner` to the
+  // PAYER. Leave it unset here and every ANT is minted into the GAS STATION's
+  // wallet, not the client's — and nothing says so until `ario_ant::initialize`
+  // fails NotNftHolder one instruction later, by which point the asset is made.
+  it('mints the asset to the client, not to the fee payer', async () => {
+    const decoded = decodeWire((await buildReal()).transaction);
+    const create = decoded.only(GAS_STATION_MPL_CORE);
+    // CreateV1 accounts: [asset, collection, authority, payer, owner, ...]
+    const ownerIdx = at(create.indices, 4, 'owner slot');
+    expect(at(decoded.accounts, ownerIdx, 'owner account')).toBe(OWNER);
+    expect(ownerIdx).not.toBe(0); // never the fee payer
+    // And the authority — who signs the mint — is the client too.
+    expect(
+      at(decoded.accounts, at(create.indices, 2, 'authority slot'), 'authority')
+    ).toBe(OWNER);
+  });
+
   it('keeps the gas wallet out of the ario-ant instruction entirely', async () => {
     const init = decodeWire((await buildReal()).transaction).only(
       GAS_STATION_ANT_DEVNET

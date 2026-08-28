@@ -446,6 +446,14 @@ export const defaultLoadArnsPrepareDeps: LoadArnsPrepareDeps = async (
         asset: signerShim(args.mint),
         payer: signerShim(args.payer),
         authority: signerShim(args.authority),
+        // Load-bearing, and the reason this whole flow works. MPL Core defaults
+        // an unset `owner` to the PAYER — which here is the gas station, not
+        // the client. `spawnSolanaANT` never has to say it because there payer
+        // and authority are the same signer; splitting them, which is the
+        // entire point of this op, makes the default catastrophic: every ANT
+        // would be minted into the gas wallet. Devnet simulation caught it as
+        // `ario_ant::initialize` failing NotNftHolder, one instruction later.
+        owner: address(args.authority),
         dataState: dataState.AccountState,
         name: args.name,
         uri: args.uri,
