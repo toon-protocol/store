@@ -5,7 +5,8 @@
 #   connector  the payment proxy: meters + settles, then proxies to store
 #   store      the job backend: POST /store -> Arweave, payment-oblivious
 #   certbot    renews the certificate
-#   watchtower recreates the two app containers when their tag moves
+#   watchtower recreates the store when its tag moves (the connector is an
+#              immutable pin, bumped by commit and picked up on `up -d`)
 #
 #   internet ──▶ nginx :443 ──┬──▶ connector :4000 ──▶ store :3300 ──▶ Arweave
 #                             └──▶ store :3400  (health)
@@ -22,7 +23,12 @@ services:
   # this to 0.0.0.0 would put the paid edge on the public internet past ufw
   # (docker's iptables rules bypass ufw — see README § Privacy invariant).
   connector:
-    image: ghcr.io/toon-protocol/connector:rust-release
+    # An IMMUTABLE pin. Nothing moves the fleet's old promotion pointer any
+    # more (connector ADR 0068 — a node repository pins the connector it runs), so
+    # the connector moves by a reviewed commit here: this tag and the matching
+    # literal in src/deploy-bundle-guard.test.ts, together. README § "Bumping
+    # the connector pin".
+    image: ghcr.io/toon-protocol/connector:rust-sha-c714551
     labels:
       com.centurylinklabs.watchtower.enable: 'true'
     volumes:

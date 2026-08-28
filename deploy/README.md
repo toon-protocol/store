@@ -21,7 +21,8 @@ runs is here: the payment proxy, the job backend, TLS and unattended updates. `.
                     └────────────────────┘
 
    certbot  ──▶ renews the certificate
-   watchtower ▶ recreates connector and store when their tag moves
+   watchtower ▶ recreates the store when its tag moves; the connector is an
+                immutable pin, bumped by commit and picked up on `up -d`
 
    Discovery is GET /ilp on the connector, which serves the [node]
    self-description — there is no announce sidecar.
@@ -98,17 +99,19 @@ settles it, and the store answers with an Arweave transaction id.
 
 ## How updates arrive
 
-Nothing here is deployed by hand. Watchtower polls once a minute and recreates
-a container when the tag it follows changes digest.
+The store's image is deployed unattended. Watchtower polls once a minute and
+recreates a container when the tag it follows changes digest.
 
 | Container | Follows | Moves when |
 |---|---|---|
 | `store` | `ghcr.io/toon-protocol/store:release` | every green merge to `main` in this repo |
-| `connector` | `ghcr.io/toon-protocol/connector:rust-release` | a **supervised promotion** in the connector repo, never automatically |
+| `connector` | `ghcr.io/toon-protocol/connector:rust-sha-<short>` — an immutable pin | never on its own: bumping the pin is a reviewed commit here (see below) |
 
 The difference is deliberate. The store's own image is this repo's to move; the
-connector's is the fleet's, and auto-moving it on green main once pushed
-unvalidated builds to two live boxes in about sixty seconds.
+connector's is pinned to one immutable build, because nothing moves the old
+`:rust-release` pointer any more (connector ADR 0068 — a node repository pins
+the connector it runs, in one place, guarded there). Watchtower still carries
+the label so a bumped pin is picked up on the next `docker compose up -d`.
 
 `nginx` and `certbot` deliberately carry no Watchtower label. nginx holds the
 resolver that lets every other container survive being recreated at a new
@@ -133,10 +136,10 @@ and there is no environment-variable layer. After editing:
 ./render.sh && docker compose restart connector
 ```
 
-`connector.toml` and the connector's tag move together: the config uses a
+`connector.toml` and the connector's pin move together: the config uses a
 `{ base, per_kib }` price and a `[node]` section, and an older connector can
 parse neither. A config from the future against an older binary is a
-refuse-to-start, not a degraded run.
+refuse-to-start, not a degraded run. See § "Bumping the connector pin".
 
 ## Make it yours
 
@@ -255,11 +258,26 @@ have never agreed, and the advertised field counts per *byte* where the route
 counts per *KiB*, so it cannot express this schedule exactly. Treat `/health`
 as a hint, and this route as the price.
 
-## This bundle and the connector tag move together
+## Bumping the connector pin
 
-`connector.toml.template` is written for `:rust-release` as promoted today,
-which carries ADR 0065, 0050 and 0060. Three things here will not load on an
-older connector, each a refuse-to-start rather than a degraded run:
+`docker-compose.yml` pins the connector to one immutable `rust-sha-` build, and
+`src/deploy-bundle-guard.test.ts` pins the same literal. To move:
+
+1. Read the connector's release notes for schema changes. The parser is
+   `deny_unknown_fields` and startup is fail-closed, so a key the new build
+   refuses is a refuse-to-start, never a degraded run.
+2. Change `connector.toml.template` first if the new build wants it, then the
+   tag in `docker-compose.yml` and the test literal, in one commit. Boot the
+   rendered config on the candidate image before opening the PR: `docker run
+   --rm` it with throwaway key files mounted and look for `connector
+   listening`.
+3. On the box: `git pull && ./render.sh && docker compose up -d`.
+
+To roll the connector back, pin the previous `rust-sha-` tag the same way.
+
+`connector.toml.template` is written for the pinned build, which carries ADR
+0065, 0050 and 0060. Three things here will not load on an older connector,
+each a refuse-to-start rather than a degraded run:
 
 | This bundle uses | An older connector |
 |---|---|
@@ -267,6 +285,6 @@ older connector, each a refuse-to-start rather than a degraded run:
 | `[node]` | wanted `[announce]`, and a `connector announce` sidecar with it |
 | no `[[peers]] credential` | — (the reverse: a *newer* connector refuses `credential` by name) |
 
-So a rollback below the promoted build needs the config rolled back with it.
-`src/deploy-bundle-guard.test.ts` asserts the current shape, so CI tells you
-if the bundle and the tag ever disagree.
+So a rollback below that needs the config rolled back with it.
+`src/deploy-bundle-guard.test.ts` asserts the current shape and the pin, so CI
+tells you if the bundle and the tag ever disagree.
