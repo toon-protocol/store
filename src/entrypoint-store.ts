@@ -56,6 +56,7 @@ import type { NodeConfig } from '@toon-protocol/sdk';
 import { startStoreBackend, type StoreBackend, type StoreHandler } from './store-backend.js';
 import {
   ARNS_BUY_KIND,
+  arnsBuyDisabledHandler,
   createArnsBuyHandler,
   type ArnsNetwork,
 } from './arns-buy-handler.js';
@@ -572,7 +573,14 @@ async function main(): Promise<void> {
     console.log(
       `[store] kind:${ARNS_BUY_KIND} ArNS buy enabled (network: ${arnsBuyEnv.network})`
     );
+  } else {
+    // Claim the kind even while disabled. Dispatch falls back to the kind:5094
+    // Arweave handler for any kind it does not know, so leaving this unset
+    // answers an ArNS job with an unrelated blob-upload error.
+    extraHandlers[ARNS_BUY_KIND] = arnsBuyDisabledHandler as StoreHandler;
   }
+  // /health advertises CAPABILITY — a store that only knows how to say no is
+  // not capable, so the disabled handler above does not earn a listing here.
   const handlerKinds = [5094, ...(arnsBuyEnv ? [ARNS_BUY_KIND] : [])];
 
   // The connector is the front-of-app payment proxy: it terminates payment and

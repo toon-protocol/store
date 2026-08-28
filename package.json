@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@ar.io/sdk": "^4.0.3",
+    "@ar.io/solana-contracts": "1.0.1",
     "@ardrive/turbo-sdk": "^1.40.2",
     "@hono/node-server": "^1.13.7",
     "@solana/kit": "^6.8.0",
