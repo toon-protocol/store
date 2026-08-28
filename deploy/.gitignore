@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 connector.toml
+operator-bearer.token
+operator-write.keys
 nginx/conf.d/
 *.key
 *.secret
