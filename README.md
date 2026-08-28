@@ -58,14 +58,18 @@ the whole seam.
 
 ## Job kinds
 
-`kind:5094` is always on. `kind:5095` registers only when its credential is
-present, so a default deployment serves blob storage and nothing else.
+`kind:5094` is always on, and so is `kind:5095` — but only half of it. The
+credential gates spending, not the kind: `op=prepare` composes an unsigned
+transaction and needs no key, no RPC and no $ARIO, so it runs on any store.
+`op=buy` spends the operator's money, so without
+`ARNS_DVM_SOLANA_SECRET_KEY` it refuses by name and says the other op is
+available.
 
 | Kind | What it does | Enabled by | Source |
 |---|---|---|---|
 | **5094** | Arweave blob storage | always on | [`entrypoint-store.ts`](./src/entrypoint-store.ts) |
 | **5095** | ArNS brokered name buy (`op=buy`) | `ARNS_DVM_SOLANA_SECRET_KEY` | [`arns-buy-handler.ts`](./src/arns-buy-handler.ts) |
-| **5095** | ANT spawn composition (`op=prepare`) | `ARNS_DVM_SOLANA_SECRET_KEY` | [`arns-ant-prepare.ts`](./src/arns-ant-prepare.ts) |
+| **5095** | ANT spawn composition (`op=prepare`) | always on | [`arns-ant-prepare.ts`](./src/arns-ant-prepare.ts) |
 
 ### kind:5095 has two ops
 

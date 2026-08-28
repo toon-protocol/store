@@ -320,8 +320,13 @@ export function parseArnsBuyParams(event: NostrEvent): ArnsBuyParams {
 export interface ArnsBuyConfig {
   /** Which cluster's ar.io deployment the DVM buys on. */
   network: ArnsNetwork;
-  /** 64-byte Ed25519 Solana keypair of the DVM's funded payer wallet. */
-  solanaSecretKey: Uint8Array;
+  /**
+   * 64-byte Ed25519 Solana keypair of the DVM's funded payer wallet.
+   *
+   * Optional, because only `op=buy` spends. Without it the handler still
+   * serves `op=prepare` and refuses `op=buy` by name.
+   */
+  solanaSecretKey?: Uint8Array;
   /** SDK loader seam (tests inject a stub; defaults to the lazy import). */
   loadSdk?: LoadArnsBuySdk;
   /**
@@ -350,23 +355,6 @@ export interface ArnsBuyReceipt {
 }
 
 /**
- * The kind:5095 handler for a store where the job is NOT enabled.
- *
- * Without this, `store-backend`'s dispatch (`handlers?.[kind] ?? handle`) hands
- * a kind:5095 job to the kind:5094 Arweave handler, which fails somewhere deep
- * in an upload with a message about blobs — telling the caller nothing about
- * the actual problem, which is that this operator never configured the job.
- */
-export const arnsBuyDisabledHandler = async (
-  ctx: StoreHandlerContext
-): Promise<StoreHandlerResponse> =>
-  ctx.reject(
-    'F00',
-    `kind:${ARNS_BUY_KIND} (ArNS brokered buy) is not enabled on this store — ` +
-      'the operator has not set ARNS_DVM_SOLANA_SECRET_KEY'
-  );
-
-/**
  * Build the kind:5095 handler. The SDK is loaded lazily on the first job (and
  * cached), so a store booted with the job enabled but never asked to buy pays
  * no import cost — and a broken optional install surfaces per-job as a clean
@@ -377,10 +365,10 @@ export function createArnsBuyHandler(
 ): (ctx: StoreHandlerContext) => Promise<StoreHandlerResponse> {
   let sdkPromise: Promise<ArnsBuySdk> | undefined;
   const loadSdk = config.loadSdk ?? defaultLoadArnsBuySdk;
-  const getSdk = () => {
+  const getSdk = (solanaSecretKey: Uint8Array) => {
     sdkPromise ??= loadSdk({
       network: config.network,
-      solanaSecretKey: config.solanaSecretKey,
+      solanaSecretKey,
     }).catch((err: unknown) => {
       // Let a later job retry (e.g. after the operator fixes the install).
       sdkPromise = undefined;
@@ -466,6 +454,19 @@ export function createArnsBuyHandler(
       }
     }
 
+    // Only `op=buy` spends, so only `op=buy` needs the credential. Refuse by
+    // name here rather than letting the SDK loader fail with something about
+    // key bytes — the caller's problem is the operator's configuration.
+    const solanaSecretKey = config.solanaSecretKey;
+    if (solanaSecretKey === undefined) {
+      return ctx.reject(
+        'F00',
+        `kind:${ARNS_BUY_KIND} op=buy is not enabled on this store — the ` +
+          'operator has not set ARNS_DVM_SOLANA_SECRET_KEY. op=prepare needs ' +
+          'no credential and is available.'
+      );
+    }
+
     let params: ArnsBuyParams;
     try {
       params = parseArnsBuyParams(event);
@@ -486,7 +487,7 @@ export function createArnsBuyHandler(
     }
 
     try {
-      const sdk = await getSdk();
+      const sdk = await getSdk(solanaSecretKey);
 
       // Quote first (free read) so the receipt records what the buy cost.
       const quotedMario = await sdk.getTokenCost({

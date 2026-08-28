@@ -56,7 +56,6 @@ import type { NodeConfig } from '@toon-protocol/sdk';
 import { startStoreBackend, type StoreBackend, type StoreHandler } from './store-backend.js';
 import {
   ARNS_BUY_KIND,
-  arnsBuyDisabledHandler,
   createArnsBuyHandler,
   type ArnsNetwork,
 } from './arns-buy-handler.js';
@@ -422,25 +421,34 @@ export function applyEnvOverlay(cfg: StoreConfig): StoreConfig {
 
 // --- kind:5095 ArNS buy — env resolution (exported for tests) ---
 
-/** Parsed kind:5095 configuration (undefined = job disabled). */
+/** Parsed kind:5095 configuration. */
 export interface ArnsBuyEnvConfig {
   network: ArnsNetwork;
-  solanaSecretKey: Uint8Array;
+  /**
+   * The DVM's funded payer wallet. Absent when the operator set no credential
+   * — `op=prepare` still runs (it spends nothing), `op=buy` refuses.
+   */
+  solanaSecretKey?: Uint8Array;
 }
 
 /**
- * Resolve the OPTIONAL kind:5095 ArNS-buy config from the environment.
- * Absent/empty `ARNS_DVM_SOLANA_SECRET_KEY` disables the job (returns
- * undefined); a malformed value throws (misconfiguration must not boot a
- * silently-crippled DVM). `ARNS_NETWORK` defaults to DEVNET — mainnet is an
+ * Resolve the kind:5095 config from the environment.
+ *
+ * This ALWAYS returns a config, because kind:5095 is always at least partly
+ * served: `op=prepare` composes an unsigned transaction and needs no key, no
+ * RPC and no $ARIO. Only `op=buy` — which spends the operator's money — needs
+ * `ARNS_DVM_SOLANA_SECRET_KEY`, and its absence leaves `solanaSecretKey`
+ * undefined rather than disabling the kind.
+ *
+ * A malformed value still throws: a misconfiguration must not boot a
+ * silently-crippled DVM. `ARNS_NETWORK` defaults to DEVNET — mainnet is an
  * explicit opt-in.
  */
 export function resolveArnsBuyEnv(
   env: NodeJS.ProcessEnv
-): ArnsBuyEnvConfig | undefined {
+): ArnsBuyEnvConfig {
   const hex = env['ARNS_DVM_SOLANA_SECRET_KEY']?.trim();
-  if (!hex) return undefined;
-  if (!/^[0-9a-fA-F]{128}$/.test(hex)) {
+  if (hex && !/^[0-9a-fA-F]{128}$/.test(hex)) {
     throw new Error(
       'ARNS_DVM_SOLANA_SECRET_KEY must be a 128-char hex string ' +
         '(64-byte Ed25519 keypair: secretKey ‖ publicKey)'
@@ -454,7 +462,7 @@ export function resolveArnsBuyEnv(
   }
   return {
     network: networkRaw as ArnsNetwork,
-    solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')),
+    ...(hex ? { solanaSecretKey: Uint8Array.from(Buffer.from(hex, 'hex')) } : {}),
   };
 }
 
@@ -561,27 +569,25 @@ async function main(): Promise<void> {
   // kind:5095 ArNS brokered buy ("buyfor") — enabled only when the DVM has a
   // funded Solana payer wallet configured. Defaults to DEVNET.
   const arnsBuyEnv = resolveArnsBuyEnv(process.env);
-  const extraHandlers: Record<number, StoreHandler> = {};
-  if (arnsBuyEnv) {
-    extraHandlers[ARNS_BUY_KIND] = counter.wrap(
+  const extraHandlers: Record<number, StoreHandler> = {
+    [ARNS_BUY_KIND]: counter.wrap(
       ARNS_BUY_KIND,
       createArnsBuyHandler({
         network: arnsBuyEnv.network,
-        solanaSecretKey: arnsBuyEnv.solanaSecretKey,
+        ...(arnsBuyEnv.solanaSecretKey
+          ? { solanaSecretKey: arnsBuyEnv.solanaSecretKey }
+          : {}),
       })
-    ) as unknown as StoreHandler;
-    console.log(
-      `[store] kind:${ARNS_BUY_KIND} ArNS buy enabled (network: ${arnsBuyEnv.network})`
-    );
-  } else {
-    // Claim the kind even while disabled. Dispatch falls back to the kind:5094
-    // Arweave handler for any kind it does not know, so leaving this unset
-    // answers an ArNS job with an unrelated blob-upload error.
-    extraHandlers[ARNS_BUY_KIND] = arnsBuyDisabledHandler as StoreHandler;
-  }
-  // /health advertises CAPABILITY — a store that only knows how to say no is
-  // not capable, so the disabled handler above does not earn a listing here.
-  const handlerKinds = [5094, ...(arnsBuyEnv ? [ARNS_BUY_KIND] : [])];
+    ) as unknown as StoreHandler,
+  };
+  console.log(
+    `[store] kind:${ARNS_BUY_KIND} ArNS enabled (network: ${arnsBuyEnv.network}; ` +
+      `op=prepare always, op=buy ${arnsBuyEnv.solanaSecretKey ? 'enabled' : 'needs ARNS_DVM_SOLANA_SECRET_KEY'})`
+  );
+  // kind:5095 is always served — `op=prepare` needs no credential — so it is
+  // always advertised. Which OPS are live is not something a list of kinds can
+  // express; `op=buy` says so itself when it refuses.
+  const handlerKinds = [5094, ARNS_BUY_KIND];
 
   // The connector is the front-of-app payment proxy: it terminates payment and
   // reverse-proxies a plain HTTP request to POST /store (RouteTermination). This
