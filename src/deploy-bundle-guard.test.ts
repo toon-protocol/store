@@ -179,10 +179,15 @@ const EXPECTED_ROUTE_PER_KIB = 10;
 // decision 2026-08-05 — one name for one app). The box terminates exactly this
 // one prefix; naming it as a literal means losing it, or silently regaining a
 // retired alias, fails by name instead of passing unnoticed.
-// This node terminates exactly one prefix: its own address. The route to the
-// relay (`g.toon.store.relay`) is a name beneath that address, established at
-// runtime through the operator surface — see the template's "The relay leg".
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.store'].sort();
+// This node terminates its own address and exactly one other name: the
+// relay's for it. The relay's routing table forwards `g.toon.relay.store`
+// here, and a forward copies the destination through verbatim, so that name
+// needs its own row or arrives to an F02. It is priced identically (one
+// handler, one price). The route OUT to the relay (`g.toon.store.relay`) is
+// a name beneath this address, established at runtime through the operator
+// surface — see the template's "The relay leg".
+const EXPECTED_ROUTE_PREFIXES = ['g.toon.store', 'g.toon.relay.store'].sort();
+const RELAYS_NAME_FOR_US = 'g.toon.relay.store';
 
 const TERMINATED_PREFIX = 'g.toon.store';
 
@@ -218,6 +223,15 @@ describe('deploy/ bundle is internally consistent', () => {
     });
   });
 
+
+  it("terminates the relay's name for us at the same handler, on the same schedule", () => {
+    // One handler at two prices is refused by the connector outright, and a
+    // cheaper second door would take every packet anyway.
+    const ours = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX);
+    const theirs = connectorToml.routes.find((r) => r.prefix === RELAYS_NAME_FOR_US);
+    expect(theirs?.handler_url).toBe(ours?.handler_url);
+    expect(theirs?.price).toEqual(ours?.price);
+  });
 
   it('charges more for a bigger upload', () => {
     // The whole point of the schedule. Guards against someone flattening it
@@ -362,7 +376,10 @@ describe('deploy/ config matches the promoted connector', () => {
   it('uses [node], not the retired [announce]', () => {
     expect(connectorToml.announce).toBeUndefined();
     expect(connectorTemplateCode).not.toMatch(/^\s*\[announce\]/m);
-    expect(connectorToml.node?.addresses).toEqual(['g.toon.store']);
+    // Every terminated prefix is advertised, and nothing else: a name this
+    // node terminates but never says is one no client can discover, and the
+    // relay's POST /peers reads exactly this list.
+    expect(connectorToml.node?.addresses.slice().sort()).toEqual(EXPECTED_ROUTE_PREFIXES);
   });
 
   it('declares no peering shared secret', () => {

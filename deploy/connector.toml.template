@@ -91,6 +91,19 @@ prefix      = "g.toon.store"
 handler_url = "http://store:3300/store"
 price       = { base = 1000, per_kib = 10 }
 
+# The same app under the relay's name for it. The relay forwards
+# `g.toon.relay.store` here over the peering it established, and a forward
+# copies the destination through verbatim — so those packets arrive addressed
+# to this prefix and need a route of their own, or they are refused F02 at the
+# door. Priced identically to `g.toon.store` because the two share a
+# `handler_url`, and the connector refuses a config where one handler is
+# reachable at two prices (the cheaper door would take every packet). This is
+# the one deliberate second name: it is the relay's, not an alias of ours.
+[[routes]]
+prefix      = "g.toon.relay.store"
+handler_url = "http://store:3300/store"
+price       = { base = 1000, per_kib = 10 }
+
 
 # ── Getting paid ─────────────────────────────────────────────────────────────
 # Settlement is per-chain. A client pays in whichever of these it holds; the
@@ -148,8 +161,9 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # it would put a row for this node's naming in the relay's table.
 #
 # The traffic that matters goes the other way. The relay carries packets TO
-# this node, addressed `g.toon.store` — the name above — and this node
-# terminates them. `peer_expose` is what lets that arrive: the relay dials, and
+# this node — addressed `g.toon.store`, or `g.toon.relay.store`, the name the
+# relay's own routing table forwards under (both terminated above) — and this
+# node terminates them. `peer_expose` is what lets that arrive: the relay dials, and
 # a peering is accepted here rather than opened from here.
 #
 # If a route out ever is wanted, it takes the relay's OWN address as its prefix
@@ -163,6 +177,6 @@ write_keys   = ["${OPERATOR_WRITE_KEY}"]
 # and the public URLs it is reachable on. Clients read this back from
 # `GET /ilp` to discover the node.
 [node]
-addresses     = ["g.toon.store"]
+addresses     = ["g.toon.store", "g.toon.relay.store"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
