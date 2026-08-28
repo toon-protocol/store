@@ -28,7 +28,7 @@ services:
     # the connector moves by a reviewed commit here: this tag and the matching
     # literal in src/deploy-bundle-guard.test.ts, together. README § "Bumping
     # the connector pin".
-    image: ghcr.io/toon-protocol/connector:rust-sha-c714551
+    image: ghcr.io/toon-protocol/connector:rust-2026.08.28.1
     labels:
       com.centurylinklabs.watchtower.enable: 'true'
     volumes:
