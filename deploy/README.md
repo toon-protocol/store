@@ -108,7 +108,7 @@ recreates a container when the tag it follows changes digest.
 | Container | Follows | Moves when |
 |---|---|---|
 | `store` | `ghcr.io/toon-protocol/store:release` | every green merge to `main` in this repo |
-| `connector` | `ghcr.io/toon-protocol/connector:rust-sha-<short>` — an immutable pin | never on its own: bumping the pin is a reviewed commit here (see below) |
+| `connector` | an immutable pin — a `rust-sha-<short>` build or a `rust-<release handle>` | when a connector release is adopted: a reviewed commit here, opened and merged automatically, then applied by this box's own timer (see "Following connector releases") |
 
 The difference is deliberate. The store's own image is this repo's to move; the
 connector's is pinned to one immutable build, because nothing moves the old
@@ -261,7 +261,75 @@ have never agreed, and the advertised field counts per *byte* where the route
 counts per *KiB*, so it cannot express this schedule exactly. Treat `/health`
 as a hint, and this route as the price.
 
+## Following connector releases
+
+**A newer connector arrives on its own, from a release.** When the connector
+repo cuts a release — one human dispatch, stamping an immutable
+`ghcr.io/toon-protocol/connector:rust-<handle>` that nothing ever moves — this
+repo notices within half an hour and opens the pin bump itself
+([`../.github/workflows/adopt-connector-release.yml`](../.github/workflows/adopt-connector-release.yml)).
+
+It is keyed to a **release**, not to every green `main` in the connector. That
+dispatch is the human decision point, and following every green merge instead
+is the shape that took the devnet dark in about sixty seconds when it was
+tried (connector#990) and was reverted.
+
+Before it opens anything it **renders this bundle's `connector.toml` from the
+committed template the way this box does, boots the candidate image against
+it, and requires the build to accept the file.** A build that refused a key by
+name, renamed a field or newly required one fails there, and no pull request
+appears. That is connector ADR 0041's Decision 1 — an image a box follows
+unattended may only move to a build that still accepts the config that box
+runs — asked at the one moment the candidate image and this node's config are
+in front of the same machine. It used to be a tag move in the connector repo;
+since ADR 0068 there is no tag move, so the moment is that pull request and
+the gate lives with it.
+
+Two outcomes count as acceptance: `connector listening`, and `failed to
+construct the configured settlement backend` — the latter because config
+validation happens strictly before backend construction, so reaching it means
+the whole file parsed, and a CI runner holds no funded settlement key. `config
+file ... is not valid` is the failure the gate exists to catch.
+
+Once that PR merges, the box applies it within five minutes:
+[`auto-apply.sh`](./auto-apply.sh) on a systemd timer fast-forwards `main`,
+re-renders, runs `docker compose up -d`, and requires the connector to come
+back **healthy**. It is pull-based deliberately — no CI job anywhere holds SSH
+into a node, which is the posture connector ADR 0068 settled — and it refuses
+to touch a box whose working tree is dirty, so a human mid-operation is never
+overwritten.
+
+| File | What it is |
+|---|---|
+| `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
+| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, and requires the connector to come back healthy. |
+| `toon-auto-apply.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
+
+The split is deliberate: the workflow decides **what** to run and proves it
+accepts this node's config first; the box decides **when** to apply, by
+pulling. Nothing outside this box can make this box deploy.
+
+Install the timer once per box:
+
+```bash
+sudo cp /root/store/deploy/toon-auto-apply.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply.timer
+systemctl list-timers toon-auto-apply.timer     # when it next fires
+journalctl -u toon-auto-apply.service -n 50     # what it last did
+systemctl start toon-auto-apply.service         # run one now, by hand
+```
+
+The pin is still the only place a connector build is named here, and it is
+still immutable — a `rust-sha-` build or a `rust-<handle>` release, never a
+moving tag. The config parser is `deny_unknown_fields` and startup is
+fail-closed, which is exactly why the gate runs before the pin moves rather
+than after.
+
 ## Bumping the connector pin
+
+Usually you do not: § "Following connector releases" above does it for you,
+gate and all. This is the manual path — a build between releases, or a
+rollback.
 
 `docker-compose.yml` pins the connector to one immutable `rust-sha-` build, and
 `src/deploy-bundle-guard.test.ts` pins the same literal. To move:

@@ -19,8 +19,9 @@
 #     operator credentials included. Nothing in this file is a credential, so
 #     the rendered connector.toml is not a secret.
 #
-# ── This file targets an exact `rust-sha-` build ────────────────────────────
-# `docker-compose.yml` pins the connector to one immutable `rust-sha-` tag.
+# ── This file targets an exact, immutable build ──────────────────────────────
+# `docker-compose.yml` pins the connector to one immutable tag -- either a
+# `rust-sha-<commit>` build or a `rust-<YYYY.MM.DD.N>` release handle.
 # It used to follow the fleet's `:rust-release` pointer; nothing moves that
 # pointer any more (connector ADR 0068 — a node repository pins the connector
 # it runs, in one place, guarded there), so following it meant standing still
