@@ -136,9 +136,27 @@ Ubuntu host is the entire install.
 
 Updates are unattended: a green merge to `main` publishes
 `ghcr.io/toon-protocol/store:release`, and Watchtower recreates the container
-within about a minute. The connector half is an immutable `rust-sha-` pin,
-bumped by a reviewed commit in `deploy/` (nothing moves the old `:rust-release`
-pointer any more — connector ADR 0068).
+within about a minute.
+
+**The connector half moves differently, and also on its own.** It is an
+immutable pin in `deploy/docker-compose.yml` — a `rust-sha-` build or a
+`rust-<release handle>` — so Watchtower has nothing to follow for it. What
+moves it is a connector **release**: one human dispatch in the connector repo,
+after which
+[`.github/workflows/adopt-connector-release.yml`](.github/workflows/adopt-connector-release.yml)
+notices within half an hour, **renders this bundle's `connector.toml` and boots
+the candidate image against it**, and only then opens and auto-merges the pin
+bump. A build that refused a key by name or newly required one fails that gate
+and no pull request appears — connector ADR 0041's Decision 1, asked at the one
+moment the candidate and this node's config are in front of the same machine.
+
+Once merged the box applies it within five minutes:
+[`deploy/auto-apply.sh`](deploy/auto-apply.sh) on a systemd timer
+fast-forwards `main`, re-renders, brings the compose project up and requires
+the connector to come back **healthy**. It is pull-based deliberately — no CI
+job anywhere holds SSH into a node (connector ADR 0068) — and it refuses to
+touch a box whose working tree is dirty. Install it once per box; see
+[`deploy/README.md`](deploy/README.md) § "Following connector releases".
 
 ## Develop
 

@@ -1,0 +1,254 @@
+# Adopt connector release — this node follows the connector's cut releases.
+#
+# ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
+# Owner decision, 2026-08-28: when the connector cuts a release, the three TOON
+# node repos and their boxes should end up running it without anyone editing a
+# tag by hand. This is that, for this repo.
+#
+# It is deliberately keyed to a RELEASE, not to every green `main` in the
+# connector. A release is one human dispatch of `release-connector.yml`, which
+# stamps an immutable `ghcr.io/toon-protocol/connector:rust-<handle>` (the
+# handle is a UTC date plus that day's ordinal, e.g. `rust-2026.08.28.1`, and
+# nothing ever moves one). That dispatch is the human decision point ADR 0041
+# asks for. Following every green merge instead is the shape that took the
+# devnet dark in about sixty seconds when it was tried (connector#990) and was
+# reverted; do not repoint this at `rust-main`.
+#
+# ── THE GATE, AND WHY IT IS HERE AND NOT SOMEWHERE ELSE ─────────────────────
+# Connector ADR 0041 Decision 1 is still live: an image a box follows
+# unattended may only move to a build that STILL ACCEPTS the committed config
+# that box runs. Its own wording puts the gate at "the only point where the
+# candidate image and the committed config are both available to the same
+# machine at the same time" — which used to be a tag move in the connector
+# repo. Since ADR 0068 there is no tag move: this repo pins the connector and
+# bumps it by a reviewed commit. So that moment is now THIS PULL REQUEST, and
+# the gate lives here.
+#
+# This box's config is RENDERED, not committed — `deploy/connector.toml` is
+# gitignored output of `deploy/render.sh` reading `deploy/.env`. So the gate
+# renders it first, from throwaway values. That is not a weaker question than
+# the relay's, which mounts a committed file: everything the parser judges —
+# the route table, the price schedule, `[node]`, both `[settlement.*]` tables,
+# the `[operator]` paths — is in the template and comes through the render
+# verbatim. The only things the throwaway `.env` supplies are a domain and two
+# credentials, none of which the parser has an opinion about beyond shape.
+#
+# The gate boots the candidate image against that rendered config and reads
+# what happens:
+#
+#   * `connector listening`                            -> PASS, it served.
+#   * `failed to construct the configured settlement backend`
+#                                                      -> PASS. The whole file
+#     parsed and validated — including every `[settlement.*]` key — and the
+#     only failure is that a CI runner holds no funded settlement key. That is
+#     the expected path here, and it is still a genuine answer to Decision 1's
+#     question, because config validation happens strictly before backend
+#     construction.
+#   * anything else, including `config file ... is not valid`
+#                                                      -> FAIL. A key this
+#     build refuses by name, a renamed field, a newly required one: exactly
+#     the breaking deploy Decision 1 exists to stop, caught before the pin
+#     moves rather than as a crash-loop on the box.
+#
+# ── WHAT IT DOES NOT DO ─────────────────────────────────────────────────────
+# It does not touch the box. The box runs `deploy/auto-apply.sh` on a timer and
+# pulls what was merged here, so no CI job anywhere holds SSH into a node — the
+# posture ADR 0068 settled. If a bad build ever does reach a box, the
+# connector repo's `fleet-health.yml` opens a `needs:human` issue for it.
+name: Adopt connector release
+
+on:
+  schedule:
+    # Every half hour. A release is rare; this bounds how long the fleet lags
+    # one, and costs a few API calls when there is nothing to do.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: adopt-connector-release
+  cancel-in-progress: false
+
+jobs:
+  adopt:
+    name: Follow the newest connector release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the newest release handle, and what this repo pins today
+        id: look
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Only handle-shaped tags: `YYYY.MM.DD.N`. This deliberately ignores
+          # the TypeScript-era `v3.x`/`v4.x` releases still on that repo, which
+          # are not connector builds at all.
+          HANDLE=$(gh release list --repo toon-protocol/connector --limit 60 \
+                     --json tagName,isDraft,isPrerelease \
+                     --jq '.[] | select(.isDraft==false and .isPrerelease==false) | .tagName' \
+                   | grep -E '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$' \
+                   | sort -V | tail -1 || true)
+
+          if [ -z "$HANDLE" ]; then
+            echo "No handle-shaped connector release exists yet — nothing to adopt."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          WANT="rust-$HANDLE"
+          HAVE=$(sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/toon-protocol/connector:\([A-Za-z0-9._-]*\).*|\1|p' \
+                   deploy/docker-compose.yml | head -1)
+          [ -n "$HAVE" ] || { echo "::error::could not read the committed pin from deploy/docker-compose.yml"; exit 1; }
+
+          echo "newest release: $WANT   committed pin: $HAVE"
+          echo "handle=$HANDLE" >> "$GITHUB_OUTPUT"
+          echo "want=$WANT" >> "$GITHUB_OUTPUT"
+          echo "have=$HAVE" >> "$GITHUB_OUTPUT"
+          if [ "$WANT" = "$HAVE" ]; then
+            echo "Already on the newest release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: The candidate must still accept this node's rendered config (ADR 0041 D1)
+        if: steps.look.outputs.skip == 'false'
+        env:
+          WANT: ${{ steps.look.outputs.want }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/toon-protocol/connector:$WANT"
+          docker pull -q "$IMAGE"
+
+          # This box renders its config; the checkout has only the template. So
+          # render it, from a throwaway .env. DOMAIN only reaches the nginx
+          # template and this repo's [node] endpoints; the two credentials are
+          # written out to files the connector reads by path. None of the three
+          # changes which KEYS the parser is asked to accept, which is the whole
+          # subject of this step.
+          cd deploy
+          cat > .env <<'ENV'
+          DOMAIN=gate.invalid
+          ENV
+          {
+            echo "OPERATOR_BEARER_TOKEN=$(openssl rand -hex 32)"
+            echo "OPERATOR_WRITE_KEY=$(openssl rand -hex 32)"
+          } >> .env
+
+          # render.sh chmods its output 0600 and chowns it to uid 10001 when it
+          # is root. A CI runner is not root, so it warns and leaves the files
+          # owned by the runner — where 0600 is unreadable to the container's
+          # uid 10001 and would look exactly like a config the build rejected.
+          # Widen them here; nothing in them is real.
+          ./render.sh
+          chmod 644 connector.toml operator-bearer.token operator-write.keys
+
+          # Throwaway material for every key path the rendered config names.
+          # None of it is real and none of it needs to be: the question is
+          # whether this build ACCEPTS the file, not whether it can settle
+          # with it.
+          WORK=$(mktemp -d)
+          for f in signer.key settlement.key settlement-solana.key; do
+            openssl rand -hex 32 > "$WORK/$f"
+          done
+          chmod 644 "$WORK"/*
+
+          set +e
+          OUT=$(timeout 60 docker run --rm \
+            -v "$PWD/connector.toml:/app/config/connector.toml:ro" \
+            -v "$WORK/signer.key:/app/data/signer.key:ro" \
+            -v "$WORK/settlement.key:/app/data/settlement.key:ro" \
+            -v "$WORK/settlement-solana.key:/app/data/settlement-solana.key:ro" \
+            -v "$PWD/operator-bearer.token:/app/data/operator-bearer.token:ro" \
+            -v "$PWD/operator-write.keys:/app/data/operator-write.keys:ro" \
+            "$IMAGE" 2>&1)
+          set -e
+
+          # The rendered config and the throwaway credentials are gitignored,
+          # but the next step commits — leave nothing behind for it to pick up.
+          rm -f .env connector.toml operator-bearer.token operator-write.keys
+          rm -rf nginx/conf.d
+
+          echo "$OUT" | head -30
+
+          if echo "$OUT" | grep -q 'connector listening'; then
+            echo "✅ the candidate served this node's config."
+            exit 0
+          fi
+          if echo "$OUT" | grep -q 'failed to construct the configured settlement backend'; then
+            echo "✅ the candidate ACCEPTED this node's config; it got as far as"
+            echo "   dialling a chain, which a CI runner holds no funded key for."
+            exit 0
+          fi
+
+          echo "::error::$WANT does not accept this node's deploy/connector.toml.template."
+          echo "::error::This is ADR 0041 Decision 1's breaking deploy. Land the config change first."
+          exit 1
+
+      - name: Open (or update) the pin bump
+        if: steps.look.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WANT: ${{ steps.look.outputs.want }}
+          HAVE: ${{ steps.look.outputs.have }}
+          HANDLE: ${{ steps.look.outputs.handle }}
+        run: |
+          set -euo pipefail
+          BRANCH="deploy/adopt-connector-$HANDLE"
+
+          # The two places this repo names a connector build, moved together --
+          # src/deploy-bundle-guard.test.ts fails the build if they ever
+          # disagree. Both spell it as the full image reference, so one
+          # expression does both files.
+          for f in deploy/docker-compose.yml src/deploy-bundle-guard.test.ts; do
+            sed -i "s|ghcr\.io/toon-protocol/connector:$HAVE|ghcr.io/toon-protocol/connector:$WANT|g" "$f"
+          done
+          if git diff --quiet; then
+            echo "nothing changed -- the pin was already current"
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$BRANCH"
+          git commit -q -a \
+            -m "deploy: adopt connector release $HANDLE" \
+            -m "The connector cut release $HANDLE, and this node follows its releases (deploy/README.md). The candidate was booted against this repo's own rendered deploy/connector.toml before this commit was made: it accepted the file, which is connector ADR 0041 Decision 1's question, asked at the one moment the candidate image and this node's config are both in front of the same machine." \
+            -m "The box applies this on its own timer once merged (deploy/auto-apply.sh)."
+          git push -q -f origin "$BRANCH"
+
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING is already open for $HANDLE."
+            exit 0
+          fi
+
+          cat > /tmp/pr-body.md <<'MD'
+          The connector cut a release. This moves this node's connector pin to it.
+
+          **Gate passed.** The candidate image was booted against this repo's own
+          `deploy/connector.toml`, rendered from `deploy/connector.toml.template` the way the box
+          renders it, and accepted it — connector ADR 0041 Decision 1, asked at the one moment the
+          candidate image and this node's config are both available to the same machine. A build
+          that refused a key by name, renamed a field or newly required one would have failed that
+          step, and no pull request would exist.
+
+          Once merged the box applies it on its own timer (`deploy/auto-apply.sh`); no CI job holds
+          SSH into a node (connector ADR 0068). If the applied build misbehaves, the connector repo's
+          `fleet-health.yml` opens a `needs:human` issue for it.
+
+          <sub>Opened automatically by `.github/workflows/adopt-connector-release.yml`.</sub>
+          MD
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "deploy: adopt connector release $HANDLE" \
+            --body-file /tmp/pr-body.md
+
+          gh pr merge --auto --squash "$BRANCH" \
+            || echo "::warning::auto-merge unavailable here -- the PR is open for a human to merge."
