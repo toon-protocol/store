@@ -157,12 +157,109 @@ async function arweaveAddressFromJwk(jwk: { n?: string }): Promise<string | unde
   }
 }
 
+/**
+ * The token Turbo credits are DENOMINATED and bought in. $ARIO is the store's
+ * default (owner decision 2026-08-28): this is an ar.io app, and the credits
+ * that pay for its uploads should be bought in ar.io's own token.
+ *
+ * This selects the CURRENCY, not the signer. The upload signer stays the
+ * Arweave JWK on every path below, so the address that owns the data items —
+ * and the address a Turbo balance is held against — is unchanged by flipping
+ * this. What changes is the token `getTokenPriceForBytes` quotes and the token
+ * an operator tops the balance up in. The winc price of a byte is identical
+ * either way (verified against Turbo: 1 MiB = 11,600,114,792 winc as both
+ * `arweave` and `ario`; that is 0.0178 AR or 26.59 ARIO).
+ */
+export type TurboCreditToken = 'ario' | 'arweave';
+
+const TURBO_CREDIT_TOKENS: readonly TurboCreditToken[] = ['ario', 'arweave'];
+
+export const DEFAULT_TURBO_CREDIT_TOKEN: TurboCreditToken = 'ario';
+
+/**
+ * Read `STORE_TURBO_TOKEN`, defaulting to $ARIO. Unset means ario — a box that
+ * says nothing gets the ar.io token, not the historical `arweave` default.
+ *
+ * Fail-closed on an unrecognised value rather than silently falling back: the
+ * whole turbo-sdk token union is accepted by `TurboFactory` (solana, ethereum,
+ * usdc, kyve, …), so a typo'd or well-meant-but-wrong value would otherwise
+ * construct a client denominated in a token nobody funded, and surface as
+ * uploads failing for "no credits" against a balance that looks fine.
+ */
+export function resolveTurboCreditToken(
+  raw: string | undefined
+): TurboCreditToken {
+  const value = raw?.trim();
+  if (!value) return DEFAULT_TURBO_CREDIT_TOKEN;
+  if ((TURBO_CREDIT_TOKENS as readonly string[]).includes(value)) {
+    return value as TurboCreditToken;
+  }
+  throw new Error(
+    `STORE_TURBO_TOKEN must be one of ${TURBO_CREDIT_TOKENS.join(', ')}, got ${JSON.stringify(value)}`
+  );
+}
+
+/**
+ * Base58 of a 64-byte Solana secret key (32-byte seed || 32-byte public), the
+ * format `HexSolanaSigner` wants despite its name. 64 bytes encode to 87 or 88
+ * base58 characters.
+ *
+ * Checked here rather than left to the signer so a malformed key fails at boot
+ * with a message naming the variable, instead of throwing "Non-base58
+ * character" from inside turbo-sdk. Note the common mistake this catches: this
+ * repo stores Solana keys as HEX elsewhere (`ARNS_DVM_SOLANA_SECRET_KEY`), and
+ * hex is a strict subset of nothing here -- a 128-char hex string is the wrong
+ * length and usually contains `0`, which base58 does not have.
+ */
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
+
+function assertBase58SolanaSecret(key: string): void {
+  if (!BASE58_RE.test(key)) {
+    throw new Error(
+      'STORE_TURBO_SOLANA_KEY must be base58 (a 64-byte Solana secret key). ' +
+        'It contains characters base58 does not use — if this is the hex form, convert it.'
+    );
+  }
+  if (key.length < 86 || key.length > 89) {
+    throw new Error(
+      `STORE_TURBO_SOLANA_KEY must decode to a 64-byte Solana secret key (87-88 base58 chars), got ${key.length}.`
+    );
+  }
+}
+
+/**
+ * The address Turbo holds this account's balance against. Under `token: 'ario'`
+ * that is `ownerToAddress(publicKey)` — Arweave-SHAPED base64url even when the
+ * signer is a Solana keypair, which is why it is NOT the Solana pubkey the key
+ * was derived from. Operators funding the account need this string, not the
+ * address a Solana explorer would show them.
+ *
+ * Best-effort: a boot-log nicety must never be what stops the store starting.
+ */
+async function turboAccountAddress(client: unknown): Promise<string | undefined> {
+  try {
+    const c = client as { signer?: { getNativeAddress?: () => Promise<string> } };
+    if (typeof c?.signer?.getNativeAddress === 'function') {
+      return await c.signer.getNativeAddress();
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
 interface CreateTurboAdapterResult {
   adapter: ArweaveUploadAdapter;
   /** Source of the credentials, for boot-log diagnostics. */
-  source: 'arweave-jwk-b64' | 'turbo-token-legacy' | 'unauthenticated-free-tier';
+  source:
+    | 'ario-solana'
+    | 'arweave-jwk-b64'
+    | 'turbo-token-legacy'
+    | 'unauthenticated-free-tier';
   /** Arweave address of the upload-signing key (only set for authenticated paths). */
   arweaveAddress?: string;
+  /** The token credits are denominated in, for boot-log diagnostics. */
+  token: TurboCreditToken;
   /** The constructed Turbo client (always set — every path builds one), for balance probing. */
   client?: unknown;
 }
@@ -170,7 +267,9 @@ interface CreateTurboAdapterResult {
 // --- Helper: Create Turbo adapter from env (preferred AR JWK path; legacy TURBO_TOKEN fallback) ---
 export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
-  legacyToken: string | undefined
+  legacyToken: string | undefined,
+  creditToken: TurboCreditToken = DEFAULT_TURBO_CREDIT_TOKEN,
+  solanaKeyBase58?: string | undefined
 ): Promise<CreateTurboAdapterResult> {
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
@@ -184,8 +283,48 @@ export async function createTurboAdapter(
   // unauthenticated ≤100 KB free tier.
   const jwkB64 = arweaveJwkB64?.trim() || undefined;
   const token = legacyToken?.trim() || undefined;
+  const solanaKey = solanaKeyBase58?.trim() || undefined;
 
-  // ── Preferred: STORE_ARWEAVE_JWK_B64 (piped by the host orchestrator) ─────
+  // ── Preferred: STORE_TURBO_SOLANA_KEY — pay for uploads in $ARIO ──────────
+  // The store is an ar.io app; this is the credential that lets it hold and
+  // spend ar.io's own token for its storage, with no Arweave wallet involved.
+  //
+  // `createTurboSigner` maps `token: 'ario'` to a Solana signer, which signs
+  // the ANS-104 data items directly — so this key, not a JWK, is what OWNS
+  // every upload made under it. It is also the only path that could ever fund
+  // ITSELF: `topUpWithTokens` has to sign an ARIO transfer on Solana, which an
+  // ArweaveSigner cannot do.
+  if (solanaKey) {
+    assertBase58SolanaSecret(solanaKey);
+    if (creditToken !== 'ario') {
+      throw new Error(
+        `STORE_TURBO_SOLANA_KEY pays in $ARIO, but STORE_TURBO_TOKEN is ${JSON.stringify(creditToken)}. ` +
+          'Drop one of them: a Solana key is only a credential for the ario token.'
+      );
+    }
+    const { TurboFactory } = await importTurbo();
+    const client = TurboFactory.authenticated({
+      privateKey: solanaKey,
+      token: 'ario',
+    });
+    if (jwkB64) {
+      console.warn(
+        '[store] WARNING: both STORE_TURBO_SOLANA_KEY and STORE_ARWEAVE_JWK_B64 are set.' +
+          ' Using the Solana key — uploads are signed by, and owned by, that wallet,' +
+          ' and any credit bought against the JWK address is NOT reachable from it.'
+      );
+    }
+    const arweaveAddress = await turboAccountAddress(client);
+    return {
+      adapter: new TurboUploadAdapter(client),
+      source: 'ario-solana',
+      ...(arweaveAddress ? { arweaveAddress } : {}),
+      token: 'ario',
+      client,
+    };
+  }
+
+  // ── STORE_ARWEAVE_JWK_B64 (piped by the host orchestrator) ────────────────
   if (jwkB64) {
     let jwkJson: string;
     try {
@@ -214,13 +353,14 @@ export async function createTurboAdapter(
     );
     const client = TurboFactory.authenticated({
       signer,
-      token: 'arweave',
+      token: creditToken,
     });
     const arweaveAddress = await arweaveAddressFromJwk(jwk);
     return {
       adapter: new TurboUploadAdapter(client),
       source: 'arweave-jwk-b64',
       arweaveAddress,
+      token: creditToken,
       client,
     };
   }
@@ -237,12 +377,13 @@ export async function createTurboAdapter(
     }
     const { TurboFactory } = await importTurbo();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const client = TurboFactory.authenticated({ privateKey: jwk as any });
+    const client = TurboFactory.authenticated({ privateKey: jwk as any, token: creditToken });
     const arweaveAddress = await arweaveAddressFromJwk(jwk);
     return {
       adapter: new TurboUploadAdapter(client),
       source: 'turbo-token-legacy',
       arweaveAddress,
+      token: creditToken,
       client,
     };
   }
@@ -255,10 +396,14 @@ export async function createTurboAdapter(
   const { default: Arweave } = await import('arweave');
   const arweave = Arweave.init({});
   const ephemeralJwk = await arweave.crypto.generateJWK();
-  const client = TurboFactory.authenticated({ privateKey: ephemeralJwk });
+  const client = TurboFactory.authenticated({
+    privateKey: ephemeralJwk,
+    token: creditToken,
+  });
   return {
     adapter: new TurboUploadAdapter(client),
     source: 'unauthenticated-free-tier',
+    token: creditToken,
     client,
   };
 }
@@ -466,11 +611,14 @@ export function resolveArnsBuyEnv(
   };
 }
 
-function buildNoCreditsMessage(address: string | undefined): string {
+function buildNoCreditsMessage(
+  address: string | undefined,
+  token: TurboCreditToken = DEFAULT_TURBO_CREDIT_TOKEN
+): string {
   const addr = address ?? 'unknown';
   return (
-    `Arweave wallet ${addr} has zero credits. Uploads will fail until credits are added. ` +
-    `Fund at https://turbo.ardrive.io/ (arweave address: ${addr})`
+    `Turbo account ${addr} has zero credits. Uploads will fail until credits are added. ` +
+    `Fund with $${token.toUpperCase()} at https://turbo.ardrive.io/ (account address: ${addr})`
   );
 }
 
@@ -500,15 +648,27 @@ async function main(): Promise<void> {
   // The JWK env var is treated as secret material — do NOT log its value.
   const arweaveJwkB64 = process.env['STORE_ARWEAVE_JWK_B64'];
   const legacyTurboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
-  const turboResult = await createTurboAdapter(arweaveJwkB64, legacyTurboToken);
+  // Which token credits are bought in — $ARIO unless a box says otherwise.
+  // Throws on an unrecognised value rather than booting mis-denominated.
+  const creditToken = resolveTurboCreditToken(process.env['STORE_TURBO_TOKEN']);
+  const turboSolanaKey = process.env['STORE_TURBO_SOLANA_KEY'];
+  const turboResult = await createTurboAdapter(
+    arweaveJwkB64,
+    legacyTurboToken,
+    creditToken,
+    turboSolanaKey
+  );
 
   const sourceLabel =
-    turboResult.source === 'arweave-jwk-b64'
-      ? 'STORE_ARWEAVE_JWK_B64 (wallet-derived)'
-      : turboResult.source === 'turbo-token-legacy'
-        ? 'TURBO_TOKEN (legacy)'
-        : 'unauthenticated (free tier, ≤100KB)';
+    turboResult.source === 'ario-solana'
+      ? 'STORE_TURBO_SOLANA_KEY ($ARIO, Solana-signed)'
+      : turboResult.source === 'arweave-jwk-b64'
+        ? 'STORE_ARWEAVE_JWK_B64 (wallet-derived)'
+        : turboResult.source === 'turbo-token-legacy'
+          ? 'TURBO_TOKEN (legacy)'
+          : 'unauthenticated (free tier, ≤100KB)';
   console.log(`[store] Arweave credit source: ${sourceLabel}`);
+  console.log(`[store] Turbo credit token: ${turboResult.token}`);
   if (turboResult.source === 'unauthenticated-free-tier') {
     console.warn(
       '[store] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
@@ -517,7 +677,10 @@ async function main(): Promise<void> {
     );
   }
   if (turboResult.arweaveAddress) {
-    console.log(`[store] Arweave address: ${turboResult.arweaveAddress}`);
+    // Under `ario` this is Turbo's account address, derived from the signing
+    // key — Arweave-shaped even when a Solana key signs, and NOT that key's
+    // Solana pubkey. It is the string to fund against.
+    console.log(`[store] Turbo account address: ${turboResult.arweaveAddress}`);
   }
 
   // Best-effort boot-time credit balance probe (warning-only — do not refuse
@@ -539,8 +702,14 @@ async function main(): Promise<void> {
         console.log(
           `[store] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
         );
-        if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
-          console.warn(`[store] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`);
+        if (
+          wincBig === 0n &&
+          (turboResult.source === 'arweave-jwk-b64' ||
+            turboResult.source === 'ario-solana')
+        ) {
+          console.warn(
+            `[store] ${buildNoCreditsMessage(turboResult.arweaveAddress, turboResult.token)}`
+          );
         }
       }
     } catch (err) {
