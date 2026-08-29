@@ -157,12 +157,56 @@ async function arweaveAddressFromJwk(jwk: { n?: string }): Promise<string | unde
   }
 }
 
+/**
+ * The token Turbo credits are DENOMINATED and bought in. $ARIO is the store's
+ * default (owner decision 2026-08-28): this is an ar.io app, and the credits
+ * that pay for its uploads should be bought in ar.io's own token.
+ *
+ * This selects the CURRENCY, not the signer. The upload signer stays the
+ * Arweave JWK on every path below, so the address that owns the data items —
+ * and the address a Turbo balance is held against — is unchanged by flipping
+ * this. What changes is the token `getTokenPriceForBytes` quotes and the token
+ * an operator tops the balance up in. The winc price of a byte is identical
+ * either way (verified against Turbo: 1 MiB = 11,600,114,792 winc as both
+ * `arweave` and `ario`; that is 0.0178 AR or 26.59 ARIO).
+ */
+export type TurboCreditToken = 'ario' | 'arweave';
+
+const TURBO_CREDIT_TOKENS: readonly TurboCreditToken[] = ['ario', 'arweave'];
+
+export const DEFAULT_TURBO_CREDIT_TOKEN: TurboCreditToken = 'ario';
+
+/**
+ * Read `STORE_TURBO_TOKEN`, defaulting to $ARIO. Unset means ario — a box that
+ * says nothing gets the ar.io token, not the historical `arweave` default.
+ *
+ * Fail-closed on an unrecognised value rather than silently falling back: the
+ * whole turbo-sdk token union is accepted by `TurboFactory` (solana, ethereum,
+ * usdc, kyve, …), so a typo'd or well-meant-but-wrong value would otherwise
+ * construct a client denominated in a token nobody funded, and surface as
+ * uploads failing for "no credits" against a balance that looks fine.
+ */
+export function resolveTurboCreditToken(
+  raw: string | undefined
+): TurboCreditToken {
+  const value = raw?.trim();
+  if (!value) return DEFAULT_TURBO_CREDIT_TOKEN;
+  if ((TURBO_CREDIT_TOKENS as readonly string[]).includes(value)) {
+    return value as TurboCreditToken;
+  }
+  throw new Error(
+    `STORE_TURBO_TOKEN must be one of ${TURBO_CREDIT_TOKENS.join(', ')}, got ${JSON.stringify(value)}`
+  );
+}
+
 interface CreateTurboAdapterResult {
   adapter: ArweaveUploadAdapter;
   /** Source of the credentials, for boot-log diagnostics. */
   source: 'arweave-jwk-b64' | 'turbo-token-legacy' | 'unauthenticated-free-tier';
   /** Arweave address of the upload-signing key (only set for authenticated paths). */
   arweaveAddress?: string;
+  /** The token credits are denominated in, for boot-log diagnostics. */
+  token: TurboCreditToken;
   /** The constructed Turbo client (always set — every path builds one), for balance probing. */
   client?: unknown;
 }
@@ -170,7 +214,8 @@ interface CreateTurboAdapterResult {
 // --- Helper: Create Turbo adapter from env (preferred AR JWK path; legacy TURBO_TOKEN fallback) ---
 export async function createTurboAdapter(
   arweaveJwkB64: string | undefined,
-  legacyToken: string | undefined
+  legacyToken: string | undefined,
+  creditToken: TurboCreditToken = DEFAULT_TURBO_CREDIT_TOKEN
 ): Promise<CreateTurboAdapterResult> {
   const importTurbo = () => import('@ardrive/turbo-sdk/node');
 
@@ -214,13 +259,14 @@ export async function createTurboAdapter(
     );
     const client = TurboFactory.authenticated({
       signer,
-      token: 'arweave',
+      token: creditToken,
     });
     const arweaveAddress = await arweaveAddressFromJwk(jwk);
     return {
       adapter: new TurboUploadAdapter(client),
       source: 'arweave-jwk-b64',
       arweaveAddress,
+      token: creditToken,
       client,
     };
   }
@@ -237,12 +283,13 @@ export async function createTurboAdapter(
     }
     const { TurboFactory } = await importTurbo();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const client = TurboFactory.authenticated({ privateKey: jwk as any });
+    const client = TurboFactory.authenticated({ privateKey: jwk as any, token: creditToken });
     const arweaveAddress = await arweaveAddressFromJwk(jwk);
     return {
       adapter: new TurboUploadAdapter(client),
       source: 'turbo-token-legacy',
       arweaveAddress,
+      token: creditToken,
       client,
     };
   }
@@ -255,10 +302,14 @@ export async function createTurboAdapter(
   const { default: Arweave } = await import('arweave');
   const arweave = Arweave.init({});
   const ephemeralJwk = await arweave.crypto.generateJWK();
-  const client = TurboFactory.authenticated({ privateKey: ephemeralJwk });
+  const client = TurboFactory.authenticated({
+    privateKey: ephemeralJwk,
+    token: creditToken,
+  });
   return {
     adapter: new TurboUploadAdapter(client),
     source: 'unauthenticated-free-tier',
+    token: creditToken,
     client,
   };
 }
@@ -466,11 +517,14 @@ export function resolveArnsBuyEnv(
   };
 }
 
-function buildNoCreditsMessage(address: string | undefined): string {
+function buildNoCreditsMessage(
+  address: string | undefined,
+  token: TurboCreditToken = DEFAULT_TURBO_CREDIT_TOKEN
+): string {
   const addr = address ?? 'unknown';
   return (
     `Arweave wallet ${addr} has zero credits. Uploads will fail until credits are added. ` +
-    `Fund at https://turbo.ardrive.io/ (arweave address: ${addr})`
+    `Fund with $${token.toUpperCase()} at https://turbo.ardrive.io/ (arweave address: ${addr})`
   );
 }
 
@@ -500,7 +554,14 @@ async function main(): Promise<void> {
   // The JWK env var is treated as secret material — do NOT log its value.
   const arweaveJwkB64 = process.env['STORE_ARWEAVE_JWK_B64'];
   const legacyTurboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
-  const turboResult = await createTurboAdapter(arweaveJwkB64, legacyTurboToken);
+  // Which token credits are bought in — $ARIO unless a box says otherwise.
+  // Throws on an unrecognised value rather than booting mis-denominated.
+  const creditToken = resolveTurboCreditToken(process.env['STORE_TURBO_TOKEN']);
+  const turboResult = await createTurboAdapter(
+    arweaveJwkB64,
+    legacyTurboToken,
+    creditToken
+  );
 
   const sourceLabel =
     turboResult.source === 'arweave-jwk-b64'
@@ -509,6 +570,7 @@ async function main(): Promise<void> {
         ? 'TURBO_TOKEN (legacy)'
         : 'unauthenticated (free tier, ≤100KB)';
   console.log(`[store] Arweave credit source: ${sourceLabel}`);
+  console.log(`[store] Turbo credit token: ${turboResult.token}`);
   if (turboResult.source === 'unauthenticated-free-tier') {
     console.warn(
       '[store] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
@@ -540,7 +602,9 @@ async function main(): Promise<void> {
           `[store] Arweave credit balance: ${wincStr} winc (${formatWincAsBytes(wincBig)} upload capacity)`
         );
         if (wincBig === 0n && turboResult.source === 'arweave-jwk-b64') {
-          console.warn(`[store] ${buildNoCreditsMessage(turboResult.arweaveAddress)}`);
+          console.warn(
+            `[store] ${buildNoCreditsMessage(turboResult.arweaveAddress, turboResult.token)}`
+          );
         }
       }
     } catch (err) {

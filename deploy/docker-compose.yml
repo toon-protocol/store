@@ -73,6 +73,9 @@ services:
       BLS_PORT: '3400'
       FEE_PER_JOB: ${FEE_PER_JOB:-10}
       STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
+      # Turbo credits are bought in $ARIO. Unset means ario; the store refuses
+      # to boot on a value that is neither ario nor arweave.
+      STORE_TURBO_TOKEN: ${STORE_TURBO_TOKEN:-ario}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # kind:5095 stays unregistered while its variable is empty.
       ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY:-}

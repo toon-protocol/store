@@ -73,6 +73,8 @@ vi.mock('@ardrive/turbo-sdk/node', () => {
 import {
   createJobCounter,
   applyEnvOverlay,
+  resolveTurboCreditToken,
+  DEFAULT_TURBO_CREDIT_TOKEN,
   createTurboAdapter,
 } from './entrypoint-store.js';
 
@@ -255,7 +257,7 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     expect(ArweaveSignerCalls).toHaveLength(1);
     expect(ArweaveSignerCalls[0]?.jwk).toMatchObject({ kty: 'RSA' });
     expect(TurboFactoryCalls).toHaveLength(1);
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'arweave' });
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
     // Address must be derivable from the modulus n field.
     expect(result.arweaveAddress).toBeDefined();
     expect(typeof result.arweaveAddress).toBe('string');
@@ -335,6 +337,71 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     expect(result.client).toBeDefined();
     expect(ArweaveSignerCalls).toHaveLength(0);
     expect(TurboFactoryCalls).toHaveLength(1);
+  });
+
+  // ── $ARIO credits (owner decision 2026-08-28) ────────────────────────────
+  //
+  // `token` picks the CURRENCY credits are quoted and bought in, not the
+  // signer: every path below still signs with the Arweave JWK, so the address
+  // that owns the data items and holds the balance does not move when this
+  // flips. Verified against live Turbo while making the switch: 1 MiB costs
+  // the same 11,600,114,792 winc under both tokens (0.0178 AR / 26.59 ARIO).
+
+  it('defaults to $ARIO credits when STORE_TURBO_TOKEN is unset', () => {
+    expect(DEFAULT_TURBO_CREDIT_TOKEN).toBe('ario');
+    expect(resolveTurboCreditToken(undefined)).toBe('ario');
+    // Empty and whitespace-only are ABSENT, not invalid — same rule the JWK
+    // and TURBO_TOKEN vars follow (#146), because a here-doc env file can
+    // leave a trailing newline behind.
+    expect(resolveTurboCreditToken('')).toBe('ario');
+    expect(resolveTurboCreditToken('   \n\t ')).toBe('ario');
+  });
+
+  it('honours an explicit STORE_TURBO_TOKEN, trimmed', () => {
+    expect(resolveTurboCreditToken('arweave')).toBe('arweave');
+    expect(resolveTurboCreditToken('  ario\n')).toBe('ario');
+  });
+
+  it('refuses an unrecognised STORE_TURBO_TOKEN instead of falling back', () => {
+    // TurboFactory itself accepts the whole turbo-sdk union (solana, ethereum,
+    // usdc, kyve, ...), so a wrong-but-plausible value would construct a client
+    // denominated in a token nobody funded. That surfaces much later as
+    // uploads failing for "no credits" against a balance that reads fine, so
+    // it fails at boot by name instead.
+    expect(() => resolveTurboCreditToken('solana')).toThrow(/STORE_TURBO_TOKEN/);
+    expect(() => resolveTurboCreditToken('ARIO')).toThrow(/must be one of/);
+  });
+
+  it('passes the credit token to Turbo on every credential path', async () => {
+    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
+
+    const jwkPath = await createTurboAdapter(b64, undefined, 'ario');
+    expect(jwkPath.token).toBe('ario');
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
+
+    TurboFactoryCalls.length = 0;
+    const legacy = await createTurboAdapter(undefined, JSON.stringify(FAKE_JWK), 'ario');
+    expect(legacy.token).toBe('ario');
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
+
+    // The free tier is denominated too: its ephemeral wallet cannot be funded,
+    // but the boot log must not claim a token the other paths would not use.
+    TurboFactoryCalls.length = 0;
+    const free = await createTurboAdapter(undefined, undefined, 'ario');
+    expect(free.source).toBe('unauthenticated-free-tier');
+    expect(free.token).toBe('ario');
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
+  });
+
+  it('still supports arweave-denominated credits for a box that has not migrated', async () => {
+    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
+    const result = await createTurboAdapter(b64, undefined, 'arweave');
+    expect(result.token).toBe('arweave');
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'arweave' });
+    // The signer is the JWK either way — switching currency must not move the
+    // address that owns the uploads.
+    expect(ArweaveSignerCalls).toHaveLength(1);
+    expect(result.arweaveAddress).toBeDefined();
   });
 
   it('DVM AR address is non-empty when JWK source resolves (feed-through for boot-log)', async () => {
