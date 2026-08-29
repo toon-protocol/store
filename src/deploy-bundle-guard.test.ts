@@ -177,20 +177,25 @@ const EXPECTED_SOLANA_TOKEN_ADDRESS =
 const EXPECTED_ROUTE_BASE = 1000;
 const EXPECTED_ROUTE_PER_KIB = 10;
 
-// issue#88: the two-node fleet retired the devnet apex, and with it BOTH
-// aliases that used to sit beside this box's prefix: `g.toon.relay.ario` (a
-// path through the apex that can no longer occur) and `g.toon.store` (owner
-// decision 2026-08-05 — one name for one app). The box terminates exactly this
-// one prefix; naming it as a literal means losing it, or silently regaining a
-// retired alias, fails by name instead of passing unnoticed.
-// This node terminates its own address and exactly one other name: the
-// relay's for it. The relay's routing table forwards `g.toon.relay.store`
-// here, and a forward copies the destination through verbatim, so that name
-// needs its own row or arrives to an F02. It is priced identically (one
-// handler, one price). The route OUT to the relay (`g.toon.store.relay`) is
-// a name beneath this address, established at runtime through the operator
-// surface — see the template's "The relay leg".
+// One name, held to as a literal, because every alias this box ever carried
+// was eventually removed and each removal had to be caught by name rather
+// than noticed later on a live box. issue#88 retired the devnet apex and the
+// `g.toon.relay.ario` hop through it (#94), which also renamed this box's own
+// prefix `g.toon.ario` -> `g.toon.store`.
+// TERMINATED and ADVERTISED are two different lists, and this box's whole
+// naming decision (owner, 2026-08-28) is the gap between them.
+//
+// It TERMINATES two names. Its own, and `g.toon.relay.store` -- the relay's
+// name for this service, beneath the RELAY's prefix -- because the relay
+// routes to this box under that name and a forward copies the destination
+// through verbatim, so a packet arrives wearing it and needs a row or it is
+// refused at the door.
+//
+// It ADVERTISES one: its own. `g.toon.relay.store` belongs to the relay's
+// prefix and is the relay's to hand out; this box answers to it without
+// claiming it in `GET /ilp`.
 const EXPECTED_ROUTE_PREFIXES = ['g.toon.store', 'g.toon.relay.store'].sort();
+const EXPECTED_ADVERTISED_ADDRESSES = ['g.toon.store'];
 const RELAYS_NAME_FOR_US = 'g.toon.relay.store';
 
 const TERMINATED_PREFIX = 'g.toon.store';
@@ -242,6 +247,14 @@ describe('deploy/ bundle is internally consistent', () => {
     const theirs = connectorToml.routes.find((r) => r.prefix === RELAYS_NAME_FOR_US);
     expect(theirs?.handler_url).toBe(ours?.handler_url);
     expect(theirs?.price).toEqual(ours?.price);
+  });
+
+  it("answers to the relay's name for us without advertising it", () => {
+    // The gap between the two lists, asserted directly: routed, not claimed.
+    // Re-adding it to `[node]` would have this box telling every client that
+    // discovers it that it owns a name under the relay's prefix.
+    expect(connectorToml.routes.map((r) => r.prefix)).toContain(RELAYS_NAME_FOR_US);
+    expect(connectorToml.node?.addresses).not.toContain(RELAYS_NAME_FOR_US);
   });
 
   it('charges more for a bigger upload', () => {
@@ -408,10 +421,25 @@ describe('deploy/ config matches the pinned connector', () => {
   it('uses [node], not the retired [announce]', () => {
     expect(connectorToml.announce).toBeUndefined();
     expect(connectorTemplateCode).not.toMatch(/^\s*\[announce\]/m);
-    // Every terminated prefix is advertised, and nothing else: a name this
-    // node terminates but never says is one no client can discover, and the
-    // relay's POST /peers reads exactly this list.
-    expect(connectorToml.node?.addresses.slice().sort()).toEqual(EXPECTED_ROUTE_PREFIXES);
+    // Advertise this box's OWN name and nothing else. Not every terminated
+    // prefix: `g.toon.relay.store` is terminated and deliberately unsaid.
+    //
+    // A name advertised but not terminated would be the broken direction --
+    // this box telling clients to pay a name it cannot honour -- so the
+    // advertised list must stay a subset of the routed one.
+    //
+    // NB: `POST /peers` on the relay reads this self-description for the
+    // SETTLEMENT addresses, to derive the payment channel — not for routing
+    // prefixes. The relay's `POST /routes/peers` takes its prefix as a
+    // literal in the operator's write, so this list never fed that route.
+    // That is why dropping the relay's name from here does not disturb the
+    // peering or the route the relay holds.
+    expect(connectorToml.node?.addresses.slice().sort()).toEqual(
+      EXPECTED_ADVERTISED_ADDRESSES.slice().sort()
+    );
+    for (const advertised of connectorToml.node?.addresses ?? []) {
+      expect(EXPECTED_ROUTE_PREFIXES).toContain(advertised);
+    }
   });
 
   it('declares no peering shared secret', () => {

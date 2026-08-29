@@ -104,14 +104,17 @@ prefix      = "g.toon.store"
 handler_url = "http://store:3300/store"
 price       = { base = 1000, per_kib = 10 }
 
-# The same app under the relay's name for it. The relay forwards
-# `g.toon.relay.store` here over the peering it established, and a forward
-# copies the destination through verbatim — so those packets arrive addressed
-# to this prefix and need a route of their own, or they are refused F02 at the
-# door. Priced identically to `g.toon.store` because the two share a
-# `handler_url`, and the connector refuses a config where one handler is
-# reachable at two prices (the cheaper door would take every packet). This is
-# the one deliberate second name: it is the relay's, not an alias of ours.
+# The same app under the relay's name for it. The relay ROUTES
+# `g.toon.relay.store` to this box, and a forward copies the destination
+# through verbatim, so packets arrive addressed to that name and need a row of
+# their own or they are refused at the door. Same handler, same schedule: the
+# connector refuses a config where one handler is reachable at two prices,
+# because the cheaper door would take every packet.
+#
+# TERMINATED BUT NOT ADVERTISED — see `[node]` at the bottom. This box answers
+# to the relay's name because the relay sends under it; it does not claim that
+# name as its own in `GET /ilp`. The name belongs to the relay's prefix, and
+# the relay is what hands it out.
 [[routes]]
 prefix      = "g.toon.relay.store"
 handler_url = "http://store:3300/store"
@@ -185,8 +188,16 @@ write_keys_file   = "/app/data/operator-write.keys"
 # The traffic that matters goes the other way. The relay carries packets TO
 # this node — addressed `g.toon.store`, or `g.toon.relay.store`, the name the
 # relay's own routing table forwards under (both terminated above) — and this
-# node terminates them. `peer_expose` is what lets that arrive: the relay dials, and
-# a peering is accepted here rather than opened from here.
+# node terminates them. `peer_expose` is what lets that arrive: the relay
+# dials, and a peering is accepted here rather than opened from here.
+#
+# ROUTED IS NOT ADVERTISED. This box terminates two names but claims exactly
+# one in `[node].addresses`. `g.toon.relay.store` sits beneath the RELAY's
+# prefix and is the relay's to hand out, so this box answers to it — the relay
+# forwards under it, and a forward rewrites nothing — without saying it is one
+# of its own names. A client discovering this node through `GET /ilp` gets
+# `g.toon.store` and nothing else; a client that reached the relay first gets
+# there under the relay's naming, which is the relay's business to publish.
 #
 # If a route out ever is wanted, it takes the relay's OWN address as its prefix
 # and is established through the operator surface (`POST /peers`, then
@@ -199,6 +210,6 @@ write_keys_file   = "/app/data/operator-write.keys"
 # and the public URLs it is reachable on. Clients read this back from
 # `GET /ilp` to discover the node.
 [node]
-addresses     = ["g.toon.store", "g.toon.relay.store"]
+addresses     = ["g.toon.store"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"

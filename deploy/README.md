@@ -188,11 +188,24 @@ than by trusting the firewall to hide a `0.0.0.0` bind.
 
 ## The routing table
 
-One prefix, terminated here:
+Two prefixes, both terminated here, one advertised:
 
-| Prefix | Where it goes | Client pays here |
-|---|---|---|
-| `g.toon.store` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` |
+| Prefix | Where it goes | Client pays here | In `GET /ilp` |
+|---|---|---|---|
+| `g.toon.store` | terminates → `store:3300/store` → Arweave | `base 1000 + 10/KiB` | yes |
+| `g.toon.relay.store` | terminates → the same handler, same schedule | `base 1000 + 10/KiB` | **no** |
+
+`g.toon.relay.store` is the **relay's** name for this service, beneath the
+relay's own prefix. The relay routes to this box under it, and a forward copies
+the destination through verbatim, so packets arrive wearing that name and need
+a row here or they are refused at the door. Same handler and same schedule as
+the row above — the connector refuses a config where one handler is reachable
+at two prices.
+
+It is terminated but **not advertised**: this box answers to the relay's name
+because the relay sends under it, and does not claim a name from the relay's
+prefix as one of its own. A client discovering this node reads back
+`g.toon.store` and nothing else.
 
 A route is a prefix plus **exactly one** of `handler_url` (terminate) or
 `peer_id` (forward), and a price is required on both branches. Longest prefix
