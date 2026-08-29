@@ -339,6 +339,79 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     expect(TurboFactoryCalls).toHaveLength(1);
   });
 
+  // ── STORE_TURBO_SOLANA_KEY — paying for uploads in $ARIO ─────────────────
+  //
+  // The no-Arweave-wallet path. turbo-sdk maps `token: 'ario'` to a Solana
+  // signer, so this key signs the data items and owns every upload made under
+  // it. Format facts verified against turbo-sdk 1.42.0 while writing this:
+  // despite the name, `HexSolanaSigner` wants BASE58 of the 64-byte secret
+  // (87-88 chars), and the resulting account address is Arweave-shaped
+  // base64url, NOT the Solana pubkey.
+
+  // 88 base58 chars, no 0/O/I/l — a well-formed stand-in, never a real key.
+  const FAKE_SOLANA_KEY_B58 =
+    '4wBqpZM9xaSheZzJSMawUHDgZ7miWfSsxmfVF5jJpYPBCyxTb1GKQ7VJXjHUxUHK2Wd8vVJDPTFVjKjLYPqEtWfN';
+
+  it('STORE_TURBO_SOLANA_KEY takes precedence and pays in $ARIO', async () => {
+    const result = await createTurboAdapter(
+      undefined,
+      undefined,
+      'ario',
+      FAKE_SOLANA_KEY_B58
+    );
+    expect(result.source).toBe('ario-solana');
+    expect(result.token).toBe('ario');
+    // The key goes in as `privateKey`, not as an ArweaveSigner: turbo-sdk is
+    // what turns it into a Solana signer, keyed off the token.
+    expect(ArweaveSignerCalls).toHaveLength(0);
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({
+      privateKey: FAKE_SOLANA_KEY_B58,
+      token: 'ario',
+    });
+  });
+
+  it('prefers the Solana key over a JWK, and says so', async () => {
+    // Both set is a migration state, not a config error — but it silently
+    // changes which wallet OWNS the uploads, so it must not pass quietly.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
+    const result = await createTurboAdapter(b64, undefined, 'ario', FAKE_SOLANA_KEY_B58);
+    expect(result.source).toBe('ario-solana');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('STORE_ARWEAVE_JWK_B64'));
+    warn.mockRestore();
+  });
+
+  it('rejects a hex Solana key with a message that names the fix', async () => {
+    // The live footgun: ARNS_DVM_SOLANA_SECRET_KEY is stored as hex in this
+    // repo, so reaching for that value here is the obvious mistake. Without
+    // this check it surfaces as "Non-base58 character" from inside turbo-sdk.
+    const hex = 'a'.repeat(128);
+    await expect(
+      createTurboAdapter(undefined, undefined, 'ario', hex)
+    ).rejects.toThrow(/base58/);
+  });
+
+  it('rejects a base58 key of the wrong length', async () => {
+    await expect(
+      createTurboAdapter(undefined, undefined, 'ario', 'abcdef')
+    ).rejects.toThrow(/64-byte/);
+  });
+
+  it('refuses a Solana key paired with a non-ario token', async () => {
+    // A Solana key is only a credential for the ario token; the pair is a
+    // contradiction, and guessing which half the operator meant is worse than
+    // refusing.
+    await expect(
+      createTurboAdapter(undefined, undefined, 'arweave', FAKE_SOLANA_KEY_B58)
+    ).rejects.toThrow(/STORE_TURBO_SOLANA_KEY pays in \$ARIO/);
+  });
+
+  it('falls through to the JWK when no Solana key is set', async () => {
+    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
+    const blank = await createTurboAdapter(b64, undefined, 'ario', '   ');
+    expect(blank.source).toBe('arweave-jwk-b64');
+  });
+
   // ── $ARIO credits (owner decision 2026-08-28) ────────────────────────────
   //
   // `token` picks the CURRENCY credits are quoted and bought in, not the

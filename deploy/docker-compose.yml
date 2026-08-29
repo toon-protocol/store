@@ -72,6 +72,9 @@ services:
       HANDLER_PORT: '3300'
       BLS_PORT: '3400'
       FEE_PER_JOB: ${FEE_PER_JOB:-10}
+      # The $ARIO credential: a base58 Solana secret key that signs the uploads
+      # and owns them. Preferred over the JWK below when both are set.
+      STORE_TURBO_SOLANA_KEY: ${STORE_TURBO_SOLANA_KEY:-}
       STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
       # Turbo credits are bought in $ARIO. Unset means ario; the store refuses
       # to boot on a value that is neither ario nor arweave.

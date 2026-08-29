@@ -151,14 +151,23 @@ curl localhost:3400/health
 # {"status":"ok","handlerKinds":[5094],"basePricePerByte":"10",...}
 ```
 
-With no Arweave credentials it uploads on the free tier, which caps one upload
-at 100 KB. Set `STORE_ARWEAVE_JWK_B64` to a funded wallet to lift that.
+With no upload credential it runs on the free tier, which caps one upload at
+100 KB on a wallet that rotates every restart and cannot be funded. Two
+credentials lift that, and Turbo needs one of them — a token setting alone is
+a currency, not a wallet:
 
-Credits for those uploads are bought in **$ARIO** — this is an ar.io app, and
-`STORE_TURBO_TOKEN` defaults accordingly. That names the currency, not the
-signer: the JWK above still signs every upload, so the address that owns the
-data items is the same whichever token funds it, and a byte costs the same
-winc either way. Set `STORE_TURBO_TOKEN=arweave` to buy credits in AR instead.
+- **`STORE_TURBO_SOLANA_KEY`** (preferred) — base58 of a 64-byte Solana secret
+  key. Pays in **$ARIO** with no Arweave wallet at all. This is an ar.io app;
+  its storage is bought in ar.io's own token.
+- **`STORE_ARWEAVE_JWK_B64`** — a funded Arweave JWK, base64-encoded.
+
+Whichever is set signs the ANS-104 data items and therefore **owns** the
+uploads, so the two are not interchangeable after the fact: blobs stored under
+one are attributed to a different address than blobs stored under the other.
+
+Fund the address the store prints at boot as `[store] Turbo account address:`.
+Under `$ARIO` that is Arweave-shaped base64url derived from the signing key —
+**not** the Solana pubkey an explorer would show you.
 
 There is no connector in this loop — you are talking to the backend directly,
 which is exactly what the connector does once it has been paid.
@@ -180,7 +189,8 @@ devbox run build && devbox run test
 | `NODE_NOSTR_SECRET_KEY` | *required* | This node's Nostr identity (64 hex chars) |
 | `HANDLER_PORT` | `3300` | The job backend the connector proxies to |
 | `BLS_PORT` | `3400` | Health endpoint |
-| `STORE_ARWEAVE_JWK_B64` | *(free tier)* | Base64 Arweave JWK; lifts the 100 KB cap |
+| `STORE_TURBO_SOLANA_KEY` | *(free tier)* | Base58 Solana secret key; signs uploads and pays in $ARIO |
+| `STORE_ARWEAVE_JWK_B64` | *(free tier)* | Base64 Arweave JWK; the AR alternative to the above |
 | `STORE_TURBO_TOKEN` | `ario` | Token Turbo credits are quoted and bought in (`ario` or `arweave`) |
 | `FEE_PER_JOB` | `10` | Advertised price per job |
 | `STORE_CONFIG_JSON` / `STORE_CONFIG_PATH` | — | Full config as JSON, in place of the variables above |
