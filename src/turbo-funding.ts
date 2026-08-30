@@ -248,7 +248,10 @@ export interface TurboBalanceClient {
    * monitor prefers the effective figure when the client reports one.
    */
   getBalance(): Promise<{ winc: string | bigint; effectiveBalance?: string | bigint }>;
-  topUpWithTokens?(params: { tokenAmount: string }): Promise<unknown>;
+  topUpWithTokens?(params: {
+    tokenAmount: string;
+    turboCreditDestinationAddress?: string;
+  }): Promise<unknown>;
   /** Resubmit a landed-but-uncredited fund transaction to Turbo's payment API. */
   submitFundTransaction?(params: { txId: string }): Promise<unknown>;
   getUploadCosts?(params: { bytes: number[] }): Promise<{ winc: string }[]>;
@@ -329,10 +332,21 @@ export function wincToCapacityBytes(
 export function createTurboFundingMonitor(options: {
   client: TurboBalanceClient;
   config: TurboFundingEnvConfig;
+  /**
+   * The Turbo account the top-up must credit -- the same address getBalance
+   * reads and uploads debit. REQUIRED for spending: without an explicit
+   * `turboCreditDestinationAddress`, Turbo's payment service credits the
+   * account keyed by the RAW SOLANA PUBKEY, while the `token: 'ario'` client
+   * identifies as the sha256-shaped address -- so the winc lands where this
+   * client can never see or spend it (demonstrated on mainnet 2026-08-30:
+   * fund tx 3RfYhXB3... credited `5jqYe...`, getBalance read 0 on `MNC4Gu...`).
+   * A monitor without this address warns and refuses to transfer.
+   */
+  accountAddress?: string;
   log?: MonitorLogger;
   now?: () => number;
 }): TurboFundingMonitor {
-  const { client, config } = options;
+  const { client, config, accountAddress } = options;
   const log = options.log ?? {
     info: (m: string) => console.log(m),
     warn: (m: string) => console.warn(m),
@@ -445,10 +459,24 @@ export function createTurboFundingMonitor(options: {
       if (typeof client.topUpWithTokens !== 'function') {
         throw new Error('this Turbo client cannot top up (no Solana signer)');
       }
+      if (!accountAddress) {
+        // Fail-closed for spend: an implicit credit lands on the account
+        // keyed by the raw Solana pubkey, not the one this client reads, so
+        // transferring without a stated destination buys winc nobody here
+        // can see (see the accountAddress doc above).
+        throw new Error(
+          'refusing to top up: the Turbo account address is unknown, and a transfer ' +
+            'without an explicit credit destination lands on an account this client ' +
+            'cannot read or spend'
+        );
+      }
       const tokenAmount = BigInt(
         Math.round(amountArio * 10 ** ARIO_TOKEN_DECIMALS)
       ).toString();
-      await client.topUpWithTokens({ tokenAmount });
+      await client.topUpWithTokens({
+        tokenAmount,
+        turboCreditDestinationAddress: accountAddress,
+      });
       const after = await readBalance();
       record.ok = true;
       if (after !== null) record.balanceAfterWinc = after.toString();

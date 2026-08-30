@@ -773,7 +773,10 @@ async function main(): Promise<void> {
   // shelling into the box.
   const monitorClient = (turboResult.client ?? {}) as {
     getBalance?: () => Promise<{ winc: string | bigint; effectiveBalance?: string | bigint }>;
-    topUpWithTokens?: (p: { tokenAmount: string }) => Promise<unknown>;
+    topUpWithTokens?: (p: {
+      tokenAmount: string;
+      turboCreditDestinationAddress?: string;
+    }) => Promise<unknown>;
     submitFundTransaction?: (p: { txId: string }) => Promise<unknown>;
     getUploadCosts?: (p: { bytes: number[] }) => Promise<{ winc: string }[]>;
   };
@@ -793,6 +796,12 @@ async function main(): Promise<void> {
       ...(clientUploadCosts ? { getUploadCosts: clientUploadCosts } : {}),
     },
     config: fundingEnv,
+    // The account a top-up must credit BY NAME: an implicit credit lands on
+    // the raw-pubkey-keyed account the 'ario' client cannot read (mainnet
+    // demonstration 2026-08-30, see turbo-funding.ts).
+    ...(turboResult.arweaveAddress
+      ? { accountAddress: turboResult.arweaveAddress }
+      : {}),
   });
   // Boot-time read is best-effort (the monitor never throws): operators may
   // want the store running while they fund.

@@ -172,6 +172,7 @@ describe('resolveTurboFundingEnv', () => {
 interface StubClientState {
   winc: string;
   topUps: string[];
+  destinations: (string | undefined)[];
   failTopUp?: boolean;
   failBalance?: boolean;
 }
@@ -182,14 +183,25 @@ function stubClient(state: StubClientState) {
       if (state.failBalance) throw new Error('balance probe down');
       return { winc: state.winc };
     }),
-    topUpWithTokens: vi.fn(async ({ tokenAmount }: { tokenAmount: string }) => {
-      if (state.failTopUp) throw new Error('solana is down');
-      state.topUps.push(tokenAmount);
-      state.winc = '999999999999';
-      return { id: 'stub-tx' };
-    }),
+    topUpWithTokens: vi.fn(
+      async ({
+        tokenAmount,
+        turboCreditDestinationAddress,
+      }: {
+        tokenAmount: string;
+        turboCreditDestinationAddress?: string;
+      }) => {
+        if (state.failTopUp) throw new Error('solana is down');
+        state.topUps.push(tokenAmount);
+        state.destinations.push(turboCreditDestinationAddress);
+        state.winc = '999999999999';
+        return { id: 'stub-tx' };
+      }
+    ),
   };
 }
+
+const FAKE_ACCOUNT = 'XBk_fake_turbo_account';
 
 const silentLog = { info: vi.fn(), warn: vi.fn() };
 
@@ -204,10 +216,11 @@ function fundingConfig(overrides: Partial<TurboFundingEnvConfig>): TurboFundingE
 
 describe('createTurboFundingMonitor', () => {
   it('tops up below the threshold, in $ARIO base units', async () => {
-    const state: StubClientState = { winc: '5', topUps: [] };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [] };
     const client = stubClient(state);
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -226,10 +239,11 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('does not top up above the threshold', async () => {
-    const state: StubClientState = { winc: '2000', topUps: [] };
+    const state: StubClientState = { winc: '2000', topUps: [], destinations: [] };
     const client = stubClient(state);
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -242,9 +256,10 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('clamps the attempt to the ceiling', async () => {
-    const state: StubClientState = { winc: '5', topUps: [] };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [] };
     const monitor = createTurboFundingMonitor({
       client: stubClient(state),
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 500,
@@ -259,11 +274,12 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('suppresses a second attempt inside the interval, even after a failure', async () => {
-    const state: StubClientState = { winc: '5', topUps: [], failTopUp: true };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [], failTopUp: true };
     const client = stubClient(state);
     let clock = 1_000_000;
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -291,9 +307,10 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('a thrown top-up leaves the monitor serving (never throws)', async () => {
-    const state: StubClientState = { winc: '5', topUps: [], failTopUp: true };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [], failTopUp: true };
     const monitor = createTurboFundingMonitor({
       client: stubClient(state),
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -306,11 +323,12 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('warn-only mode warns below the threshold and never spends', async () => {
-    const state: StubClientState = { winc: '5', topUps: [] };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [] };
     const client = stubClient(state);
     const warn = vi.fn();
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({ thresholdWinc: 1000n }),
       log: { info: vi.fn(), warn },
     });
@@ -320,15 +338,58 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('a balance-probe failure is a warning, not a crash, and the snapshot says so', async () => {
-    const state: StubClientState = { winc: '5', topUps: [], failBalance: true };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [], failBalance: true };
     const monitor = createTurboFundingMonitor({
       client: stubClient(state),
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({ thresholdWinc: 1000n }),
       log: silentLog,
     });
     await expect(monitor.check()).resolves.toBeUndefined();
     expect(monitor.snapshot().balanceWinc).toBeNull();
     expect(monitor.snapshot().canPayAboveFreeTier).toBe(false);
+  });
+
+  it('names the credit destination on every transfer', async () => {
+    // Mainnet demonstration 2026-08-30: without an explicit destination,
+    // Turbo credits the account keyed by the raw Solana pubkey, and the
+    // 'ario' client (which identifies as the sha256-shaped address) reads 0
+    // forever. The winc is orphaned from this client's point of view.
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [] };
+    const monitor = createTurboFundingMonitor({
+      client: stubClient(state),
+      accountAddress: FAKE_ACCOUNT,
+      config: fundingConfig({
+        thresholdWinc: 1000n,
+        topUpAmountArio: 50,
+        selfFundingEnabled: true,
+      }),
+      log: silentLog,
+      now: () => 1_000_000,
+    });
+    await monitor.check();
+    expect(state.destinations).toEqual([FAKE_ACCOUNT]);
+  });
+
+  it('refuses to transfer at all when the account address is unknown', async () => {
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [] };
+    const client = stubClient(state);
+    const monitor = createTurboFundingMonitor({
+      client,
+      // no accountAddress
+      config: fundingConfig({
+        thresholdWinc: 1000n,
+        topUpAmountArio: 50,
+        selfFundingEnabled: true,
+      }),
+      log: silentLog,
+      now: () => 1_000_000,
+    });
+    await monitor.check();
+    expect(client.topUpWithTokens).not.toHaveBeenCalled();
+    expect(state.topUps).toEqual([]);
+    expect(monitor.snapshot().lastTopUp?.ok).toBe(false);
+    expect(monitor.snapshot().lastTopUp?.error).toMatch(/account address is unknown/);
   });
 
   it('a transfer that landed without credit is never re-sent; it is resubmitted until credited', async () => {
@@ -359,6 +420,7 @@ describe('createTurboFundingMonitor', () => {
     };
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -411,6 +473,7 @@ describe('createTurboFundingMonitor', () => {
     };
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -438,6 +501,7 @@ describe('createTurboFundingMonitor', () => {
     };
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -473,10 +537,11 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('after stop(), an in-flight check does not spend', async () => {
-    const state: StubClientState = { winc: '5', topUps: [] };
+    const state: StubClientState = { winc: '5', topUps: [], destinations: [] };
     const client = stubClient(state);
     const monitor = createTurboFundingMonitor({
       client,
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({
         thresholdWinc: 1000n,
         topUpAmountArio: 50,
@@ -491,9 +556,10 @@ describe('createTurboFundingMonitor', () => {
   });
 
   it('reports capacity in bytes an operator can act on', async () => {
-    const state: StubClientState = { winc: '11600114792', topUps: [] }; // ~1 MiB at the measured rate
+    const state: StubClientState = { winc: '11600114792', topUps: [], destinations: [] }; // ~1 MiB at the measured rate
     const monitor = createTurboFundingMonitor({
       client: stubClient(state),
+      accountAddress: FAKE_ACCOUNT,
       config: fundingConfig({}),
       log: silentLog,
     });
