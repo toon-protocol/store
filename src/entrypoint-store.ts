@@ -772,10 +772,14 @@ async function main(): Promise<void> {
   // Its snapshot feeds /health so fleet monitoring sees "can it pay" without
   // shelling into the box.
   const monitorClient = (turboResult.client ?? {}) as {
-    getBalance?: () => Promise<{ winc: string | bigint }>;
+    getBalance?: () => Promise<{ winc: string | bigint; effectiveBalance?: string | bigint }>;
     topUpWithTokens?: (p: { tokenAmount: string }) => Promise<unknown>;
+    submitFundTransaction?: (p: { txId: string }) => Promise<unknown>;
+    getUploadCosts?: (p: { bytes: number[] }) => Promise<{ winc: string }[]>;
   };
   const clientTopUp = monitorClient.topUpWithTokens?.bind(monitorClient);
+  const clientSubmitFund = monitorClient.submitFundTransaction?.bind(monitorClient);
+  const clientUploadCosts = monitorClient.getUploadCosts?.bind(monitorClient);
   const fundingMonitor = createTurboFundingMonitor({
     client: {
       getBalance: async () => {
@@ -785,6 +789,8 @@ async function main(): Promise<void> {
         return monitorClient.getBalance();
       },
       ...(clientTopUp ? { topUpWithTokens: clientTopUp } : {}),
+      ...(clientSubmitFund ? { submitFundTransaction: clientSubmitFund } : {}),
+      ...(clientUploadCosts ? { getUploadCosts: clientUploadCosts } : {}),
     },
     config: fundingEnv,
   });
@@ -804,24 +810,32 @@ async function main(): Promise<void> {
       }
     }
   }
-  if (fundingEnv.thresholdWinc !== undefined) {
-    fundingMonitor.start();
-    console.log(
-      `[store] Turbo balance monitor: every ${fundingEnv.checkIntervalMs / 1000}s, ` +
-        `threshold ${fundingEnv.thresholdWinc} winc, self-funding ` +
-        (fundingEnv.selfFundingEnabled
-          ? `ON (${fundingEnv.topUpAmountArio} $ARIO per top-up, ` +
-            `ceiling ${fundingEnv.maxTopUpArio ?? fundingEnv.topUpAmountArio}, ` +
-            `min ${fundingEnv.minIntervalMs / 1000}s between attempts)`
-          : 'OFF (warn only)')
-    );
-  }
+  // The monitor ALWAYS runs: /health's balance block must be a live read for
+  // the life of the process, not a boot-time snapshot (a funded box with no
+  // threshold, drained overnight, must not keep reporting it can pay). The
+  // threshold gates only warning and top-up, never the polling.
+  fundingMonitor.start();
+  console.log(
+    `[store] Turbo balance monitor: every ${fundingEnv.checkIntervalMs / 1000}s, ` +
+      (fundingEnv.thresholdWinc !== undefined
+        ? `threshold ${fundingEnv.thresholdWinc} winc, self-funding ` +
+          (fundingEnv.selfFundingEnabled
+            ? `ON (${fundingEnv.topUpAmountArio} $ARIO per top-up, ` +
+              `ceiling ${fundingEnv.maxTopUpArio ?? fundingEnv.topUpAmountArio}, ` +
+              `min ${fundingEnv.minIntervalMs / 1000}s between attempts)`
+            : 'OFF (warn only)')
+        : 'no threshold (balance polling for /health only)')
+  );
 
   // Refuse an upload the balance cannot cover BEFORE bytes reach Turbo, with
   // the reason by name -- "out of credit" and "malformed blob" must be
   // distinguishable (stories 2-3). Sits behind the existing adapter seam.
   const uploadAdapter = createFundedUploadAdapter(turboResult.adapter, {
     funded: fundedSource,
+    // The free-tier ceiling is measured on the SIGNED data item; the envelope
+    // differs by an order of magnitude between the RSA and ed25519 signers.
+    signerKind:
+      turboResult.source === 'ario-solana' ? 'solana-ed25519' : 'arweave-rsa',
     ...(typeof monitorClient.getBalance === 'function'
       ? {
           client: turboResult.client as {

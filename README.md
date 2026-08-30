@@ -199,6 +199,8 @@ devbox run build && devbox run test
 | `STORE_TURBO_TOPUP_MAX_ARIO` | *(= amount)* | Hard per-attempt spending ceiling |
 | `STORE_TURBO_TOPUP_MIN_INTERVAL_SEC` | `3600` | Minimum seconds between top-up attempts, failed ones included |
 | `STORE_TURBO_BALANCE_CHECK_INTERVAL_SEC` | `600` | How often the balance monitor reads the Turbo balance |
+
+Self-funding has **no total or daily cap**: the only bound on spend is the per-attempt amount times the attempt frequency (`STORE_TURBO_TOPUP_MAX_ARIO` × at most one attempt per `STORE_TURBO_TOPUP_MIN_INTERVAL_SEC`). With an amount too small to lift the balance over the threshold, the node will keep spending at that bounded rate until the wallet is empty — size the amount to clear the threshold. A transfer that lands on-chain without being credited by Turbo halts all further transfers until the credit is recovered (see `/health`'s `pendingFundTxId`).
 | `FEE_PER_JOB` | `10` | Advertised price per job |
 | `STORE_CONFIG_JSON` / `STORE_CONFIG_PATH` | — | Full config as JSON, in place of the variables above |
 | `LOG_LEVEL` | `info` | |

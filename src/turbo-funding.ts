@@ -12,6 +12,14 @@
  *    network and the configured gateway are cross-checked at boot and a
  *    mismatch refuses to start. The mint for each network is pinned here.
  *
+ *  - A TRANSFER THAT LANDED MUST NEVER BE RE-SENT. turbo-sdk's topUpWithTokens
+ *    submits the SPL transfer FIRST and only then tells Turbo's payment API
+ *    about it; if that second step fails, the tokens have already moved. The
+ *    monitor captures the transaction id out of that failure and, until Turbo
+ *    accepts it via submitFundTransaction, refuses to sign any further
+ *    transfer -- a payment-API outage degrades to "one transfer awaiting
+ *    credit", never a spending loop.
+ *
  *  - SELF-FUNDING (opt-in, bounded). A balance monitor reads the Turbo credit
  *    balance on an interval; below a configured threshold it buys more credits
  *    from the $ARIO the signing wallet holds, capped per attempt and
@@ -50,7 +58,7 @@ export type TurboSolanaNetwork = 'mainnet' | 'devnet';
  * The $ARIO SPL mints, pinned per network (decision 23: stated, not inferred,
  * so a change in turbo-sdk's defaults cannot silently move which token this
  * node spends). Values match @ardrive/turbo-sdk's ARIOToken and @ar.io/sdk's
- * cluster constants as of turbo-sdk 1.40.x.
+ * cluster constants as of turbo-sdk 1.42.0 (what the lockfile resolves).
  */
 export const ARIO_MINTS: Record<TurboSolanaNetwork, string> = {
   mainnet: 'DcNnMuFxwhgV4WY1HVSaSEgr92bv2b1vUvEKiNxWqHdF',
@@ -58,6 +66,19 @@ export const ARIO_MINTS: Record<TurboSolanaNetwork, string> = {
 };
 
 export const ARIO_TOKEN_DECIMALS = 6;
+
+/**
+ * A gateway URL fit for an error message or a log line: origin only. RPC
+ * providers (Helius, QuickNode) put the API key in the path or query, and a
+ * boot-refusal message ends up in the operator's log.
+ */
+function redactGatewayUrl(raw: string): string {
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return '<unparseable URL>';
+  }
+}
 
 export interface TurboSolanaNetworkConfig {
   network: TurboSolanaNetwork;
@@ -92,7 +113,7 @@ export function resolveTurboSolanaNetwork(
 
   if (network === 'mainnet' && gatewayUrl?.includes('devnet')) {
     throw new Error(
-      `STORE_TURBO_SOLANA_NETWORK is mainnet but STORE_TURBO_SOLANA_GATEWAY (${gatewayUrl}) ` +
+      `STORE_TURBO_SOLANA_NETWORK is mainnet but STORE_TURBO_SOLANA_GATEWAY (${redactGatewayUrl(gatewayUrl)}) ` +
         'contains "devnet" -- turbo-sdk would select the devnet $ARIO mint. ' +
         'Fix one of them; refusing to boot a node that would spend the wrong token.'
     );
@@ -221,8 +242,16 @@ export function resolveTurboFundingEnv(
 
 /** The slice of a Turbo client the monitor needs (duck-typed; stubbed in tests). */
 export interface TurboBalanceClient {
-  getBalance(): Promise<{ winc: string | bigint }>;
+  /**
+   * `effectiveBalance` is what turbo-sdk's own on-demand logic spends against
+   * (spendable after credit-share approvals); `winc` is the raw balance. The
+   * monitor prefers the effective figure when the client reports one.
+   */
+  getBalance(): Promise<{ winc: string | bigint; effectiveBalance?: string | bigint }>;
   topUpWithTokens?(params: { tokenAmount: string }): Promise<unknown>;
+  /** Resubmit a landed-but-uncredited fund transaction to Turbo's payment API. */
+  submitFundTransaction?(params: { txId: string }): Promise<unknown>;
+  getUploadCosts?(params: { bytes: number[] }): Promise<{ winc: string }[]>;
 }
 
 export interface TopUpRecord {
@@ -231,6 +260,22 @@ export interface TopUpRecord {
   ok: boolean;
   error?: string;
   balanceAfterWinc?: string;
+  /** Set when this record is a recovery of an earlier landed transfer, not a new one. */
+  recoveredFundTxId?: string;
+}
+
+/**
+ * turbo-sdk's topUpWithTokens throws this exact shape when the SPL transfer
+ * has ALREADY LANDED but Turbo's payment API refused/failed the credit step
+ * (common/payment.js): "... try again with 'turbo.submitFundTransaction(id)':
+ * <txId>". The id is the one thing that makes the failure recoverable instead
+ * of re-spendable, so it is parsed out and held.
+ */
+const LANDED_FUND_TX_RE =
+  /submitFundTransaction\(id\)'?:\s*([1-9A-HJ-NP-Za-km-z]{32,})/;
+
+export function extractLandedFundTxId(message: string): string | undefined {
+  return LANDED_FUND_TX_RE.exec(message)?.[1];
 }
 
 export interface TurboFundingSnapshot {
@@ -239,11 +284,17 @@ export interface TurboFundingSnapshot {
   balanceCheckedAt: string | null;
   /** Estimated upload capacity of the balance, in bytes. */
   uploadCapacityBytes: string | null;
-  /** Whether an above-free-tier upload could currently be paid for. */
+  /** Whether the balance covers at least the smallest above-free-tier upload. */
   canPayAboveFreeTier: boolean;
   selfFunding: boolean;
   thresholdWinc: string | null;
   lastTopUp: TopUpRecord | null;
+  /**
+   * A transfer that moved $ARIO on-chain but was never credited by Turbo's
+   * payment API. Non-null = the monitor is retrying submitFundTransaction and
+   * will sign NO further transfers until this clears.
+   */
+  pendingFundTxId: string | null;
 }
 
 export interface TurboFundingMonitor {
@@ -267,9 +318,12 @@ interface MonitorLogger {
  */
 export const WINC_PER_BYTE_ESTIMATE = 11_063n;
 
-export function wincToCapacityBytes(winc: bigint): bigint {
+export function wincToCapacityBytes(
+  winc: bigint,
+  wincPerByte: bigint = WINC_PER_BYTE_ESTIMATE
+): bigint {
   if (winc <= 0n) return 0n;
-  return winc / WINC_PER_BYTE_ESTIMATE;
+  return winc / wincPerByte;
 }
 
 export function createTurboFundingMonitor(options: {
@@ -290,11 +344,19 @@ export function createTurboFundingMonitor(options: {
   let lastAttemptAt: number | null = null;
   let lastTopUp: TopUpRecord | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let stopped = false;
+  let pendingFundTxId: string | null = null;
+  // Live winc-per-byte rate, refreshed from getUploadCosts each tick when the
+  // client offers it; the module constant is the boot-time fallback.
+  let wincPerByte = WINC_PER_BYTE_ESTIMATE;
 
   async function readBalance(): Promise<bigint | null> {
     try {
       const raw = await client.getBalance();
-      const winc = BigInt(typeof raw?.winc === 'bigint' ? raw.winc : String(raw?.winc ?? '0'));
+      const effective = raw?.effectiveBalance ?? raw?.winc;
+      const winc = BigInt(
+        typeof effective === 'bigint' ? effective : String(effective ?? '0')
+      );
       balanceWinc = winc;
       balanceCheckedAt = now();
       return winc;
@@ -309,7 +371,61 @@ export function createTurboFundingMonitor(options: {
     }
   }
 
+  /** Refresh the winc/byte rate from a live 1 MiB quote; silent best-effort. */
+  async function refreshRate(): Promise<void> {
+    if (typeof client.getUploadCosts !== 'function') return;
+    try {
+      const costs = await client.getUploadCosts({ bytes: [1_048_576] });
+      const perMiB = BigInt(costs?.[0]?.winc ?? '0');
+      if (perMiB > 0n) wincPerByte = perMiB / 1_048_576n || 1n;
+    } catch {
+      // Display-only figure; the pre-flight refusal uses its own live quote.
+    }
+  }
+
+  /**
+   * Retry crediting a transfer that already moved tokens on-chain. Runs every
+   * tick while pendingFundTxId is set, regardless of threshold or interval:
+   * it spends nothing, and until it succeeds no new transfer may be signed.
+   */
+  async function recoverPendingFund(): Promise<void> {
+    const txId = pendingFundTxId;
+    if (txId === null) return;
+    if (typeof client.submitFundTransaction !== 'function') {
+      log.warn(
+        `[store] Turbo fund tx ${txId} moved $ARIO on-chain but is NOT credited, and this ` +
+          "client cannot resubmit it. Run turbo.submitFundTransaction({txId}) by hand; " +
+          'no further transfers will be signed until it is credited.'
+      );
+      return;
+    }
+    try {
+      await client.submitFundTransaction({ txId });
+      pendingFundTxId = null;
+      const after = await readBalance();
+      const record: TopUpRecord = {
+        at: new Date(now()).toISOString(),
+        amountArio: lastTopUp?.amountArio ?? 0,
+        ok: true,
+        recoveredFundTxId: txId,
+      };
+      if (after !== null) record.balanceAfterWinc = after.toString();
+      lastTopUp = record;
+      log.info(
+        `[store] Turbo fund tx ${txId} recovered: credited on retry, balance now ${after ?? 'unknown'} winc`
+      );
+    } catch (err) {
+      log.warn(
+        `[store] Turbo fund tx ${txId} still not credited (will retry; no new transfers ` +
+          `until it is): ${err instanceof Error ? err.message : err}`
+      );
+    }
+  }
+
   async function topUp(): Promise<void> {
+    // A landed-but-uncredited transfer means the money is already with Turbo;
+    // signing another transfer would spend twice for one credit.
+    if (pendingFundTxId !== null) return;
     // Clamp to the ceiling (story 5); amount and ceiling are both boot-time
     // constants, so the clamp is deterministic per attempt.
     const amountArio = Math.min(
@@ -346,13 +462,28 @@ export function createTurboFundingMonitor(options: {
       // occupies the interval slot, so a failing upload loop cannot become a
       // spending loop (story 6).
       record.error = err instanceof Error ? err.message : String(err);
+      // The one failure mode where tokens ALREADY MOVED: hold the tx id and
+      // switch to credit-recovery; never sign another transfer for it.
+      const landedTxId = extractLandedFundTxId(record.error);
+      if (landedTxId !== undefined) {
+        pendingFundTxId = landedTxId;
+        log.warn(
+          `[store] Turbo top-up: the $ARIO transfer LANDED (tx ${landedTxId}) but Turbo did not ` +
+            'credit it. Retrying submitFundTransaction each tick; no new transfers until credited.'
+        );
+      }
       log.warn(`[store] Turbo top-up FAILED (store keeps serving): ${record.error}`);
     }
     lastTopUp = record;
   }
 
   async function check(): Promise<void> {
+    // Recovery runs first, before any threshold decision: it costs nothing,
+    // unblocks the credit the last transfer already paid for, and the balance
+    // read below then sees the credited figure.
+    await recoverPendingFund();
     const winc = await readBalance();
+    await refreshRate();
     if (winc === null) return;
     if (config.thresholdWinc === undefined || winc >= config.thresholdWinc) return;
 
@@ -372,6 +503,7 @@ export function createTurboFundingMonitor(options: {
     if (lastAttemptAt !== null && now() - lastAttemptAt < config.minIntervalMs) {
       return; // an attempt (either outcome) already used this interval
     }
+    if (stopped) return; // an in-flight check after stop() must not spend
     await topUp();
   }
 
@@ -381,11 +513,18 @@ export function createTurboFundingMonitor(options: {
       balanceCheckedAt:
         balanceCheckedAt !== null ? new Date(balanceCheckedAt).toISOString() : null,
       uploadCapacityBytes:
-        balanceWinc !== null ? wincToCapacityBytes(balanceWinc).toString() : null,
-      canPayAboveFreeTier: balanceWinc !== null && balanceWinc > 0n,
+        balanceWinc !== null
+          ? wincToCapacityBytes(balanceWinc, wincPerByte).toString()
+          : null,
+      // "Can pay" means covering the SMALLEST above-free-tier upload, not
+      // merely being non-zero -- 1 winc must not report as payment ability.
+      canPayAboveFreeTier:
+        balanceWinc !== null &&
+        balanceWinc >= wincPerByte * BigInt(TURBO_FREE_TIER_MAX_BYTES + 1),
       selfFunding: config.selfFundingEnabled,
       thresholdWinc: config.thresholdWinc?.toString() ?? null,
       lastTopUp,
+      pendingFundTxId,
     };
   }
 
@@ -393,6 +532,7 @@ export function createTurboFundingMonitor(options: {
     check,
     snapshot,
     start() {
+      stopped = false;
       if (timer !== null) return;
       timer = setInterval(() => {
         void check();
@@ -401,6 +541,7 @@ export function createTurboFundingMonitor(options: {
       timer.unref?.();
     },
     stop() {
+      stopped = true;
       if (timer !== null) {
         clearInterval(timer);
         timer = null;
@@ -422,9 +563,47 @@ export function createTurboFundingMonitor(options: {
  */
 export const TURBO_FREE_TIER_MAX_BYTES = 107_520;
 
+/**
+ * Turbo applies the free-tier ceiling to the SIGNED ANS-104 DATA ITEM, not to
+ * the payload: signature type (2) + signature + owner + target/anchor absence
+ * flags (1+1) + tag count and byte-length longs (8+8) + the avro-encoded tag
+ * block, then the payload. Comparing the payload alone leaves a hole exactly
+ * one envelope wide at the boundary, where the pre-flight waves an upload
+ * through and Turbo kills it as a generic failure.
+ */
+export type DataItemSignerKind = 'arweave-rsa' | 'solana-ed25519';
+
+const DATA_ITEM_ENVELOPE_BYTES: Record<DataItemSignerKind, number> = {
+  'arweave-rsa': 2 + 512 + 512 + 1 + 1 + 8 + 8, // 4096-bit RSA sig + owner
+  'solana-ed25519': 2 + 64 + 32 + 1 + 1 + 8 + 8, // ed25519 sig + pubkey
+};
+
+/**
+ * Estimated size of the signed data item for a payload. Tag block per avro's
+ * encoding: a count long per array block, a length long per string, and the
+ * UTF-8 bytes; longs are zigzag varints, bounded here at 2 bytes each for the
+ * tag sizes a store upload carries, plus the terminating zero block.
+ */
+export function estimateDataItemBytes(
+  payloadBytes: number,
+  signerKind: DataItemSignerKind,
+  tags?: Record<string, string>
+): number {
+  let tagBytes = 0;
+  const entries = tags ? Object.entries(tags) : [];
+  if (entries.length > 0) {
+    tagBytes = 3; // block count + trailing zero block
+    for (const [name, value] of entries) {
+      tagBytes +=
+        Buffer.byteLength(name, 'utf8') + Buffer.byteLength(value, 'utf8') + 4;
+    }
+  }
+  return DATA_ITEM_ENVELOPE_BYTES[signerKind] + tagBytes + payloadBytes;
+}
+
 /** The slice of a Turbo client the pre-flight cost check wants. */
 export interface TurboCostClient {
-  getBalance(): Promise<{ winc: string | bigint }>;
+  getBalance(): Promise<{ winc: string | bigint; effectiveBalance?: string | bigint }>;
   getUploadCosts?(params: { bytes: number[] }): Promise<{ winc: string }[]>;
 }
 
@@ -447,6 +626,12 @@ export function createFundedUploadAdapter(
     client?: TurboCostClient;
     /** The Turbo account address, for the "fund this" half of the message. */
     accountAddress?: string;
+    /**
+     * What signs the data item, which sets the envelope size the free-tier
+     * ceiling is measured against. Defaults to the larger RSA envelope (the
+     * free-tier and JWK paths), the safe direction for the funded checks.
+     */
+    signerKind?: DataItemSignerKind;
     log?: MonitorLogger;
   }
 ): ArweaveUploadAdapter {
@@ -454,23 +639,28 @@ export function createFundedUploadAdapter(
     info: (m: string) => console.log(m),
     warn: (m: string) => console.warn(m),
   };
+  const signerKind = options.signerKind ?? 'arweave-rsa';
   return {
     async upload(data, tags) {
-      if (data.length <= TURBO_FREE_TIER_MAX_BYTES) {
+      // The ceiling is on the signed data item, not the payload (the review
+      // on store#128 caught the envelope-wide hole at the boundary).
+      const itemBytes = estimateDataItemBytes(data.length, signerKind, tags);
+      if (itemBytes <= TURBO_FREE_TIER_MAX_BYTES) {
         return inner.upload(data, tags);
       }
       if (!options.funded) {
         throw new Error(
-          `insufficient Turbo credits: upload is ${data.length} bytes, above the ` +
-            `${TURBO_FREE_TIER_MAX_BYTES}-byte free tier, and no funding credential is ` +
+          `insufficient Turbo credits: upload is ${data.length} bytes (~${itemBytes} signed), ` +
+            `above the ${TURBO_FREE_TIER_MAX_BYTES}-byte free tier, and no funding credential is ` +
             'configured (set STORE_TURBO_SOLANA_KEY). Refused before contacting Turbo.'
         );
       }
       if (options.client) {
         try {
           const raw = await options.client.getBalance();
+          const spendable = raw?.effectiveBalance ?? raw?.winc;
           const balance = BigInt(
-            typeof raw?.winc === 'bigint' ? raw.winc : String(raw?.winc ?? '0')
+            typeof spendable === 'bigint' ? spendable : String(spendable ?? '0')
           );
           if (balance === 0n) {
             throw new Error(
@@ -480,7 +670,7 @@ export function createFundedUploadAdapter(
             );
           }
           if (typeof options.client.getUploadCosts === 'function') {
-            const costs = await options.client.getUploadCosts({ bytes: [data.length] });
+            const costs = await options.client.getUploadCosts({ bytes: [itemBytes] });
             const cost = BigInt(costs?.[0]?.winc ?? '0');
             if (cost > balance) {
               throw new Error(

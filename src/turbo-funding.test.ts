@@ -15,6 +15,8 @@ import {
   TURBO_FREE_TIER_MAX_BYTES,
   createFundedUploadAdapter,
   createTurboFundingMonitor,
+  estimateDataItemBytes,
+  extractLandedFundTxId,
   resolveTurboFundingEnv,
   resolveTurboSolanaNetwork,
   wincToCapacityBytes,
@@ -73,6 +75,22 @@ describe('resolveTurboSolanaNetwork', () => {
     });
     expect(cfg.network).toBe('devnet');
     expect(cfg.mint).toBe(ARIO_MINTS.devnet);
+  });
+
+  it('redacts the gateway URL to its origin in the mismatch refusal', () => {
+    // Helius/QuickNode-style URLs carry the API key in the path or query, and
+    // the boot refusal lands in the operator's log.
+    try {
+      resolveTurboSolanaNetwork({
+        STORE_TURBO_SOLANA_NETWORK: 'mainnet',
+        STORE_TURBO_SOLANA_GATEWAY: 'https://devnet.helius-rpc.com/?api-key=SECRET-API-KEY',
+      });
+      expect.unreachable('must throw on the mainnet/devnet mismatch');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      expect(message).not.toContain('SECRET-API-KEY');
+      expect(message).toContain('https://devnet.helius-rpc.com');
+    }
   });
 
   it('rejects an unrecognised network by name', () => {
@@ -313,6 +331,165 @@ describe('createTurboFundingMonitor', () => {
     expect(monitor.snapshot().canPayAboveFreeTier).toBe(false);
   });
 
+  it('a transfer that landed without credit is never re-sent; it is resubmitted until credited', async () => {
+    // The HIGH from store#128's review: topUpWithTokens moves the tokens
+    // FIRST and only then tells Turbo's payment API. If that second step
+    // fails, retrying the transfer spends again for the same credit.
+    const SDK_MESSAGE =
+      "Failed to submit fund transaction! Save this Transaction ID and try again " +
+      "with 'turbo.submitFundTransaction(id)': 5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M";
+    let clock = 1_000_000;
+    let paymentApiUp = false;
+    let credited = false;
+    const transfers: string[] = [];
+    const submits: string[] = [];
+    const client = {
+      // The balance only rises once the payment API finally credits the tx.
+      getBalance: vi.fn(async () => ({ winc: credited ? '999999999999' : '5' })),
+      topUpWithTokens: vi.fn(async ({ tokenAmount }: { tokenAmount: string }) => {
+        transfers.push(tokenAmount);
+        throw new Error(SDK_MESSAGE); // tokens moved, credit did not
+      }),
+      submitFundTransaction: vi.fn(async ({ txId }: { txId: string }) => {
+        submits.push(txId);
+        if (!paymentApiUp) throw new Error('payment service still down');
+        credited = true;
+        return { id: txId };
+      }),
+    };
+    const monitor = createTurboFundingMonitor({
+      client,
+      config: fundingConfig({
+        thresholdWinc: 1000n,
+        topUpAmountArio: 50,
+        selfFundingEnabled: true,
+        minIntervalMs: 60_000,
+      }),
+      log: silentLog,
+      now: () => clock,
+    });
+
+    await monitor.check();
+    expect(transfers).toHaveLength(1);
+    expect(monitor.snapshot().pendingFundTxId).toBe(
+      '5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M'
+    );
+
+    // Hours of ticks with the payment API down: submitFundTransaction is
+    // retried every tick, and NO second transfer fires even though the
+    // min-interval has long elapsed. The loop is bounded by outcome.
+    for (let i = 0; i < 4; i++) {
+      clock += 600_000;
+      await monitor.check();
+    }
+    expect(transfers).toHaveLength(1);
+    expect(submits.length).toBeGreaterThanOrEqual(4);
+
+    // The API comes back: the pending tx clears and normal funding resumes.
+    paymentApiUp = true;
+    clock += 600_000;
+    await monitor.check();
+    const snap = monitor.snapshot();
+    expect(snap.pendingFundTxId).toBeNull();
+    expect(snap.lastTopUp?.ok).toBe(true);
+    expect(snap.lastTopUp?.recoveredFundTxId).toBe(
+      '5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M'
+    );
+  });
+
+  it('holds the pending tx (and refuses transfers) when the client cannot resubmit', async () => {
+    const SDK_MESSAGE =
+      "Failed to submit fund transaction! Save this Transaction ID and try again " +
+      "with 'turbo.submitFundTransaction(id)': 5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M";
+    let clock = 1_000_000;
+    const client = {
+      getBalance: vi.fn(async () => ({ winc: '5' })),
+      topUpWithTokens: vi.fn(async () => {
+        throw new Error(SDK_MESSAGE);
+      }),
+      // no submitFundTransaction on this client
+    };
+    const monitor = createTurboFundingMonitor({
+      client,
+      config: fundingConfig({
+        thresholdWinc: 1000n,
+        topUpAmountArio: 50,
+        selfFundingEnabled: true,
+        minIntervalMs: 60_000,
+      }),
+      log: silentLog,
+      now: () => clock,
+    });
+    await monitor.check();
+    clock += 600_000;
+    await monitor.check();
+    expect(client.topUpWithTokens).toHaveBeenCalledTimes(1);
+    expect(monitor.snapshot().pendingFundTxId).toBe(
+      '5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M'
+    );
+  });
+
+  it('prefers effectiveBalance over winc when the client reports it', async () => {
+    // turbo-sdk's own on-demand logic spends against effectiveBalance; a
+    // credit-share approval makes the two diverge.
+    const client = {
+      getBalance: vi.fn(async () => ({ winc: '999999999999', effectiveBalance: '5' })),
+      topUpWithTokens: vi.fn(async () => ({ id: 'tx' })),
+    };
+    const monitor = createTurboFundingMonitor({
+      client,
+      config: fundingConfig({
+        thresholdWinc: 1000n,
+        topUpAmountArio: 50,
+        selfFundingEnabled: true,
+      }),
+      log: silentLog,
+      now: () => 1_000_000,
+    });
+    await monitor.check();
+    // Raw winc is huge, but the SPENDABLE balance is below threshold.
+    expect(client.topUpWithTokens).toHaveBeenCalledTimes(1);
+    expect(monitor.snapshot().balanceWinc).toBe('5');
+  });
+
+  it('canPayAboveFreeTier means covering the smallest above-free-tier upload, not 1 winc', async () => {
+    const tiny = { getBalance: vi.fn(async () => ({ winc: '1' })) };
+    const monitor = createTurboFundingMonitor({
+      client: tiny,
+      config: fundingConfig({}),
+      log: silentLog,
+    });
+    await monitor.check();
+    expect(monitor.snapshot().canPayAboveFreeTier).toBe(false);
+
+    const funded = { getBalance: vi.fn(async () => ({ winc: '99999999999999' })) };
+    const monitor2 = createTurboFundingMonitor({
+      client: funded,
+      config: fundingConfig({}),
+      log: silentLog,
+    });
+    await monitor2.check();
+    expect(monitor2.snapshot().canPayAboveFreeTier).toBe(true);
+  });
+
+  it('after stop(), an in-flight check does not spend', async () => {
+    const state: StubClientState = { winc: '5', topUps: [] };
+    const client = stubClient(state);
+    const monitor = createTurboFundingMonitor({
+      client,
+      config: fundingConfig({
+        thresholdWinc: 1000n,
+        topUpAmountArio: 50,
+        selfFundingEnabled: true,
+      }),
+      log: silentLog,
+      now: () => 1_000_000,
+    });
+    monitor.stop();
+    await monitor.check();
+    expect(client.topUpWithTokens).not.toHaveBeenCalled();
+  });
+
   it('reports capacity in bytes an operator can act on', async () => {
     const state: StubClientState = { winc: '11600114792', topUps: [] }; // ~1 MiB at the measured rate
     const monitor = createTurboFundingMonitor({
@@ -399,6 +576,54 @@ describe('createFundedUploadAdapter', () => {
     expect(result.txId).toBe('inner-tx');
   });
 
+  it('measures the free tier on the signed data item, not the payload', async () => {
+    // The MEDIUM from store#128's review: Turbo applies the ceiling to the
+    // signed ANS-104 item. A payload just under the ceiling overflows it once
+    // the RSA envelope (~1 KiB) is added -- that must be refused by name, not
+    // die inside Turbo as a generic T00.
+    const boundaryPayload = Buffer.alloc(TURBO_FREE_TIER_MAX_BYTES - 500, 1);
+
+    const inner = innerAdapter();
+    const rsa = createFundedUploadAdapter(inner, {
+      funded: false,
+      signerKind: 'arweave-rsa',
+      log: silentLog,
+    });
+    await expect(rsa.upload(boundaryPayload)).rejects.toThrow(/insufficient Turbo credits/);
+    expect(inner.upload).not.toHaveBeenCalled();
+
+    // The same payload under an ed25519 signer fits: its envelope is ~116 B.
+    const inner2 = innerAdapter();
+    const solana = createFundedUploadAdapter(inner2, {
+      funded: false,
+      signerKind: 'solana-ed25519',
+      log: silentLog,
+    });
+    const result = await solana.upload(boundaryPayload);
+    expect(result.txId).toBe('inner-tx');
+  });
+
+  it('estimateDataItemBytes counts envelope and tags', () => {
+    expect(estimateDataItemBytes(1000, 'solana-ed25519')).toBe(1000 + 116);
+    expect(estimateDataItemBytes(1000, 'arweave-rsa')).toBe(1000 + 1044);
+    const withTags = estimateDataItemBytes(1000, 'solana-ed25519', {
+      'Content-Type': 'application/octet-stream',
+    });
+    expect(withTags).toBeGreaterThan(1000 + 116 + 30);
+    expect(withTags).toBeLessThan(1000 + 116 + 60);
+  });
+
+  it('extractLandedFundTxId parses exactly the SDK message shape', () => {
+    expect(
+      extractLandedFundTxId(
+        "Failed to submit fund transaction! Save this Transaction ID and try again " +
+          "with 'turbo.submitFundTransaction(id)': 5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M"
+      )
+    ).toBe('5KtP9vGXbRTx3mJd4hQn8AeLBz2sYwCoUV7ufDkriE6M');
+    expect(extractLandedFundTxId('solana is down')).toBeUndefined();
+    expect(extractLandedFundTxId('insufficient funds for transfer')).toBeUndefined();
+  });
+
   it('fails open when the pre-flight probe itself fails', async () => {
     // A pricing-API outage must not refuse uploads the balance would cover;
     // the real upload is the true answer.
@@ -433,13 +658,47 @@ describe('the funding secret is never logged', () => {
   });
 
   it('entrypoint-store.ts never interpolates the key into a log call', () => {
+    // Scan the WHOLE call expression, not just the line the `console.` sits
+    // on: most of the entrypoint's log calls put their template literal on a
+    // continuation line, which a per-line scan is blind to (store#128 review).
     const source = readFileSync(`${repoRoot}src/entrypoint-store.ts`, 'utf8');
-    for (const line of source.split('\n')) {
-      if (/console\.(log|warn|error)/.test(line)) {
-        expect(line, `log line must not mention the raw key: ${line.trim()}`).not.toMatch(
-          /\$\{(solanaKey|turboSolanaKey|secretB58)/
-        );
-      }
+    const calls = extractCallExpressions(source, /console\.(log|warn|error)\s*\(/g);
+    expect(calls.length).toBeGreaterThan(10); // the scan must actually see them
+    for (const call of calls) {
+      expect(
+        call,
+        `log call must not mention the raw key: ${call.slice(0, 120)}`
+      ).not.toMatch(/\$\{(solanaKey|turboSolanaKey|secretB58)/);
     }
   });
 });
+
+/**
+ * Every span from a match of `open` to its balancing close paren. Parens
+ * inside quotes/backticks are skipped so a ")" in a message cannot end the
+ * span early; good enough for the entrypoint's actual log calls.
+ */
+function extractCallExpressions(source: string, open: RegExp): string[] {
+  const spans: string[] = [];
+  for (const match of source.matchAll(open)) {
+    const start = match.index + match[0].length;
+    let depth = 1;
+    let quote: string | null = null;
+    let i = start;
+    for (; i < source.length && depth > 0; i++) {
+      const ch = source[i];
+      if (quote !== null) {
+        if (ch === '\\') i++;
+        else if (ch === quote) quote = null;
+      } else if (ch === "'" || ch === '"' || ch === '`') {
+        quote = ch;
+      } else if (ch === '(') {
+        depth++;
+      } else if (ch === ')') {
+        depth--;
+      }
+    }
+    spans.push(source.slice(start, i));
+  }
+  return spans;
+}
