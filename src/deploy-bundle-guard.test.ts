@@ -628,3 +628,96 @@ describe('deploy/ publishes nothing it should not', () => {
     expect((store?.expose ?? []).map(String).sort()).toEqual(['3300', '3400']);
   });
 });
+
+describe('deploy/ auto-apply.sh activates what it renders', () => {
+  // store#124: the rendered connector.toml is bind-mounted, and `up -d`
+  // recreates a container on a changed image or definition, never on changed
+  // bytes behind a bind mount, so a green apply left a rendered addresses
+  // change on disk but not live for hours. These assert the CONTRACT of the
+  // fix rather than its exact spelling: a detected config change earns the
+  // connector (and only the connector) a restart, in the right order, and the
+  // script then proves the running connector serves what was rendered.
+
+  const AUTO_APPLY = readRepoFile('deploy/auto-apply.sh');
+  const lines = AUTO_APPLY.split('\n');
+  const isCode = (line: string): boolean => !/^\s*#/.test(line);
+  const firstCodeLine = (re: RegExp): number =>
+    lines.findIndex((line) => isCode(line) && re.test(line));
+
+  it('restarts the connector service, and never the whole project', () => {
+    // `restarting`/`restarted` in log text deliberately do not match \brestart\b.
+    const restarts = lines.filter((line) => isCode(line) && /\brestart\b/.test(line));
+    expect(
+      restarts.length,
+      'a rendered config change must be activated by a restart'
+    ).toBeGreaterThan(0);
+    for (const line of restarts) {
+      // A bare `restart` bounces every service, nginx included, whose whole
+      // job is to outlive the others.
+      expect(
+        line,
+        'every restart must name exactly the connector service'
+      ).toMatch(/\brestart\s+connector\s*$/);
+    }
+  });
+
+  it('restarts only when the rendered config actually changed', () => {
+    // The mechanism: fingerprint the rendered file before and after render.sh
+    // runs, and restart behind a comparison of the two. Any checksum tool
+    // qualifies; running one only on one side of the render does not.
+    const checksumAt = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => isCode(line) && /\b(?:sha\d+sum|md5sum|cksum)\b/.test(line))
+      .map(({ index }) => index);
+    expect(
+      checksumAt.length,
+      'the rendered config must be fingerprinted before AND after render.sh'
+    ).toBeGreaterThanOrEqual(2);
+    const renderAt = firstCodeLine(/render\.sh/);
+    expect(renderAt).toBeGreaterThanOrEqual(0);
+    expect(Math.min(...checksumAt)).toBeLessThan(renderAt);
+    expect(Math.max(...checksumAt)).toBeGreaterThan(renderAt);
+
+    // The restart sits behind an inequality over the fingerprints, never on
+    // the unconditional path.
+    const restartAt = firstCodeLine(/\brestart\s+connector\b/);
+    const guard = lines
+      .slice(0, restartAt)
+      .reverse()
+      .find((line) => isCode(line) && /^\s*if\b/.test(line));
+    expect(guard, 'the restart must be conditional').toBeDefined();
+    expect(guard, 'the condition must compare the two fingerprints').toMatch(/!=/);
+  });
+
+  it('renders, then restarts, then verifies, in that order', () => {
+    const renderAt = firstCodeLine(/render\.sh/);
+    const restartAt = firstCodeLine(/\brestart\s+connector\b/);
+    const verifyAt = firstCodeLine(/curl\b.*\/ilp\b/);
+    expect(renderAt).toBeGreaterThanOrEqual(0);
+    expect(restartAt, 'the restart must come after render.sh').toBeGreaterThan(renderAt);
+    expect(verifyAt, 'the verification must come after the restart').toBeGreaterThan(
+      restartAt
+    );
+  });
+
+  it('verifies the served self-description against the rendered config, and a mismatch fails the apply', () => {
+    // The green-but-inactive failure mode: healthy proves serving, not
+    // serving THIS config. The script must ask GET /ilp what the connector
+    // advertises and hold it against the rendered [node] addresses.
+    const verifyAt = firstCodeLine(/curl\b.*\/ilp\b/);
+    expect(verifyAt, 'the script must curl the /ilp self-description').toBeGreaterThanOrEqual(0);
+    expect(
+      firstCodeLine(/addresses/),
+      'the script must extract the advertised addresses from the rendered TOML'
+    ).toBeGreaterThanOrEqual(0);
+    // The body also lists routes[].prefix, and this box deliberately
+    // terminates a name it does not advertise -- comparing anything wider
+    // than ilpAddresses fails every healthy apply.
+    expect(
+      firstCodeLine(/ilpAddresses/),
+      'the script must compare against the ilpAddresses field specifically'
+    ).toBeGreaterThanOrEqual(0);
+    const afterVerify = lines.slice(verifyAt).join('\n');
+    expect(afterVerify, 'a mismatch must exit non-zero').toMatch(/\bexit\s+[1-9]/);
+  });
+});
