@@ -192,6 +192,13 @@ devbox run build && devbox run test
 | `STORE_TURBO_SOLANA_KEY` | *(free tier)* | Base58 Solana secret key; signs uploads and pays in $ARIO |
 | `STORE_ARWEAVE_JWK_B64` | *(free tier)* | Base64 Arweave JWK; the AR alternative to the above |
 | `STORE_TURBO_TOKEN` | `ario` | Token Turbo credits are quoted and bought in (`ario` or `arweave`) |
+| `STORE_TURBO_SOLANA_NETWORK` | `mainnet` | Which Solana network (and $ARIO mint) credits are bought on; mismatch with the gateway refuses to start |
+| `STORE_TURBO_SOLANA_GATEWAY` | *(SDK default)* | Solana RPC for the $ARIO path; `devnet` requires one naming a devnet RPC |
+| `STORE_TURBO_TOPUP_THRESHOLD_WINC` | *(off)* | Balance level below which the store warns; with an amount set, it tops itself up |
+| `STORE_TURBO_TOPUP_AMOUNT_ARIO` | *(off)* | $ARIO spent per self-funding top-up; setting it turns self-funding ON (needs `STORE_TURBO_SOLANA_KEY`) |
+| `STORE_TURBO_TOPUP_MAX_ARIO` | *(= amount)* | Hard per-attempt spending ceiling |
+| `STORE_TURBO_TOPUP_MIN_INTERVAL_SEC` | `3600` | Minimum seconds between top-up attempts, failed ones included |
+| `STORE_TURBO_BALANCE_CHECK_INTERVAL_SEC` | `600` | How often the balance monitor reads the Turbo balance |
 | `FEE_PER_JOB` | `10` | Advertised price per job |
 | `STORE_CONFIG_JSON` / `STORE_CONFIG_PATH` | — | Full config as JSON, in place of the variables above |
 | `LOG_LEVEL` | `info` | |

@@ -294,10 +294,15 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     expect(result.source).toBe('turbo-token-legacy');
     expect(result.adapter).toBeDefined();
     expect(result.client).toBeDefined();
-    // Legacy path uses `privateKey:` not the ArweaveSigner constructor.
-    expect(ArweaveSignerCalls).toHaveLength(0);
+    // An explicit ArweaveSigner, never `privateKey`: turbo-sdk keys the
+    // signer off the token, so a JWK under `privateKey` with the default
+    // 'ario' lands in a base58 Solana signer and throws at boot (store#123).
+    expect(ArweaveSignerCalls).toHaveLength(1);
     expect(TurboFactoryCalls).toHaveLength(1);
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ privateKey: expect.any(Object) });
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ signer: expect.any(Object) });
+    expect(
+      Object.keys(TurboFactoryCalls[0]?.args as Record<string, unknown>)
+    ).not.toContain('privateKey');
   });
 
   it('Both absent → ephemeral JWK free-tier adapter (≤100KB uploads via TurboFactory.authenticated)', async () => {
@@ -306,10 +311,15 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     expect(result.source).toBe('unauthenticated-free-tier');
     expect(result.client).toBeDefined();
     expect(result.arweaveAddress).toBeUndefined();
-    expect(ArweaveSignerCalls).toHaveLength(0);
+    // The ephemeral JWK goes in as an explicit ArweaveSigner: under the
+    // default 'ario' token a bare `privateKey` JWK reaches turbo-sdk's Solana
+    // signer and the no-credential store refuses to boot (store#123). The
+    // degraded tier must degrade, not die.
+    expect(ArweaveSignerCalls).toHaveLength(1);
     // Free-tier path uses an ephemeral JWK via TurboFactory.authenticated() so
     // Turbo accepts ≤100KB uploads without a funded wallet.
     expect(TurboFactoryCalls).toHaveLength(1);
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({ signer: expect.any(Object) });
     expect(TurboFactoryUnauthCalls).toHaveLength(0);
     // Adapter is functional — does not throw on upload.
     await expect(
@@ -324,7 +334,7 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     const result = await createTurboAdapter('', '');
     expect(result.source).toBe('unauthenticated-free-tier');
     expect(result.client).toBeDefined();
-    expect(ArweaveSignerCalls).toHaveLength(0);
+    expect(ArweaveSignerCalls).toHaveLength(1); // the ephemeral free-tier signer
     expect(TurboFactoryCalls).toHaveLength(1);
     await expect(
       result.adapter.upload({} as Parameters<typeof result.adapter.upload>[0])
@@ -335,7 +345,7 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     const result = await createTurboAdapter('  ', '\n\t ');
     expect(result.source).toBe('unauthenticated-free-tier');
     expect(result.client).toBeDefined();
-    expect(ArweaveSignerCalls).toHaveLength(0);
+    expect(ArweaveSignerCalls).toHaveLength(1); // the ephemeral free-tier signer
     expect(TurboFactoryCalls).toHaveLength(1);
   });
 
@@ -368,6 +378,36 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
       privateKey: FAKE_SOLANA_KEY_B58,
       token: 'ario',
     });
+  });
+
+  it('hands the stated Solana gateway to turbo-sdk on the $ARIO path', async () => {
+    // store#123: the gateway is where turbo-sdk picks its mint from, so the
+    // validated URL must actually reach the constructed client -- a validation
+    // that never flows into the construction protects nothing.
+    const result = await createTurboAdapter(
+      undefined,
+      undefined,
+      'ario',
+      FAKE_SOLANA_KEY_B58,
+      'https://solana-rpc.publicnode.com'
+    );
+    expect(result.source).toBe('ario-solana');
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({
+      gatewayUrl: 'https://solana-rpc.publicnode.com',
+    });
+  });
+
+  it('omits gatewayUrl when none is stated, keeping the SDK default', async () => {
+    const result = await createTurboAdapter(
+      undefined,
+      undefined,
+      'ario',
+      FAKE_SOLANA_KEY_B58
+    );
+    expect(result.source).toBe('ario-solana');
+    expect(
+      Object.keys(TurboFactoryCalls[0]?.args as Record<string, unknown>)
+    ).not.toContain('gatewayUrl');
   });
 
   it('prefers the Solana key over a JWK, and says so', async () => {
