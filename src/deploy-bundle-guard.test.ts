@@ -661,63 +661,177 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
     }
   });
 
-  it('restarts only when the rendered config actually changed', () => {
-    // The mechanism: fingerprint the rendered file before and after render.sh
-    // runs, and restart behind a comparison of the two. Any checksum tool
-    // qualifies; running one only on one side of the render does not.
+  it('keys the restart on the fingerprints AND the served state, inside a conditional', () => {
+    // The mechanism: fingerprint the connector's rendered inputs before and
+    // after render.sh runs, read what the RUNNING connector serves, and
+    // restart when either disagrees. The served-state trigger is the one that
+    // heals a box already sitting on a stale config (store#124 itself): a
+    // byte-comparison of this run's disk can never see that state.
     const checksumAt = lines
       .map((line, index) => ({ line, index }))
       .filter(({ line }) => isCode(line) && /\b(?:sha\d+sum|md5sum|cksum)\b/.test(line))
       .map(({ index }) => index);
     expect(
       checksumAt.length,
-      'the rendered config must be fingerprinted before AND after render.sh'
-    ).toBeGreaterThanOrEqual(2);
-    const renderAt = firstCodeLine(/render\.sh/);
+      'the rendered inputs must be fingerprinted (before AND after render.sh)'
+    ).toBeGreaterThanOrEqual(1);
+    const renderAt = firstCodeLine(/\.\/render\.sh$/);
     expect(renderAt).toBeGreaterThanOrEqual(0);
-    expect(Math.min(...checksumAt)).toBeLessThan(renderAt);
-    expect(Math.max(...checksumAt)).toBeGreaterThan(renderAt);
+    const sumBeforeAt = firstCodeLine(/^SUM_BEFORE=/);
+    const sumAfterAt = firstCodeLine(/^SUM_AFTER=/);
+    expect(sumBeforeAt, 'a fingerprint must be taken before render.sh').toBeLessThan(renderAt);
+    expect(sumAfterAt, 'a fingerprint must be taken after render.sh').toBeGreaterThan(renderAt);
 
-    // The restart sits behind an inequality over the fingerprints, never on
-    // the unconditional path.
     const restartAt = firstCodeLine(/\brestart\s+connector\b/);
+    expect(restartAt).toBeGreaterThanOrEqual(0);
+
+    // The restart must sit INSIDE an if-block (unbalanced `if` depth at its
+    // line), not merely somewhere after one -- a mutation that hoists it out
+    // of the conditional must fail here.
+    const depthAt = (index: number): number =>
+      lines
+        .slice(0, index)
+        .filter(isCode)
+        .reduce(
+          (depth, line) =>
+            depth + (/^\s*if\b/.test(line) ? 1 : 0) - (/^\s*fi\b/.test(line) ? 1 : 0),
+          0
+        );
+    expect(depthAt(restartAt), 'the restart must be inside an if-block').toBeGreaterThan(0);
+
+    // Both triggers must exist as code, before the restart: the fingerprint
+    // inequality and the served-vs-rendered inequality.
+    const fingerprintTrigger = firstCodeLine(/"\$SUM_AFTER"\s*!=\s*"\$SUM_BEFORE"/);
+    const servedTrigger = firstCodeLine(/"\$GOT"\s*!=\s*"\$WANT"/);
+    expect(fingerprintTrigger, 'the fingerprint inequality must gate activation').toBeGreaterThanOrEqual(0);
+    expect(fingerprintTrigger).toBeLessThan(restartAt);
+    expect(servedTrigger, 'the served-state inequality must gate activation').toBeGreaterThanOrEqual(0);
+    expect(servedTrigger).toBeLessThan(restartAt);
+
+    // And the restart's own guard must consume what those triggers set.
     const guard = lines
       .slice(0, restartAt)
       .reverse()
       .find((line) => isCode(line) && /^\s*if\b/.test(line));
     expect(guard, 'the restart must be conditional').toBeDefined();
-    expect(guard, 'the condition must compare the two fingerprints').toMatch(/!=/);
+    expect(guard, 'the condition must consume the two triggers').toMatch(/NEEDS_RESTART/);
+    const triggerAssignments = lines.filter(
+      (line) => isCode(line) && /NEEDS_RESTART=1/.test(line)
+    );
+    expect(
+      triggerAssignments.length,
+      'both triggers must arm the restart'
+    ).toBeGreaterThanOrEqual(2);
   });
 
-  it('renders, then restarts, then verifies, in that order', () => {
-    const renderAt = firstCodeLine(/render\.sh/);
+  it('renders, reads the served state, restarts, waits healthy again, then re-verifies', () => {
+    // Story 8's ordering, asserted on the lines that DO the work rather than
+    // on any curl in a helper definition: after the restart there must be a
+    // fresh health wait and a fresh served-state read, and the final
+    // comparison must judge that fresh read.
+    const renderAt = firstCodeLine(/\.\/render\.sh$/);
     const restartAt = firstCodeLine(/\brestart\s+connector\b/);
-    const verifyAt = firstCodeLine(/curl\b.*\/ilp\b/);
     expect(renderAt).toBeGreaterThanOrEqual(0);
     expect(restartAt, 'the restart must come after render.sh').toBeGreaterThan(renderAt);
-    expect(verifyAt, 'the verification must come after the restart').toBeGreaterThan(
+
+    // An invocation, not the function definition line.
+    const healthWaits = lines
+      .map((line, index) => ({ line, index }))
+      .filter(
+        ({ line }) =>
+          isCode(line) && /wait_connector_healthy\b/.test(line) && !/\(\)/.test(line)
+      )
+      .map(({ index }) => index);
+    expect(
+      healthWaits.some((index) => index > restartAt),
+      'a health wait must follow the restart -- a restart after the last wait is story 8 broken'
+    ).toBe(true);
+
+    const servedReads = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => isCode(line) && /GOT=\$\(served_ilp_addresses\)/.test(line))
+      .map(({ index }) => index);
+    expect(
+      servedReads.length,
+      'the served state must be read before the decision and again after the restart'
+    ).toBeGreaterThanOrEqual(2);
+    const lastServedRead = Math.max(...servedReads);
+    expect(lastServedRead, 'the post-restart read must follow the restart').toBeGreaterThan(
       restartAt
     );
+    const lastCompareAt = lines.reduce(
+      (last, line, index) =>
+        isCode(line) && /"\$GOT"\s*!=\s*"\$WANT"/.test(line) ? index : last,
+      -1
+    );
+    expect(
+      lastCompareAt,
+      'the final verdict must judge the post-restart read'
+    ).toBeGreaterThan(lastServedRead);
+    expect(
+      lines.slice(lastCompareAt).join('\n'),
+      'a mismatch must exit non-zero'
+    ).toMatch(/\bexit\s+1\b/);
   });
 
-  it('verifies the served self-description against the rendered config, and a mismatch fails the apply', () => {
-    // The green-but-inactive failure mode: healthy proves serving, not
-    // serving THIS config. The script must ask GET /ilp what the connector
-    // advertises and hold it against the rendered [node] addresses.
-    const verifyAt = firstCodeLine(/curl\b.*\/ilp\b/);
-    expect(verifyAt, 'the script must curl the /ilp self-description').toBeGreaterThanOrEqual(0);
-    expect(
-      firstCodeLine(/addresses/),
-      'the script must extract the advertised addresses from the rendered TOML'
-    ).toBeGreaterThanOrEqual(0);
+  it('verifies against ilpAddresses specifically, and refuses vacuous or unreachable answers', () => {
     // The body also lists routes[].prefix, and this box deliberately
     // terminates a name it does not advertise -- comparing anything wider
-    // than ilpAddresses fails every healthy apply.
+    // than ilpAddresses fails every healthy apply. The assertion pins the
+    // extraction to the line that PRODUCES the served list, not to the word
+    // appearing anywhere in the file.
+    const producerAt = firstCodeLine(/grep -o '"ilpAddresses":/);
     expect(
-      firstCodeLine(/ilpAddresses/),
-      'the script must compare against the ilpAddresses field specifically'
+      producerAt,
+      'the served-address extraction must select the ilpAddresses field'
     ).toBeGreaterThanOrEqual(0);
-    const afterVerify = lines.slice(verifyAt).join('\n');
-    expect(afterVerify, 'a mismatch must exit non-zero').toMatch(/\bexit\s+[1-9]/);
+    const helperStart = firstCodeLine(/^served_ilp_addresses\(\)/);
+    expect(helperStart).toBeGreaterThanOrEqual(0);
+    expect(
+      producerAt,
+      'the extraction must live in the helper every GOT read goes through'
+    ).toBeGreaterThan(helperStart);
+
+    // An empty rendered address list would let the comparison pass vacuously.
+    const emptyWantGuard = firstCodeLine(/-z\s+"\$WANT"/);
+    expect(emptyWantGuard, 'an empty WANT must be refused, not compared').toBeGreaterThanOrEqual(0);
+
+    // A curl failure must surface as "unreachable", never as a mismatch: the
+    // helper propagates curl's failure, and both call sites handle it.
+    expect(
+      AUTO_APPLY,
+      'curl must not be masked with || true'
+    ).not.toMatch(/curl[^\n]*\|\|\s*true/);
+    const unreachableHandlers = lines.filter(
+      (line) => isCode(line) && /unreachable/.test(line)
+    );
+    expect(
+      unreachableHandlers.length,
+      'both served-state reads must report an unreachable /ilp by name'
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it('fingerprints every file render.sh writes that the connector bind-mounts', () => {
+    // A rotated OPERATOR_WRITE_KEY re-renders only operator-write.keys; if the
+    // fingerprint watched connector.toml alone, the revoked key would stay
+    // authorised behind a green apply -- store#124's bug class, for a
+    // security-relevant file. The fingerprinted set must cover every ./ bind
+    // into the connector service.
+    const helperStart = firstCodeLine(/^fingerprint_connector_inputs\(\)/);
+    expect(helperStart, 'the fingerprint helper must exist').toBeGreaterThanOrEqual(0);
+    const helperEnd = lines.findIndex((line, index) => index > helperStart && /^\}/.test(line));
+    const helperBody = lines.slice(helperStart, helperEnd + 1).join('\n');
+
+    const connectorBinds = (composeFile.services['connector']?.volumes ?? [])
+      .map(String)
+      .filter((volume) => volume.startsWith('./'))
+      .map((volume) => volume.slice(2).split(':')[0] ?? '');
+    expect(connectorBinds.length).toBeGreaterThan(0);
+    for (const bind of connectorBinds) {
+      expect(
+        helperBody,
+        `the fingerprint must cover the bind-mounted ${bind}`
+      ).toContain(bind);
+    }
   });
 });
