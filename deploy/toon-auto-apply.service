@@ -8,4 +8,7 @@ Requires=docker.service
 Type=oneshot
 ExecStart=/root/store/deploy/auto-apply.sh
 # The script takes its own flock; this only stops systemd stacking runs.
-TimeoutStartSec=600
+# Budget for the worst honest case: a cold multi-image pull on the nanode,
+# `up -d`, a 120s health wait, an activation restart, and a second 120s wait.
+# A SIGTERM mid-restart would leave the new config live but unverified.
+TimeoutStartSec=1200

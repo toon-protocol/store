@@ -306,8 +306,10 @@ file ... is not valid` is the failure the gate exists to catch.
 
 Once that PR merges, the box applies it within five minutes:
 [`auto-apply.sh`](./auto-apply.sh) on a systemd timer fast-forwards `main`,
-re-renders, runs `docker compose up -d`, and requires the connector to come
-back **healthy**. It is pull-based deliberately — no CI job anywhere holds SSH
+re-renders, runs `docker compose up -d`, restarts the connector whenever its
+rendered inputs changed **or** the running connector serves addresses that
+disagree with the render, and requires it to come back **healthy** and to
+prove (via `GET /ilp`) that the rendered config is what is actually served. It is pull-based deliberately — no CI job anywhere holds SSH
 into a node, which is the posture connector ADR 0068 settled — and it refuses
 to touch a box whose working tree is dirty, so a human mid-operation is never
 overwritten.
@@ -315,7 +317,7 @@ overwritten.
 | File | What it is |
 |---|---|
 | `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
-| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, and requires the connector to come back healthy. |
+| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, activates the render with a connector restart when needed, and requires the connector to come back healthy serving the rendered config. |
 | `toon-auto-apply.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
 
 The split is deliberate: the workflow decides **what** to run and proves it
