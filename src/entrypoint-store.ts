@@ -19,9 +19,11 @@
  *   FEE_PER_JOB           -> config.basePricePerByte (informational; the connector
  *                            enforces the flat route price)
  *   KIND_PRICING_<kind>   -> config.kindPricing[kind] (per-kind override)
- *   STORE_ARWEAVE_JWK_B64 -> Preferred: base64(JSON) of an RSA JWK Arweave wallet.
- *                            Treated as secret — never logged.
- *   TURBO_TOKEN           -> Legacy fallback: raw JSON JWK for Arweave uploads.
+ *   STORE_TURBO_SOLANA_KEY -> base58 64-byte Solana secret key: the ONE Turbo
+ *                            credential. Signs every upload and pays for the
+ *                            above-free-tier ones in $ARIO. Treated as secret
+ *                            — never logged. Unset: an ephemeral Solana key
+ *                            serves the free tier only.
  *   ARNS_DVM_SOLANA_SECRET_KEY -> OPTIONAL: 128-char hex (64-byte Ed25519
  *                            keypair) of the DVM's funded Solana wallet.
  *                            When set, the kind:5095 ArNS brokered-buy job
@@ -31,20 +33,15 @@
  *                            the kind:5095 buys target. Mainnet is explicit
  *                            opt-in only.
  *   STORE_TURBO_SOLANA_NETWORK -> mainnet (default) | devnet -- which Solana
- *                            network, and therefore which $ARIO mint, Turbo
- *                            credits are bought on. Cross-checked against the
+ *                            network, and therefore which $ARIO mint, paid
+ *                            uploads spend on. Cross-checked against the
  *                            gateway at boot; a mismatch refuses to start.
  *   STORE_TURBO_SOLANA_GATEWAY -> OPTIONAL Solana RPC override for the $ARIO
  *                            path. devnet REQUIRES one naming a devnet RPC.
- *   STORE_TURBO_TOPUP_THRESHOLD_WINC -> balance level below which the monitor
- *                            warns (and, when enabled, self-funds).
- *   STORE_TURBO_TOPUP_AMOUNT_ARIO -> $ARIO spent per top-up; setting it turns
- *                            self-funding ON ($ARIO credential required).
- *   STORE_TURBO_TOPUP_MAX_ARIO -> per-attempt ceiling (default: the amount).
- *   STORE_TURBO_TOPUP_MIN_INTERVAL_SEC -> min seconds between top-up attempts
- *                            (default 3600; failed attempts count).
- *   STORE_TURBO_BALANCE_CHECK_INTERVAL_SEC -> balance poll (default 600).
- *                            See ./turbo-funding.ts (store#123).
+ *   STORE_TURBO_MAX_ARIO_PER_UPLOAD -> per-upload $ARIO ceiling for on-demand
+ *                            funding. Setting it turns the paid route ON;
+ *                            unset, the store serves the free tier only.
+ *                            See ./turbo-funding.ts (store#123/#128).
 
  * Registers kind:5094 Arweave blob storage, plus kind:5095 ArNS buy when
  * ARNS_DVM_SOLANA_SECRET_KEY is configured.
@@ -63,9 +60,9 @@ import type { StoreHealthResponse } from '@toon-protocol/sdk';
 import {
   createArweaveDvmHandler,
   type ArweaveDvmConfig,
-  TurboUploadAdapter,
-  type ArweaveUploadAdapter,
   ChunkManager,
+  base58Encode,
+  generateSolanaKeypair,
 } from '@toon-protocol/sdk';
 import type { NodeConfig } from '@toon-protocol/sdk';
 import { startStoreBackend, type StoreBackend, type StoreHandler } from './store-backend.js';
@@ -75,12 +72,12 @@ import {
   type ArnsNetwork,
 } from './arns-buy-handler.js';
 import {
-  createFundedUploadAdapter,
-  createTurboFundingMonitor,
-  resolveTurboFundingEnv,
+  createOnDemandUploadAdapter,
+  redactGatewayUrl,
+  resolveTurboOnDemandEnv,
   resolveTurboSolanaNetwork,
-  wincToCapacityBytes,
-  type TurboFundingSnapshot,
+  TURBO_FREE_TIER_MAX_BYTES,
+  type TurboOnDemandClient,
   type TurboSolanaNetworkConfig,
 } from './turbo-funding.js';
 
@@ -153,75 +150,33 @@ export function createJobCounter(windowMs: number = 5 * 60 * 1000): JobCounter {
   return { wrap, snapshot };
 }
 
-// --- Helper: bytes formatter (inlined to keep the Docker bundle self-contained) ---
-// base-1000 SI units, rounds DOWN. Capacity comes from the measured winc rate
-// in turbo-funding.ts (the old inline 610,000 winc/byte floor overstated cost
-// ~55x against Turbo's actual quote of 11,600,114,792 winc/MiB).
-function formatWincAsBytes(winc: bigint): string {
-  const bytes = wincToCapacityBytes(winc);
-  if (bytes <= 0n) return '~0 B';
-  if (bytes < 1_000n) return `~${bytes.toString()} B`;
-  if (bytes < 1_000_000n) return `~${(bytes / 1_000n).toString()} KB`;
-  if (bytes < 1_000_000_000n) return `~${(bytes / 1_000_000n).toString()} MB`;
-  if (bytes < 1_000_000_000_000n) return `~${(bytes / 1_000_000_000n).toString()} GB`;
-  return `~${(bytes / 1_000_000_000_000n).toString()} TB`;
-}
-
-// --- Helper: derive the Arweave address (n field of the JWK) without leaking the JWK ---
-// Arweave address = base64url(SHA-256(modulus n bytes)). We import lazily so the
-// (still-too-rare) bad-JWK path also surfaces a clean error.
-async function arweaveAddressFromJwk(jwk: { n?: string }): Promise<string | undefined> {
-  if (!jwk?.n || typeof jwk.n !== 'string') return undefined;
-  try {
-    const { createHash } = await import('node:crypto');
-    // The Arweave JWK `n` field is base64url-encoded modulus bytes.
-    const modulusBytes = Buffer.from(jwk.n, 'base64url');
-    return createHash('sha256').update(modulusBytes).digest('base64url');
-  } catch {
-    return undefined;
-  }
-}
-
 /**
- * The token Turbo credits are DENOMINATED and bought in. $ARIO is the store's
- * default (owner decision 2026-08-28): this is an ar.io app, and the credits
- * that pay for its uploads should be bought in ar.io's own token.
- *
- * This selects the CURRENCY, not the signer. The upload signer stays the
- * Arweave JWK on every path below, so the address that owns the data items —
- * and the address a Turbo balance is held against — is unchanged by flipping
- * this. What changes is the token `getTokenPriceForBytes` quotes and the token
- * an operator tops the balance up in. The winc price of a byte is identical
- * either way (verified against Turbo: 1 MiB = 11,600,114,792 winc as both
- * `arweave` and `ario`; that is 0.0178 AR or 26.59 ARIO).
+ * Refuse the credentials this store no longer takes, loudly and with the
+ * migration path by name (store#128 review decision: ONE Solana key, no other
+ * Turbo credential). Silently ignoring a configured JWK would boot a node
+ * whose operator believes a specific funded wallet signs its uploads.
  */
-export type TurboCreditToken = 'ario' | 'arweave';
-
-const TURBO_CREDIT_TOKENS: readonly TurboCreditToken[] = ['ario', 'arweave'];
-
-export const DEFAULT_TURBO_CREDIT_TOKEN: TurboCreditToken = 'ario';
-
-/**
- * Read `STORE_TURBO_TOKEN`, defaulting to $ARIO. Unset means ario — a box that
- * says nothing gets the ar.io token, not the historical `arweave` default.
- *
- * Fail-closed on an unrecognised value rather than silently falling back: the
- * whole turbo-sdk token union is accepted by `TurboFactory` (solana, ethereum,
- * usdc, kyve, …), so a typo'd or well-meant-but-wrong value would otherwise
- * construct a client denominated in a token nobody funded, and surface as
- * uploads failing for "no credits" against a balance that looks fine.
- */
-export function resolveTurboCreditToken(
-  raw: string | undefined
-): TurboCreditToken {
-  const value = raw?.trim();
-  if (!value) return DEFAULT_TURBO_CREDIT_TOKEN;
-  if ((TURBO_CREDIT_TOKENS as readonly string[]).includes(value)) {
-    return value as TurboCreditToken;
+export function refuseRetiredTurboCredentials(env: NodeJS.ProcessEnv): void {
+  const retired: [string, string][] = [
+    ['STORE_ARWEAVE_JWK_B64', 'the Arweave JWK credential'],
+    ['TURBO_TOKEN', 'the legacy raw-JWK credential'],
+  ];
+  for (const [name, what] of retired) {
+    if (env[name]?.trim()) {
+      throw new Error(
+        `${name} is set, but ${what} was removed (store#128): the store takes ONE Turbo ` +
+          'credential, a base58 Solana secret key in STORE_TURBO_SOLANA_KEY, which signs ' +
+          'uploads and pays for the above-free-tier ones in $ARIO on demand. Unset it.'
+      );
+    }
   }
-  throw new Error(
-    `STORE_TURBO_TOKEN must be one of ${TURBO_CREDIT_TOKENS.join(', ')}, got ${JSON.stringify(value)}`
-  );
+  const token = env['STORE_TURBO_TOKEN']?.trim();
+  if (token && token !== 'ario') {
+    throw new Error(
+      `STORE_TURBO_TOKEN is ${JSON.stringify(token)}, but the store pays in $ARIO only ` +
+        '(store#128); the variable is vestigial and accepts nothing but "ario". Unset it.'
+    );
+  }
 }
 
 /**
@@ -274,181 +229,65 @@ async function turboAccountAddress(client: unknown): Promise<string | undefined>
 }
 
 interface CreateTurboAdapterResult {
-  adapter: ArweaveUploadAdapter;
+  /** The raw client; the on-demand upload adapter is built over it in main(). */
+  client: TurboOnDemandClient;
   /** Source of the credentials, for boot-log diagnostics. */
-  source:
-    | 'ario-solana'
-    | 'arweave-jwk-b64'
-    | 'turbo-token-legacy'
-    | 'unauthenticated-free-tier';
-  /** Arweave address of the upload-signing key (only set for authenticated paths). */
+  source: 'ario-solana' | 'ephemeral-free-tier';
+  /** Turbo's account address for the signing key (sha256-shaped, not the Solana pubkey). */
   arweaveAddress?: string;
-  /** The token credits are denominated in, for boot-log diagnostics. */
-  token: TurboCreditToken;
-  /** The constructed Turbo client (always set — every path builds one), for balance probing. */
-  client?: unknown;
 }
 
-// --- Helper: Create Turbo adapter from env (preferred AR JWK path; legacy TURBO_TOKEN fallback) ---
+// --- Helper: Create the Turbo client from the ONE credential (store#128) ---
 export async function createTurboAdapter(
-  arweaveJwkB64: string | undefined,
-  legacyToken: string | undefined,
-  creditToken: TurboCreditToken = DEFAULT_TURBO_CREDIT_TOKEN,
   solanaKeyBase58?: string | undefined,
-  // Solana RPC for the $ARIO path's token operations (top-ups). Undefined
-  // keeps turbo-sdk's production default. See resolveTurboSolanaNetwork for
-  // why this is validated against the stated network before it gets here.
+  // Solana RPC for the $ARIO path's token operations (on-demand fund
+  // transfers). Undefined keeps turbo-sdk's production default. See
+  // resolveTurboSolanaNetwork for why this is validated against the stated
+  // network before it gets here.
   solanaGatewayUrl?: string | undefined
 ): Promise<CreateTurboAdapterResult> {
-  const importTurbo = () => import('@ardrive/turbo-sdk/node');
-
   // Treat an empty OR whitespace-only env var as ABSENT, not "present but
-  // invalid" (#146). The deployed dvm container sets `TURBO_TOKEN=""` (len 0)
-  // and has no STORE_ARWEAVE_JWK_B64; a bare `if (legacyToken)` already skips ""
-  // (falsy), but a stray-whitespace value (e.g. a trailing newline from a
-  // here-doc env file) would otherwise be truthy and drive us into the JWK
-  // JSON.parse path → a hard throw instead of the free-tier fallback. Normalize
-  // both inputs up front so "no credential" reliably resolves to the
-  // unauthenticated ≤100 KB free tier.
-  const jwkB64 = arweaveJwkB64?.trim() || undefined;
-  const token = legacyToken?.trim() || undefined;
+  // invalid" (#146): a stray-whitespace value (e.g. a trailing newline from a
+  // here-doc env file) must resolve to the free tier, not a base58 error.
   const solanaKey = solanaKeyBase58?.trim() || undefined;
+  const { TurboFactory } = await import('@ardrive/turbo-sdk/node');
 
-  // ── Preferred: STORE_TURBO_SOLANA_KEY — pay for uploads in $ARIO ──────────
-  // The store is an ar.io app; this is the credential that lets it hold and
-  // spend ar.io's own token for its storage, with no Arweave wallet involved.
-  //
-  // `createTurboSigner` maps `token: 'ario'` to a Solana signer, which signs
-  // the ANS-104 data items directly — so this key, not a JWK, is what OWNS
-  // every upload made under it. It is also the only path that could ever fund
-  // ITSELF: `topUpWithTokens` has to sign an ARIO transfer on Solana, which an
-  // ArweaveSigner cannot do.
+  // ── STORE_TURBO_SOLANA_KEY — the one credential ───────────────────────────
+  // The store is an ar.io app; this key signs the ANS-104 data items (so it
+  // OWNS every upload made under it) and, being a Solana key, is what signs
+  // the $ARIO fund transfer when an above-free-tier upload buys its own
+  // credits on demand. `createTurboSigner` maps `token: 'ario'` to a Solana
+  // signer, which is why no other credential kind can do both jobs.
   if (solanaKey) {
     assertBase58SolanaSecret(solanaKey);
-    if (creditToken !== 'ario') {
-      throw new Error(
-        `STORE_TURBO_SOLANA_KEY pays in $ARIO, but STORE_TURBO_TOKEN is ${JSON.stringify(creditToken)}. ` +
-          'Drop one of them: a Solana key is only a credential for the ario token.'
-      );
-    }
-    const { TurboFactory } = await importTurbo();
     const client = TurboFactory.authenticated({
       privateKey: solanaKey,
       token: 'ario',
       ...(solanaGatewayUrl ? { gatewayUrl: solanaGatewayUrl } : {}),
     });
-    if (jwkB64) {
-      console.warn(
-        '[store] WARNING: both STORE_TURBO_SOLANA_KEY and STORE_ARWEAVE_JWK_B64 are set.' +
-          ' Using the Solana key — uploads are signed by, and owned by, that wallet,' +
-          ' and any credit bought against the JWK address is NOT reachable from it.'
-      );
-    }
     const arweaveAddress = await turboAccountAddress(client);
     return {
-      adapter: new TurboUploadAdapter(client),
+      client: client as unknown as TurboOnDemandClient,
       source: 'ario-solana',
       ...(arweaveAddress ? { arweaveAddress } : {}),
-      token: 'ario',
-      client,
     };
   }
 
-  // ── STORE_ARWEAVE_JWK_B64 (piped by the host orchestrator) ────────────────
-  if (jwkB64) {
-    let jwkJson: string;
-    try {
-      jwkJson = Buffer.from(jwkB64, 'base64').toString('utf-8');
-    } catch (err) {
-      throw new Error(
-        `STORE_ARWEAVE_JWK_B64 is not valid base64: ${err instanceof Error ? err.message : err}`
-      );
-    }
-    let jwk: { kty?: string; n?: string; d?: string };
-    try {
-      jwk = JSON.parse(jwkJson);
-    } catch (err) {
-      throw new Error(
-        `STORE_ARWEAVE_JWK_B64 does not decode to valid JSON: ${err instanceof Error ? err.message : err}`
-      );
-    }
-    if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'RSA' || !jwk.n || !jwk.d) {
-      throw new Error(
-        'STORE_ARWEAVE_JWK_B64 is missing required RSA JWK fields (kty=RSA, n, d).'
-      );
-    }
-    const { TurboFactory, ArweaveSigner } = await importTurbo();
-    const signer = new ArweaveSigner(
-      jwk as unknown as ConstructorParameters<typeof ArweaveSigner>[0]
-    );
-    const client = TurboFactory.authenticated({
-      signer,
-      token: creditToken,
-    });
-    const arweaveAddress = await arweaveAddressFromJwk(jwk);
-    return {
-      adapter: new TurboUploadAdapter(client),
-      source: 'arweave-jwk-b64',
-      arweaveAddress,
-      token: creditToken,
-      client,
-    };
-  }
-
-  // ── Legacy: TURBO_TOKEN (raw JWK JSON) ──────────────────────────────────
-  if (token) {
-    let jwk: { kty?: string; n?: string; d?: string };
-    try {
-      jwk = JSON.parse(token);
-    } catch {
-      throw new Error(
-        'TURBO_TOKEN must be a valid JSON JWK. Use Arweave wallet private key (JSON).'
-      );
-    }
-    const { TurboFactory, ArweaveSigner } = await importTurbo();
-    // An explicit ArweaveSigner, NOT `privateKey`: turbo-sdk keys the signer
-    // off the token, so `privateKey` + the default 'ario' hands a JWK object
-    // to a base58 Solana signer and throws "Expected String" at boot. A
-    // provided signer bypasses that inference; the token stays the currency.
-    const signer = new ArweaveSigner(
-      jwk as unknown as ConstructorParameters<typeof ArweaveSigner>[0]
-    );
-    const client = TurboFactory.authenticated({ signer, token: creditToken });
-    const arweaveAddress = await arweaveAddressFromJwk(jwk);
-    return {
-      adapter: new TurboUploadAdapter(client),
-      source: 'turbo-token-legacy',
-      arweaveAddress,
-      token: creditToken,
-      client,
-    };
-  }
-
-  // ── Ephemeral JWK free tier (≤100 KB uploads, no wallet required) ─────────
-  // TurboFactory.authenticated({privateKey: ephemeralJwk}) with a zero-balance
-  // account gives Turbo upload access without a deposit. The JWK is ephemeral —
-  // it rotates on every DVM restart and cannot be funded.
-  const { TurboFactory, ArweaveSigner } = await importTurbo();
-  const { default: Arweave } = await import('arweave');
-  const arweave = Arweave.init({});
-  const ephemeralJwk = await arweave.crypto.generateJWK();
-  // Same explicit-signer shape as the legacy path above, and for the same
-  // reason: under the default 'ario' token a bare `privateKey` JWK reaches
-  // turbo-sdk's Solana signer and the store refuses to boot -- which killed
-  // the whole no-credential free tier (found smoke-booting store#123; the
-  // degraded tier must degrade, not die).
-  const ephemeralSigner = new ArweaveSigner(
-    ephemeralJwk as unknown as ConstructorParameters<typeof ArweaveSigner>[0]
-  );
+  // ── Ephemeral Solana key: free tier only, no wallet required ──────────────
+  // Turbo grants free small-data-item uploads to ANY valid signer regardless
+  // of balance, so a keyless box still serves the ≤107,520-byte tier. The key
+  // rotates on every restart, holds no $ARIO, and cannot be funded — which is
+  // fine, because the paid route additionally requires the per-upload ceiling
+  // to be configured, and main() refuses to combine that with this path.
+  const ephemeral = generateSolanaKeypair();
   const client = TurboFactory.authenticated({
-    signer: ephemeralSigner,
-    token: creditToken,
+    privateKey: base58Encode(ephemeral.secretKey),
+    token: 'ario',
+    ...(solanaGatewayUrl ? { gatewayUrl: solanaGatewayUrl } : {}),
   });
   return {
-    adapter: new TurboUploadAdapter(client),
-    source: 'unauthenticated-free-tier',
-    token: creditToken,
-    client,
+    client: client as unknown as TurboOnDemandClient,
+    source: 'ephemeral-free-tier',
   };
 }
 
@@ -463,7 +302,6 @@ interface StoreRawConfig {
   basePricePerByte?: string | number;
   kindPricing?: Record<string, string | number>;
   // Arweave upload config
-  turboToken?: string;
   arweaveTags?: Record<string, string>;
 }
 
@@ -655,17 +493,6 @@ export function resolveArnsBuyEnv(
   };
 }
 
-function buildNoCreditsMessage(
-  address: string | undefined,
-  token: TurboCreditToken = DEFAULT_TURBO_CREDIT_TOKEN
-): string {
-  const addr = address ?? 'unknown';
-  return (
-    `Turbo account ${addr} has zero credits. Uploads will fail until credits are added. ` +
-    `Fund with $${token.toUpperCase()} at https://turbo.ardrive.io/ (account address: ${addr})`
-  );
-}
-
 // --- Main entrypoint ---
 async function main(): Promise<void> {
   console.log('[store] Starting store node...');
@@ -680,181 +507,74 @@ async function main(): Promise<void> {
     throw new Error('NODE_NOSTR_SECRET_KEY is required');
   }
 
-  // Build the Arweave upload adapter.
-  //
-  // Resolution order:
-  //   1. STORE_ARWEAVE_JWK_B64 (preferred — base64(JSON) of a funded RSA JWK)
-  //   2. TURBO_TOKEN (legacy raw-JWK JSON env var)
-  //   3. Neither (or empty/whitespace) → unauthenticated ephemeral-JWK FREE
-  //      TIER (≤100 KB uploads, no wallet/deposit). An empty `TURBO_TOKEN=""`
-  //      must fall back to free tier, NOT reject kind:5094 (#146).
-  //
-  // The JWK env var is treated as secret material — do NOT log its value.
-  const arweaveJwkB64 = process.env['STORE_ARWEAVE_JWK_B64'];
-  const legacyTurboToken = rawConfig.turboToken || process.env['TURBO_TOKEN'];
-  // Which token credits are bought in — $ARIO unless a box says otherwise.
-  // Throws on an unrecognised value rather than booting mis-denominated.
-  const creditToken = resolveTurboCreditToken(process.env['STORE_TURBO_TOKEN']);
+  // Build the Arweave upload adapter (store#128: ONE credential, pay per
+  // upload). A retired credential in the environment is a loud refusal, not a
+  // silently ignored variable.
+  refuseRetiredTurboCredentials(process.env);
   const turboSolanaKey = process.env['STORE_TURBO_SOLANA_KEY'];
   // Which Solana network the node pays on is a stated decision (store#123):
   // a network/gateway mismatch is a refuse-to-start, never a silent wrong mint.
   const turboNetwork: TurboSolanaNetworkConfig = resolveTurboSolanaNetwork(process.env);
-  // Self-funding envelope; malformed combinations throw here, before anything
-  // is constructed.
-  const fundingEnv = resolveTurboFundingEnv(process.env);
-  const turboResult = await createTurboAdapter(
-    arweaveJwkB64,
-    legacyTurboToken,
-    creditToken,
-    turboSolanaKey,
-    turboNetwork.gatewayUrl
-  );
+  // Per-upload spend authority; a malformed value throws here, before
+  // anything is constructed.
+  const onDemandEnv = resolveTurboOnDemandEnv(process.env);
+  const turboResult = await createTurboAdapter(turboSolanaKey, turboNetwork.gatewayUrl);
 
-  // Self-funding must sign an $ARIO transfer on Solana, which only the
-  // STORE_TURBO_SOLANA_KEY path can do. Asking for it on any other credential
-  // is a misconfiguration to refuse, not degrade (story 4 vs story 7: the
-  // operator asked for a node that funds itself and would get one that
-  // silently cannot).
-  if (fundingEnv.selfFundingEnabled && turboResult.source !== 'ario-solana') {
+  // The paid route spends the wallet's $ARIO, which only the configured key
+  // holds. Asking for it on the ephemeral path is a misconfiguration to
+  // refuse, not degrade (the operator asked for a node that pays for uploads
+  // and would get one that silently cannot).
+  if (onDemandEnv.paidUploadsEnabled && turboResult.source !== 'ario-solana') {
     throw new Error(
-      'STORE_TURBO_TOPUP_AMOUNT_ARIO requires the $ARIO credential (STORE_TURBO_SOLANA_KEY): ' +
-        `self-funding signs a Solana transfer, which the ${turboResult.source} path cannot do.`
+      'STORE_TURBO_MAX_ARIO_PER_UPLOAD requires the $ARIO credential (STORE_TURBO_SOLANA_KEY): ' +
+        'a paid upload signs a Solana fund transfer, which the ephemeral free-tier key cannot pay for.'
     );
   }
 
   const sourceLabel =
     turboResult.source === 'ario-solana'
       ? 'STORE_TURBO_SOLANA_KEY ($ARIO, Solana-signed)'
-      : turboResult.source === 'arweave-jwk-b64'
-        ? 'STORE_ARWEAVE_JWK_B64 (wallet-derived)'
-        : turboResult.source === 'turbo-token-legacy'
-          ? 'TURBO_TOKEN (legacy)'
-          : 'unauthenticated (free tier, ≤100KB)';
-  console.log(`[store] Arweave credit source: ${sourceLabel}`);
-  console.log(`[store] Turbo credit token: ${turboResult.token}`);
-  // One glance answers "which token, on which network, can it pay" (story 10).
+      : `ephemeral Solana key (free tier, ≤${TURBO_FREE_TIER_MAX_BYTES} bytes signed)`;
+  console.log(`[store] Arweave upload credential: ${sourceLabel}`);
+  // One glance answers "which token, on which network, can it pay" (story
+  // 10). The gateway is logged as origin only: RPC providers put the API key
+  // in the path or query.
   console.log(
     `[store] Turbo Solana network: ${turboNetwork.network} ($ARIO mint ${turboNetwork.mint}` +
-      `${turboNetwork.gatewayUrl ? `, gateway ${turboNetwork.gatewayUrl}` : ''})`
+      `${turboNetwork.gatewayUrl ? `, gateway ${redactGatewayUrl(turboNetwork.gatewayUrl)}` : ''})`
   );
-  if (turboResult.source === 'unauthenticated-free-tier') {
+  if (turboResult.source === 'ephemeral-free-tier') {
     console.warn(
-      '[store] WARNING: No Arweave credentials — using ephemeral JWK for free-tier uploads (≤100KB).' +
-      ' Set STORE_ARWEAVE_JWK_B64 with a funded wallet to lift the size limit.' +
-      ' Do NOT fund the ephemeral address — it rotates on every restart.'
+      `[store] WARNING: no Turbo credential — an ephemeral Solana key serves free-tier uploads ` +
+        `(≤${TURBO_FREE_TIER_MAX_BYTES} bytes signed). Set STORE_TURBO_SOLANA_KEY (and a per-upload ` +
+        'ceiling) to serve larger ones. Do NOT fund the ephemeral address — it rotates on every restart.'
     );
   }
   if (turboResult.arweaveAddress) {
-    // Under `ario` this is Turbo's account address, derived from the signing
-    // key — Arweave-shaped even when a Solana key signs, and NOT that key's
-    // Solana pubkey. It is the string to fund against.
+    // Turbo's account address for this key — sha256-shaped even though a
+    // Solana key signs, and NOT the Solana pubkey an explorer shows. On the
+    // on-demand path nothing needs manual funding (the wallet's $ARIO pays
+    // per upload), but the address is what Turbo support and balance queries
+    // key off, so it belongs in the boot log.
     console.log(`[store] Turbo account address: ${turboResult.arweaveAddress}`);
-    if (turboResult.source === 'ario-solana') {
-      // Story 11: the two strings for one key, said out loud. Sending $ARIO
-      // to the wrong one loses the funds.
-      console.log(
-        '[store] Fund THAT address at https://turbo.ardrive.io/ -- it is NOT the Solana pubkey an explorer shows for this key.'
-      );
-    }
   }
-
-  // Whether this credential could ever hold Turbo credits at all. The
-  // free-tier path rotates its wallet every restart and cannot be funded.
-  const fundedSource =
-    turboResult.source === 'ario-solana' ||
-    turboResult.source === 'arweave-jwk-b64' ||
-    turboResult.source === 'turbo-token-legacy';
-
-  // The balance monitor (store#123): reads the balance now and on an
-  // interval, warns while the balance is low but non-zero, and -- only when
-  // configured with an amount, a threshold and the $ARIO credential -- buys
-  // credits from the wallet's own $ARIO, bounded per attempt and rate-limited.
-  // Its snapshot feeds /health so fleet monitoring sees "can it pay" without
-  // shelling into the box.
-  const monitorClient = (turboResult.client ?? {}) as {
-    getBalance?: () => Promise<{ winc: string | bigint; effectiveBalance?: string | bigint }>;
-    topUpWithTokens?: (p: {
-      tokenAmount: string;
-      turboCreditDestinationAddress?: string;
-    }) => Promise<unknown>;
-    submitFundTransaction?: (p: { txId: string }) => Promise<unknown>;
-    getUploadCosts?: (p: { bytes: number[] }) => Promise<{ winc: string }[]>;
-  };
-  const clientTopUp = monitorClient.topUpWithTokens?.bind(monitorClient);
-  const clientSubmitFund = monitorClient.submitFundTransaction?.bind(monitorClient);
-  const clientUploadCosts = monitorClient.getUploadCosts?.bind(monitorClient);
-  const fundingMonitor = createTurboFundingMonitor({
-    client: {
-      getBalance: async () => {
-        if (typeof monitorClient.getBalance !== 'function') {
-          throw new Error('Turbo client has no getBalance');
-        }
-        return monitorClient.getBalance();
-      },
-      ...(clientTopUp ? { topUpWithTokens: clientTopUp } : {}),
-      ...(clientSubmitFund ? { submitFundTransaction: clientSubmitFund } : {}),
-      ...(clientUploadCosts ? { getUploadCosts: clientUploadCosts } : {}),
-    },
-    config: fundingEnv,
-    // The account a top-up must credit BY NAME: an implicit credit lands on
-    // the raw-pubkey-keyed account the 'ario' client cannot read (mainnet
-    // demonstration 2026-08-30, see turbo-funding.ts).
-    ...(turboResult.arweaveAddress
-      ? { accountAddress: turboResult.arweaveAddress }
-      : {}),
-  });
-  // Boot-time read is best-effort (the monitor never throws): operators may
-  // want the store running while they fund.
-  await fundingMonitor.check();
-  {
-    const snap = fundingMonitor.snapshot();
-    if (snap.balanceWinc !== null) {
-      console.log(
-        `[store] Arweave credit balance: ${snap.balanceWinc} winc (${formatWincAsBytes(BigInt(snap.balanceWinc))} upload capacity)`
-      );
-      if (snap.balanceWinc === '0' && fundedSource) {
-        console.warn(
-          `[store] ${buildNoCreditsMessage(turboResult.arweaveAddress, turboResult.token)}`
-        );
-      }
-    }
-  }
-  // The monitor ALWAYS runs: /health's balance block must be a live read for
-  // the life of the process, not a boot-time snapshot (a funded box with no
-  // threshold, drained overnight, must not keep reporting it can pay). The
-  // threshold gates only warning and top-up, never the polling.
-  fundingMonitor.start();
   console.log(
-    `[store] Turbo balance monitor: every ${fundingEnv.checkIntervalMs / 1000}s, ` +
-      (fundingEnv.thresholdWinc !== undefined
-        ? `threshold ${fundingEnv.thresholdWinc} winc, self-funding ` +
-          (fundingEnv.selfFundingEnabled
-            ? `ON (${fundingEnv.topUpAmountArio} $ARIO per top-up, ` +
-              `ceiling ${fundingEnv.maxTopUpArio ?? fundingEnv.topUpAmountArio}, ` +
-              `min ${fundingEnv.minIntervalMs / 1000}s between attempts)`
-            : 'OFF (warn only)')
-        : 'no threshold (balance polling for /health only)')
+    onDemandEnv.paidUploadsEnabled
+      ? `[store] paid uploads: ON DEMAND, at most ${onDemandEnv.maxArioPerUpload} $ARIO per upload ` +
+          '(each above-free-tier upload buys exactly its own credits; no standing balance)'
+      : '[store] paid uploads: OFF (no STORE_TURBO_MAX_ARIO_PER_UPLOAD; above-free-tier uploads are refused by name)'
   );
 
-  // Refuse an upload the balance cannot cover BEFORE bytes reach Turbo, with
-  // the reason by name -- "out of credit" and "malformed blob" must be
-  // distinguishable (stories 2-3). Sits behind the existing adapter seam.
-  const uploadAdapter = createFundedUploadAdapter(turboResult.adapter, {
-    funded: fundedSource,
-    // The free-tier ceiling is measured on the SIGNED data item; the envelope
-    // differs by an order of magnitude between the RSA and ed25519 signers.
-    signerKind:
-      turboResult.source === 'ario-solana' ? 'solana-ed25519' : 'arweave-rsa',
-    ...(typeof monitorClient.getBalance === 'function'
-      ? {
-          client: turboResult.client as {
-            getBalance: () => Promise<{ winc: string | bigint }>;
-            getUploadCosts?: (p: { bytes: number[] }) => Promise<{ winc: string }[]>;
-          },
-        }
-      : {}),
-    ...(turboResult.arweaveAddress
-      ? { accountAddress: turboResult.arweaveAddress }
+  // Route by the SIGNED-item size: free tier at or under the ceiling, bounded
+  // on-demand $ARIO above it (or a named refusal with no spend authority).
+  // Sits behind the existing adapter seam; the job handler knows nothing.
+  const uploadAdapter = createOnDemandUploadAdapter({
+    client: turboResult.client,
+    // token:'ario' signs with the Solana key on both paths, so the free-tier
+    // ceiling is measured against the ed25519 envelope.
+    signerKind: 'solana-ed25519',
+    ...(onDemandEnv.paidUploadsEnabled && onDemandEnv.maxArioPerUpload !== undefined
+      ? { maxArioPerUpload: onDemandEnv.maxArioPerUpload }
       : {}),
   });
 
@@ -939,16 +659,22 @@ async function main(): Promise<void> {
 
   const blsApp = new Hono();
   blsApp.get('/health', (c) => {
-    // StoreHealthResponse plus the Turbo funding block (store#123, story 14):
-    // whether the node can currently pay, and its runway, without shelling
-    // into the box. The extra field is additive, so existing consumers of the
-    // canonical type are unaffected.
+    // StoreHealthResponse plus the Turbo funding block (store#123/#128): the
+    // funding MODEL, stated. With per-upload on-demand funding there is no
+    // standing balance to report, and /health is world-readable behind nginx,
+    // so the block carries configuration facts only — never upstream error
+    // text, which routinely embeds RPC URLs (and Helius/QuickNode put the API
+    // key in the URL). The extra field is additive, so existing consumers of
+    // the canonical type are unaffected.
     const health: StoreHealthResponse & {
-      turbo: TurboFundingSnapshot & {
+      turbo: {
         source: string;
         token: string;
         network: string;
         mint: string;
+        freeTierMaxBytes: number;
+        paidUploads: 'on-demand' | 'off';
+        maxArioPerUpload?: number;
         accountAddress?: string;
       };
     } = {
@@ -963,11 +689,15 @@ async function main(): Promise<void> {
       basePricePerByte: String(config.basePricePerByte ?? 10n),
       jobsRecent: counter.snapshot(),
       turbo: {
-        ...fundingMonitor.snapshot(),
         source: turboResult.source,
-        token: turboResult.token,
+        token: 'ario',
         network: turboNetwork.network,
         mint: turboNetwork.mint,
+        freeTierMaxBytes: TURBO_FREE_TIER_MAX_BYTES,
+        paidUploads: onDemandEnv.paidUploadsEnabled ? 'on-demand' : 'off',
+        ...(onDemandEnv.maxArioPerUpload !== undefined
+          ? { maxArioPerUpload: onDemandEnv.maxArioPerUpload }
+          : {}),
         ...(turboResult.arweaveAddress
           ? { accountAddress: turboResult.arweaveAddress }
           : {}),
@@ -1004,7 +734,6 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[store] Received ${signal}, shutting down...`);
-    fundingMonitor.stop();
     try {
       // serve() returns a Node http.Server whose close() takes a callback.
       // Wait for sockets to drain on both servers before exiting.

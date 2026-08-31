@@ -72,13 +72,13 @@ services:
       HANDLER_PORT: '3300'
       BLS_PORT: '3400'
       FEE_PER_JOB: ${FEE_PER_JOB:-10}
-      # The $ARIO credential: a base58 Solana secret key that signs the uploads
-      # and owns them. Preferred over the JWK below when both are set.
+      # The ONE Turbo credential (store#128): a base58 Solana secret key that
+      # signs the uploads, owns them, and pays for the above-free-tier ones
+      # in $ARIO on demand.
       STORE_TURBO_SOLANA_KEY: ${STORE_TURBO_SOLANA_KEY:-}
-      STORE_ARWEAVE_JWK_B64: ${STORE_ARWEAVE_JWK_B64:-}
-      # Turbo credits are bought in $ARIO. Unset means ario; the store refuses
-      # to boot on a value that is neither ario nor arweave.
-      STORE_TURBO_TOKEN: ${STORE_TURBO_TOKEN:-ario}
+      # Per-upload $ARIO ceiling; setting it is the spend authorization.
+      # Unset = free tier only, above-ceiling uploads refused by name.
+      STORE_TURBO_MAX_ARIO_PER_UPLOAD: ${STORE_TURBO_MAX_ARIO_PER_UPLOAD:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # kind:5095 stays unregistered while its variable is empty.
       ARNS_DVM_SOLANA_SECRET_KEY: ${ARNS_DVM_SOLANA_SECRET_KEY:-}
