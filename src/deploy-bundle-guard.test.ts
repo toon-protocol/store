@@ -708,13 +708,20 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
     expect(servedTrigger, 'the served-state inequality must gate activation').toBeGreaterThanOrEqual(0);
     expect(servedTrigger).toBeLessThan(restartAt);
 
-    // And the restart's own guard must consume what those triggers set.
+    // And the restart's own guard must consume what those triggers set — with
+    // the POLARITY pinned, not just the variable name. The second review's
+    // mutation test flipped `= 1` to `= 0` (never restart when needed, always
+    // restart when not — bug #124 and the restart loop at once) and every
+    // assertion here passed; a name-only match cannot see that.
     const guard = lines
       .slice(0, restartAt)
       .reverse()
       .find((line) => isCode(line) && /^\s*if\b/.test(line));
     expect(guard, 'the restart must be conditional').toBeDefined();
-    expect(guard, 'the condition must consume the two triggers').toMatch(/NEEDS_RESTART/);
+    expect(
+      guard,
+      'the condition must fire exactly when a trigger armed it (= 1, not a flipped polarity)'
+    ).toMatch(/\[\s*"\$NEEDS_RESTART"\s*=\s*1\s*\]/);
     const triggerAssignments = lines.filter(
       (line) => isCode(line) && /NEEDS_RESTART=1/.test(line)
     );
@@ -722,6 +729,16 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
       triggerAssignments.length,
       'both triggers must arm the restart'
     ).toBeGreaterThanOrEqual(2);
+    // The disarm side is pinned too: the flag must start 0 (a run with no
+    // trigger must not restart), and no line may ever set it back to 0 after
+    // a trigger armed it.
+    const disarmAt = firstCodeLine(/NEEDS_RESTART=0/);
+    expect(disarmAt, 'the flag must be initialised to 0').toBeGreaterThanOrEqual(0);
+    expect(disarmAt).toBeLessThan(fingerprintTrigger);
+    expect(
+      lines.filter((line) => isCode(line) && /NEEDS_RESTART=0/.test(line)),
+      'nothing may disarm the flag after a trigger'
+    ).toHaveLength(1);
   });
 
   it('renders, reads the served state, restarts, waits healthy again, then re-verifies', () => {

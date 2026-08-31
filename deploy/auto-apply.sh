@@ -27,12 +27,15 @@ DEPLOY_DIR="$REPO_DIR/deploy"
 cd "$REPO_DIR"
 
 # The [node] addresses a connector.toml advertises, one per line, sorted.
-# Quoted-string extraction, not a g.* shape filter, so an address of any
-# spelling counts. KNOWN LIMIT: the sed matches a single-line `addresses =
-# [...]` only; a reformatted template parses EMPTY, which the caller below
-# refuses loudly instead of letting the verification pass vacuously.
+# Scoped to the [node] table (the sed range runs from `[node]` to the next
+# table header), so an `addresses = [...]` under any other table can never
+# leak into the comparison. Quoted-string extraction, not a g.* shape filter,
+# so an address of any spelling counts. KNOWN LIMIT: the sed matches a
+# single-line `addresses = [...]` only; a reformatted template parses EMPTY,
+# which the caller below refuses loudly instead of letting the verification
+# pass vacuously.
 advertised_addresses() {
-  sed -n 's/^[[:space:]]*addresses[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$1" \
+  sed -n '/^\[node\]/,/^[[:space:]]*\[/s/^[[:space:]]*addresses[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$1" \
     | grep -o '"[^"]*"' | tr -d '"' | sort -u || true
 }
 
@@ -94,7 +97,10 @@ cd "$DEPLOY_DIR"
 # loaded -- the exact assumption store#124 was filed about. The decision below
 # also asks the running connector what it serves and compares that to the
 # render, so a box already sitting on a stale config self-heals on the next
-# apply even when no file byte moved.
+# apply even when no file byte moved. "Next apply" means the next COMMIT to
+# main: a run exits at the LOCAL=REMOTE gate above before reaching any of
+# this, so on a quiet repo a stale box waits for the next merge, not the
+# next timer tick.
 SUM_BEFORE=$(fingerprint_connector_inputs)
 [ -x ./render.sh ] && ./render.sh
 SUM_AFTER=$(fingerprint_connector_inputs)
@@ -143,15 +149,23 @@ wait_connector_healthy || exit 1
 #
 # A curl failure is a FAILURE of this function (distinct exit), never an empty
 # address list: an unreachable /ilp must be reported as unreachable, not as a
-# config mismatch.
+# config mismatch. The curl retries a few times first: a run that dies on one
+# connection blip exits 1 once, and every later timer run exits 0 at the
+# LOCAL=REMOTE gate -- one red apply, then green forever on an unverified box.
+# Retries make that state need a real outage, not a blip.
 # The port sed matches the single-quoted '127.0.0.1:N:M' publish rows and
 # takes the first, which is the connector's -- the only loopback-published
 # service in every node bundle. The 4000 fallback matches the committed file.
-ILP_PORT=$(sed -n "s/.*'127\.0\.0\.1:\([0-9]*\):[0-9]*'.*/\1/p" docker-compose.yml | head -n 1)
+# `|| true` because under pipefail a sed that outruns head's one line dies on
+# SIGPIPE and would abort the whole script as a bare exit 141.
+ILP_PORT=$({ sed -n "s/.*'127\.0\.0\.1:\([0-9]*\):[0-9]*'.*/\1/p" docker-compose.yml | head -n 1; } || true)
 ILP_PORT=${ILP_PORT:-4000}
 served_ilp_addresses() {
   local body
-  body=$(curl -fsS "http://127.0.0.1:${ILP_PORT}/ilp") || return 1
+  # --retry alone skips connection resets/refusals (it only covers timeouts
+  # and 5xx); --retry-all-errors is what makes a nanode's blip retryable.
+  body=$(curl -fsS --retry 3 --retry-delay 2 --retry-all-errors --max-time 10 \
+    "http://127.0.0.1:${ILP_PORT}/ilp") || return 1
   printf '%s' "$body" | tr -d ' \t\r\n' \
     | grep -o '"ilpAddresses":\[[^]]*\]' | head -n 1 \
     | sed 's/^"ilpAddresses"://' \
