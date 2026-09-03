@@ -267,7 +267,23 @@ export function createOnDemandUploadAdapter(options: {
     options.createFundingMode ??
     (async (maxArio: number) => {
       const { OnDemandFunding } = await import('@ardrive/turbo-sdk/node');
-      return new OnDemandFunding({ maxTokenAmount: maxArio });
+      // `maxTokenAmount` is compared against a BASE-UNIT amount inside the
+      // SDK (upload.js multiplies the quote by tokenToBaseMap before the
+      // ceiling check) and the constructor does not convert; turbo-sdk's own
+      // CLI converts before constructing. The operator configures whole
+      // $ARIO, so convert here or a ceiling of 5 means 0.000005 $ARIO and
+      // every paid upload throws.
+      //
+      // `topUpBufferMultiplier: 1` because of turbo-sdk#455: the shortfall
+      // is computed from the sha256-form balance (permanently 0 on this
+      // path) while the debit draws the pubkey account, so any buffer above
+      // the quote lands where the shortfall math never reads it and is
+      // re-bought on every upload. The trade is a small under-payment risk
+      // on a price move between quote and settle, seconds apart.
+      return new OnDemandFunding({
+        maxTokenAmount: maxArio * 10 ** ARIO_TOKEN_DECIMALS,
+        topUpBufferMultiplier: 1,
+      });
     });
 
   return {

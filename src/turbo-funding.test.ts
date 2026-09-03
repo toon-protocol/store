@@ -200,7 +200,11 @@ describe('createOnDemandUploadAdapter', () => {
     const { OnDemandFunding } = await import('@ardrive/turbo-sdk/node');
     const mode = client.upload.mock.calls[0]?.[0]?.fundingMode;
     expect(mode).toBeInstanceOf(OnDemandFunding);
-    expect(String((mode as InstanceType<typeof OnDemandFunding>).maxTokenAmount)).toBe('3');
+    // The operator's 3 $ARIO must reach the SDK as 3,000,000 base units;
+    // asserting '3' here is what let the unit bug through (store#128 review).
+    const onDemand = mode as InstanceType<typeof OnDemandFunding>;
+    expect(String(onDemand.maxTokenAmount)).toBe('3000000');
+    expect(onDemand.topUpBufferMultiplier).toBe(1);
   });
 
   it('refuses an above-ceiling upload by name when no spend ceiling is configured', async () => {
