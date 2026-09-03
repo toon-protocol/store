@@ -204,7 +204,10 @@ describe('createOnDemandUploadAdapter', () => {
     // asserting '3' here is what let the unit bug through (store#128 review).
     const onDemand = mode as InstanceType<typeof OnDemandFunding>;
     expect(String(onDemand.maxTokenAmount)).toBe('3000000');
-    expect(onDemand.topUpBufferMultiplier).toBe(1);
+    // SDK default buffer: Turbo's real per-item price sits ~0.58% above the
+    // SDK's linear estimate, so a multiplier of 1 under-buys every upload
+    // (measured on mainnet 2026-09-03).
+    expect(onDemand.topUpBufferMultiplier).toBe(1.1);
   });
 
   it('refuses an above-ceiling upload by name when no spend ceiling is configured', async () => {

@@ -274,15 +274,18 @@ export function createOnDemandUploadAdapter(options: {
       // $ARIO, so convert here or a ceiling of 5 means 0.000005 $ARIO and
       // every paid upload throws.
       //
-      // `topUpBufferMultiplier: 1` because of turbo-sdk#455: the shortfall
-      // is computed from the sha256-form balance (permanently 0 on this
-      // path) while the debit draws the pubkey account, so any buffer above
-      // the quote lands where the shortfall math never reads it and is
-      // re-bought on every upload. The trade is a small under-payment risk
-      // on a price move between quote and settle, seconds apart.
+      // The buffer stays at the SDK default (1.1). The SDK sizes its buy by a
+      // straight line from the 1 GiB rate, while Turbo's real per-item price
+      // runs above that line (measured on mainnet 2026-09-03 for a 110,201-byte
+      // signed item: real 1,342,263,496 winc vs the SDK's 1,334,512,354, a
+      // constant ~0.58%). With a multiplier of 1 the store buys exactly the
+      // estimate, the bundler answers 402, and the same under-buy repeats on
+      // every attempt at every size (store#128 shipped 1 on the turbo-sdk#455
+      // reading that the credited and debited accounts differ; they are the
+      // same raw-pubkey account, so the buffer IS spendable by the next
+      // upload and costs nothing but float).
       return new OnDemandFunding({
         maxTokenAmount: maxArio * 10 ** ARIO_TOKEN_DECIMALS,
-        topUpBufferMultiplier: 1,
       });
     });
 
