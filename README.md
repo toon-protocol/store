@@ -151,23 +151,21 @@ curl localhost:3400/health
 # {"status":"ok","handlerKinds":[5094],"basePricePerByte":"10",...}
 ```
 
-With no upload credential it runs on the free tier, which caps one upload at
-100 KB on a wallet that rotates every restart and cannot be funded. Two
-credentials lift that, and Turbo needs one of them — a token setting alone is
-a currency, not a wallet:
+The store takes **one** Turbo credential: `STORE_TURBO_SOLANA_KEY`, base58 of
+a 64-byte Solana secret key. It signs the ANS-104 data items and therefore
+**owns** every upload, and its wallet's **$ARIO** is what a paid upload
+spends — this is an ar.io app; its storage is bought in ar.io's own token.
+With no key, an ephemeral one (rotating every restart, unfundable) still
+serves the free tier.
 
-- **`STORE_TURBO_SOLANA_KEY`** (preferred) — base58 of a 64-byte Solana secret
-  key. Pays in **$ARIO** with no Arweave wallet at all. This is an ar.io app;
-  its storage is bought in ar.io's own token.
-- **`STORE_ARWEAVE_JWK_B64`** — a funded Arweave JWK, base64-encoded.
-
-Whichever is set signs the ANS-104 data items and therefore **owns** the
-uploads, so the two are not interchangeable after the fact: blobs stored under
-one are attributed to a different address than blobs stored under the other.
-
-Fund the address the store prints at boot as `[store] Turbo account address:`.
-Under `$ARIO` that is Arweave-shaped base64url derived from the signing key —
-**not** the Solana pubkey an explorer would show you.
+Payment is **per upload, on demand** (store#128): uploads whose *signed* data
+item fits Turbo's 107,520-byte free ceiling are free for any signer at any
+balance; above it, turbo-sdk's `OnDemandFunding` prices the actual byte
+count, buys exactly that upload's credits from the wallet's $ARIO, and throws
+rather than spending above `STORE_TURBO_MAX_ARIO_PER_UPLOAD`. There is no
+standing credit balance, no background spender, and nothing to monitor.
+Setting the ceiling is the spend authorization — unset, above-ceiling uploads
+are refused by name before any bytes reach Turbo.
 
 There is no connector in this loop — you are talking to the backend directly,
 which is exactly what the connector does once it has been paid.
@@ -189,9 +187,10 @@ devbox run build && devbox run test
 | `NODE_NOSTR_SECRET_KEY` | *required* | This node's Nostr identity (64 hex chars) |
 | `HANDLER_PORT` | `3300` | The job backend the connector proxies to |
 | `BLS_PORT` | `3400` | Health endpoint |
-| `STORE_TURBO_SOLANA_KEY` | *(free tier)* | Base58 Solana secret key; signs uploads and pays in $ARIO |
-| `STORE_ARWEAVE_JWK_B64` | *(free tier)* | Base64 Arweave JWK; the AR alternative to the above |
-| `STORE_TURBO_TOKEN` | `ario` | Token Turbo credits are quoted and bought in (`ario` or `arweave`) |
+| `STORE_TURBO_SOLANA_KEY` | *(free tier)* | Base58 Solana secret key: the one Turbo credential; signs and owns uploads, pays in $ARIO |
+| `STORE_TURBO_MAX_ARIO_PER_UPLOAD` | *(paid route off)* | Per-upload $ARIO ceiling for on-demand funding; setting it turns paid uploads ON |
+| `STORE_TURBO_SOLANA_NETWORK` | `mainnet` | Which Solana network (and $ARIO mint) paid uploads spend on; mismatch with the gateway refuses to start |
+| `STORE_TURBO_SOLANA_GATEWAY` | *(SDK default)* | Solana RPC for the $ARIO path; `devnet` requires one naming a devnet RPC |
 | `FEE_PER_JOB` | `10` | Advertised price per job |
 | `STORE_CONFIG_JSON` / `STORE_CONFIG_PATH` | — | Full config as JSON, in place of the variables above |
 | `LOG_LEVEL` | `info` | |

@@ -14,16 +14,6 @@ import type * as SdkModule from '@toon-protocol/sdk';
 
 vi.mock('@toon-protocol/sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof SdkModule>();
-  // Use a constructable class for TurboUploadAdapter so `new` works in tests.
-  class TurboUploadAdapterStub {
-    public client: unknown;
-    constructor(client: unknown) {
-      this.client = client;
-    }
-    async upload() {
-      return { txId: 'stub-tx' };
-    }
-  }
   return {
     ...actual,
     createNode: vi.fn(async () => ({
@@ -33,32 +23,24 @@ vi.mock('@toon-protocol/sdk', async (importOriginal) => {
       stop: vi.fn((): Promise<void> => Promise.resolve()),
     })),
     createArweaveDvmHandler: vi.fn(() => vi.fn()),
-    TurboUploadAdapter: TurboUploadAdapterStub,
     ChunkManager: vi.fn(() => ({})),
   };
 });
 
 // Mock @ardrive/turbo-sdk/node so we can introspect which path createTurboAdapter
 // took without doing real network / signer work.
-const ArweaveSignerCalls: { jwk: unknown }[] = [];
 const TurboFactoryCalls: { args: unknown }[] = [];
 const TurboFactoryUnauthCalls: { args: unknown }[] = [];
 vi.mock('@ardrive/turbo-sdk/node', () => {
-  class ArweaveSigner {
-    public jwk: unknown;
-    constructor(jwk: unknown) {
-      this.jwk = jwk;
-      ArweaveSignerCalls.push({ jwk });
-    }
-  }
   return {
-    ArweaveSigner,
     TurboFactory: {
       authenticated: vi.fn((args: unknown) => {
         TurboFactoryCalls.push({ args });
         return {
-          // Probe-friendly: tests can override per case via mockResolvedValueOnce.
-          getBalance: vi.fn(async () => ({ winc: '0' })),
+          upload: vi.fn(async () => ({ id: 'fake-txid' })),
+          // The sha256-shaped Turbo account address a token:'ario' client
+          // reports for its signing key (NOT the Solana pubkey).
+          signer: { getNativeAddress: vi.fn(async () => 'MNC4_fake_turbo_account') },
         };
       }),
       unauthenticated: vi.fn((args: unknown) => {
@@ -73,8 +55,7 @@ vi.mock('@ardrive/turbo-sdk/node', () => {
 import {
   createJobCounter,
   applyEnvOverlay,
-  resolveTurboCreditToken,
-  DEFAULT_TURBO_CREDIT_TOKEN,
+  refuseRetiredTurboCredentials,
   createTurboAdapter,
 } from './entrypoint-store.js';
 
@@ -224,161 +205,89 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ── createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution (Phase 4) ──
+// ── createTurboAdapter — ONE credential (store#128) ─────────────────────────
+//
+// The no-Arweave-wallet model. turbo-sdk maps `token: 'ario'` to a Solana
+// signer, so the key signs the data items and owns every upload made under
+// it. Format facts verified against turbo-sdk 1.42.0 while writing this:
+// despite the name, `HexSolanaSigner` wants BASE58 of the 64-byte secret
+// (87-88 chars), and the resulting account address is sha256-shaped
+// base64url, NOT the Solana pubkey.
 
-describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution', () => {
-  // A minimum-viable RSA JWK shape. We don't care about cryptographic validity
-  // — the mocked ArweaveSigner just records what it received.
-  const FAKE_JWK = {
-    kty: 'RSA',
-    n: Buffer.from('a'.repeat(64)).toString('base64url'),
-    e: 'AQAB',
-    d: 'd-value',
-    p: 'p-value',
-    q: 'q-value',
-    dp: 'dp-value',
-    dq: 'dq-value',
-    qi: 'qi-value',
-  };
-
+describe('createTurboAdapter — one Solana credential', () => {
   beforeEach(() => {
-    ArweaveSignerCalls.length = 0;
     TurboFactoryCalls.length = 0;
     TurboFactoryUnauthCalls.length = 0;
   });
-
-  it('STORE_ARWEAVE_JWK_B64 set + valid JWK → constructs ArweaveSigner-backed client', async () => {
-    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
-    const result = await createTurboAdapter(b64, undefined);
-
-    expect(result.source).toBe('arweave-jwk-b64');
-    expect(result.adapter).toBeDefined();
-    expect(result.client).toBeDefined();
-    expect(ArweaveSignerCalls).toHaveLength(1);
-    expect(ArweaveSignerCalls[0]?.jwk).toMatchObject({ kty: 'RSA' });
-    expect(TurboFactoryCalls).toHaveLength(1);
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
-    // Address must be derivable from the modulus n field.
-    expect(result.arweaveAddress).toBeDefined();
-    expect(typeof result.arweaveAddress).toBe('string');
-  });
-
-  it('STORE_ARWEAVE_JWK_B64 malformed base64 → clean error, no silent fallback', async () => {
-    // Provide a TURBO_TOKEN to prove we do NOT fall back to it.
-    const legacyToken = JSON.stringify(FAKE_JWK);
-    // `Buffer.from(..., 'base64')` doesn't throw on most non-base64 strings —
-    // it returns garbage bytes. So the malformed case is detected at the
-    // JSON.parse step. Pass clearly-non-JSON bytes.
-    const garbageB64 = Buffer.from('this is not json', 'utf-8').toString('base64');
-    await expect(createTurboAdapter(garbageB64, legacyToken)).rejects.toThrow(
-      /STORE_ARWEAVE_JWK_B64 does not decode to valid JSON/
-    );
-    // ArweaveSigner must NOT have been constructed (we bailed before).
-    expect(ArweaveSignerCalls).toHaveLength(0);
-  });
-
-  it('STORE_ARWEAVE_JWK_B64 missing RSA fields → clean error, no silent fallback', async () => {
-    const badJwk = { kty: 'EC', n: undefined };
-    const b64 = Buffer.from(JSON.stringify(badJwk), 'utf-8').toString('base64');
-    const legacyToken = JSON.stringify(FAKE_JWK);
-    await expect(createTurboAdapter(b64, legacyToken)).rejects.toThrow(
-      /missing required RSA JWK fields/
-    );
-    expect(ArweaveSignerCalls).toHaveLength(0);
-  });
-
-  it('STORE_ARWEAVE_JWK_B64 absent + TURBO_TOKEN set → legacy path used', async () => {
-    const legacyToken = JSON.stringify(FAKE_JWK);
-    const result = await createTurboAdapter(undefined, legacyToken);
-
-    expect(result.source).toBe('turbo-token-legacy');
-    expect(result.adapter).toBeDefined();
-    expect(result.client).toBeDefined();
-    // Legacy path uses `privateKey:` not the ArweaveSigner constructor.
-    expect(ArweaveSignerCalls).toHaveLength(0);
-    expect(TurboFactoryCalls).toHaveLength(1);
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ privateKey: expect.any(Object) });
-  });
-
-  it('Both absent → ephemeral JWK free-tier adapter (≤100KB uploads via TurboFactory.authenticated)', async () => {
-    const result = await createTurboAdapter(undefined, undefined);
-
-    expect(result.source).toBe('unauthenticated-free-tier');
-    expect(result.client).toBeDefined();
-    expect(result.arweaveAddress).toBeUndefined();
-    expect(ArweaveSignerCalls).toHaveLength(0);
-    // Free-tier path uses an ephemeral JWK via TurboFactory.authenticated() so
-    // Turbo accepts ≤100KB uploads without a funded wallet.
-    expect(TurboFactoryCalls).toHaveLength(1);
-    expect(TurboFactoryUnauthCalls).toHaveLength(0);
-    // Adapter is functional — does not throw on upload.
-    await expect(
-      result.adapter.upload({} as Parameters<typeof result.adapter.upload>[0])
-    ).resolves.toBeDefined();
-  });
-
-  it('Empty-string TURBO_TOKEN ("") → free tier, NOT a throwing/invalid-creds path (#146)', async () => {
-    // The deployed dvm container sets TURBO_TOKEN="" (len 0). An empty string
-    // must be treated as ABSENT and resolve to the free-tier uploader, never as
-    // "present but invalid" (which would reject kind:5094 with T00).
-    const result = await createTurboAdapter('', '');
-    expect(result.source).toBe('unauthenticated-free-tier');
-    expect(result.client).toBeDefined();
-    expect(ArweaveSignerCalls).toHaveLength(0);
-    expect(TurboFactoryCalls).toHaveLength(1);
-    await expect(
-      result.adapter.upload({} as Parameters<typeof result.adapter.upload>[0])
-    ).resolves.toBeDefined();
-  });
-
-  it('Whitespace-only creds ("  ") → free tier (trimmed to absent, no JSON.parse throw) (#146)', async () => {
-    const result = await createTurboAdapter('  ', '\n\t ');
-    expect(result.source).toBe('unauthenticated-free-tier');
-    expect(result.client).toBeDefined();
-    expect(ArweaveSignerCalls).toHaveLength(0);
-    expect(TurboFactoryCalls).toHaveLength(1);
-  });
-
-  // ── STORE_TURBO_SOLANA_KEY — paying for uploads in $ARIO ─────────────────
-  //
-  // The no-Arweave-wallet path. turbo-sdk maps `token: 'ario'` to a Solana
-  // signer, so this key signs the data items and owns every upload made under
-  // it. Format facts verified against turbo-sdk 1.42.0 while writing this:
-  // despite the name, `HexSolanaSigner` wants BASE58 of the 64-byte secret
-  // (87-88 chars), and the resulting account address is Arweave-shaped
-  // base64url, NOT the Solana pubkey.
 
   // 88 base58 chars, no 0/O/I/l — a well-formed stand-in, never a real key.
   const FAKE_SOLANA_KEY_B58 =
     '4wBqpZM9xaSheZzJSMawUHDgZ7miWfSsxmfVF5jJpYPBCyxTb1GKQ7VJXjHUxUHK2Wd8vVJDPTFVjKjLYPqEtWfN';
 
-  it('STORE_TURBO_SOLANA_KEY takes precedence and pays in $ARIO', async () => {
-    const result = await createTurboAdapter(
-      undefined,
-      undefined,
-      'ario',
-      FAKE_SOLANA_KEY_B58
-    );
+  it('STORE_TURBO_SOLANA_KEY → $ARIO client keyed by that key, with its Turbo account address', async () => {
+    const result = await createTurboAdapter(FAKE_SOLANA_KEY_B58);
     expect(result.source).toBe('ario-solana');
-    expect(result.token).toBe('ario');
-    // The key goes in as `privateKey`, not as an ArweaveSigner: turbo-sdk is
-    // what turns it into a Solana signer, keyed off the token.
-    expect(ArweaveSignerCalls).toHaveLength(0);
+    // The key goes in as `privateKey`: turbo-sdk is what turns it into a
+    // Solana signer, keyed off the token.
+    expect(TurboFactoryCalls).toHaveLength(1);
     expect(TurboFactoryCalls[0]?.args).toMatchObject({
       privateKey: FAKE_SOLANA_KEY_B58,
       token: 'ario',
     });
+    expect(result.arweaveAddress).toBe('MNC4_fake_turbo_account');
   });
 
-  it('prefers the Solana key over a JWK, and says so', async () => {
-    // Both set is a migration state, not a config error — but it silently
-    // changes which wallet OWNS the uploads, so it must not pass quietly.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
-    const result = await createTurboAdapter(b64, undefined, 'ario', FAKE_SOLANA_KEY_B58);
+  it('hands the stated Solana gateway to turbo-sdk', async () => {
+    // store#123: the gateway is where turbo-sdk picks its mint from, so the
+    // validated URL must actually reach the constructed client -- a validation
+    // that never flows into the construction protects nothing.
+    const result = await createTurboAdapter(
+      FAKE_SOLANA_KEY_B58,
+      'https://solana-rpc.publicnode.com'
+    );
     expect(result.source).toBe('ario-solana');
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('STORE_ARWEAVE_JWK_B64'));
-    warn.mockRestore();
+    expect(TurboFactoryCalls[0]?.args).toMatchObject({
+      gatewayUrl: 'https://solana-rpc.publicnode.com',
+    });
+  });
+
+  it('omits gatewayUrl when none is stated, keeping the SDK default', async () => {
+    const result = await createTurboAdapter(FAKE_SOLANA_KEY_B58);
+    expect(result.source).toBe('ario-solana');
+    expect(
+      Object.keys(TurboFactoryCalls[0]?.args as Record<string, unknown>)
+    ).not.toContain('gatewayUrl');
+  });
+
+  it('no key → ephemeral Solana key, free tier only, still an authenticated $ARIO client', async () => {
+    // Turbo grants free small-data-item uploads to any valid signer, so a
+    // keyless box degrades to the free tier rather than dying (#146's spirit,
+    // now on a Solana key: one signer kind everywhere).
+    const result = await createTurboAdapter(undefined);
+    expect(result.source).toBe('ephemeral-free-tier');
+    expect(result.arweaveAddress).toBeUndefined();
+    expect(TurboFactoryCalls).toHaveLength(1);
+    expect(TurboFactoryUnauthCalls).toHaveLength(0);
+    const args = TurboFactoryCalls[0]?.args as { privateKey?: string; token?: string };
+    expect(args.token).toBe('ario');
+    // A freshly generated 64-byte secret, base58: 87-88 chars, never the
+    // configured-key path's undefined.
+    expect(args.privateKey).toMatch(/^[1-9A-HJ-NP-Za-km-z]{86,89}$/);
+  });
+
+  it('an ephemeral key is generated fresh per call (it must not be fundable)', async () => {
+    await createTurboAdapter(undefined);
+    await createTurboAdapter('');
+    const a = (TurboFactoryCalls[0]?.args as { privateKey?: string }).privateKey;
+    const b = (TurboFactoryCalls[1]?.args as { privateKey?: string }).privateKey;
+    expect(a).not.toBe(b);
+  });
+
+  it('empty and whitespace-only keys are ABSENT, not invalid (#146)', async () => {
+    // A here-doc env file can leave a trailing newline behind; that must
+    // resolve to the free tier, never to a base58 error.
+    expect((await createTurboAdapter('')).source).toBe('ephemeral-free-tier');
+    expect((await createTurboAdapter('  \n\t ')).source).toBe('ephemeral-free-tier');
   });
 
   it('rejects a hex Solana key with a message that names the fix', async () => {
@@ -386,102 +295,47 @@ describe('createTurboAdapter — STORE_ARWEAVE_JWK_B64 + TURBO_TOKEN resolution'
     // repo, so reaching for that value here is the obvious mistake. Without
     // this check it surfaces as "Non-base58 character" from inside turbo-sdk.
     const hex = 'a'.repeat(128);
-    await expect(
-      createTurboAdapter(undefined, undefined, 'ario', hex)
-    ).rejects.toThrow(/base58/);
+    await expect(createTurboAdapter(hex)).rejects.toThrow(/base58/);
   });
 
   it('rejects a base58 key of the wrong length', async () => {
-    await expect(
-      createTurboAdapter(undefined, undefined, 'ario', 'abcdef')
-    ).rejects.toThrow(/64-byte/);
+    await expect(createTurboAdapter('abcdef')).rejects.toThrow(/64-byte/);
+  });
+});
+
+// ── refuseRetiredTurboCredentials — the removed paths refuse, not degrade ───
+
+describe('refuseRetiredTurboCredentials', () => {
+  it('accepts a clean environment, and the vestigial STORE_TURBO_TOKEN=ario', () => {
+    expect(() => refuseRetiredTurboCredentials({})).not.toThrow();
+    expect(() =>
+      refuseRetiredTurboCredentials({ STORE_TURBO_TOKEN: 'ario' })
+    ).not.toThrow();
+    // Empty strings are absent, the rule every credential var follows (#146).
+    expect(() =>
+      refuseRetiredTurboCredentials({
+        STORE_ARWEAVE_JWK_B64: '',
+        TURBO_TOKEN: '  ',
+        STORE_TURBO_TOKEN: '',
+      })
+    ).not.toThrow();
   });
 
-  it('refuses a Solana key paired with a non-ario token', async () => {
-    // A Solana key is only a credential for the ario token; the pair is a
-    // contradiction, and guessing which half the operator meant is worse than
-    // refusing.
-    await expect(
-      createTurboAdapter(undefined, undefined, 'arweave', FAKE_SOLANA_KEY_B58)
-    ).rejects.toThrow(/STORE_TURBO_SOLANA_KEY pays in \$ARIO/);
+  it('refuses a configured JWK by name, with the migration path', () => {
+    // Silently ignoring it would boot a node whose operator believes a
+    // specific funded wallet signs its uploads.
+    expect(() =>
+      refuseRetiredTurboCredentials({ STORE_ARWEAVE_JWK_B64: 'eyJrdHkiOiJSU0EifQ==' })
+    ).toThrow(/STORE_ARWEAVE_JWK_B64.*removed.*STORE_TURBO_SOLANA_KEY/s);
+    expect(() =>
+      refuseRetiredTurboCredentials({ TURBO_TOKEN: '{"kty":"RSA"}' })
+    ).toThrow(/TURBO_TOKEN.*removed/s);
   });
 
-  it('falls through to the JWK when no Solana key is set', async () => {
-    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
-    const blank = await createTurboAdapter(b64, undefined, 'ario', '   ');
-    expect(blank.source).toBe('arweave-jwk-b64');
-  });
-
-  // ── $ARIO credits (owner decision 2026-08-28) ────────────────────────────
-  //
-  // `token` picks the CURRENCY credits are quoted and bought in, not the
-  // signer: every path below still signs with the Arweave JWK, so the address
-  // that owns the data items and holds the balance does not move when this
-  // flips. Verified against live Turbo while making the switch: 1 MiB costs
-  // the same 11,600,114,792 winc under both tokens (0.0178 AR / 26.59 ARIO).
-
-  it('defaults to $ARIO credits when STORE_TURBO_TOKEN is unset', () => {
-    expect(DEFAULT_TURBO_CREDIT_TOKEN).toBe('ario');
-    expect(resolveTurboCreditToken(undefined)).toBe('ario');
-    // Empty and whitespace-only are ABSENT, not invalid — same rule the JWK
-    // and TURBO_TOKEN vars follow (#146), because a here-doc env file can
-    // leave a trailing newline behind.
-    expect(resolveTurboCreditToken('')).toBe('ario');
-    expect(resolveTurboCreditToken('   \n\t ')).toBe('ario');
-  });
-
-  it('honours an explicit STORE_TURBO_TOKEN, trimmed', () => {
-    expect(resolveTurboCreditToken('arweave')).toBe('arweave');
-    expect(resolveTurboCreditToken('  ario\n')).toBe('ario');
-  });
-
-  it('refuses an unrecognised STORE_TURBO_TOKEN instead of falling back', () => {
-    // TurboFactory itself accepts the whole turbo-sdk union (solana, ethereum,
-    // usdc, kyve, ...), so a wrong-but-plausible value would construct a client
-    // denominated in a token nobody funded. That surfaces much later as
-    // uploads failing for "no credits" against a balance that reads fine, so
-    // it fails at boot by name instead.
-    expect(() => resolveTurboCreditToken('solana')).toThrow(/STORE_TURBO_TOKEN/);
-    expect(() => resolveTurboCreditToken('ARIO')).toThrow(/must be one of/);
-  });
-
-  it('passes the credit token to Turbo on every credential path', async () => {
-    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
-
-    const jwkPath = await createTurboAdapter(b64, undefined, 'ario');
-    expect(jwkPath.token).toBe('ario');
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
-
-    TurboFactoryCalls.length = 0;
-    const legacy = await createTurboAdapter(undefined, JSON.stringify(FAKE_JWK), 'ario');
-    expect(legacy.token).toBe('ario');
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
-
-    // The free tier is denominated too: its ephemeral wallet cannot be funded,
-    // but the boot log must not claim a token the other paths would not use.
-    TurboFactoryCalls.length = 0;
-    const free = await createTurboAdapter(undefined, undefined, 'ario');
-    expect(free.source).toBe('unauthenticated-free-tier');
-    expect(free.token).toBe('ario');
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'ario' });
-  });
-
-  it('still supports arweave-denominated credits for a box that has not migrated', async () => {
-    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
-    const result = await createTurboAdapter(b64, undefined, 'arweave');
-    expect(result.token).toBe('arweave');
-    expect(TurboFactoryCalls[0]?.args).toMatchObject({ token: 'arweave' });
-    // The signer is the JWK either way — switching currency must not move the
-    // address that owns the uploads.
-    expect(ArweaveSignerCalls).toHaveLength(1);
-    expect(result.arweaveAddress).toBeDefined();
-  });
-
-  it('DVM AR address is non-empty when JWK source resolves (feed-through for boot-log)', async () => {
-    const b64 = Buffer.from(JSON.stringify(FAKE_JWK), 'utf-8').toString('base64');
-    const result = await createTurboAdapter(b64, undefined);
-    expect(result.arweaveAddress).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(result.arweaveAddress?.length).toBeGreaterThan(10);
+  it('refuses a non-ario STORE_TURBO_TOKEN', () => {
+    expect(() =>
+      refuseRetiredTurboCredentials({ STORE_TURBO_TOKEN: 'arweave' })
+    ).toThrow(/\$ARIO only/);
   });
 });
 
