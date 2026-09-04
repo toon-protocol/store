@@ -21,7 +21,7 @@ Cross-cutting agent skills, docs, and the canonical project context live in **[t
 /plugin marketplace add toon-protocol/toon-meta
 /plugin install toon-skills@toon-meta
 ```
-Canonical rules/decisions: `toon-meta` → `_bmad-output/project-context.md`.
+Canonical rules/decisions: `toon-meta` → `context/context.md`.
 
 ## Cross-repo dependencies
 - Consumes `@toon-protocol/{core,sdk}` from **npm** (pinned semver) — the Arweave handler lives in `sdk`.
