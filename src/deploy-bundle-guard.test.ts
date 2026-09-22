@@ -210,7 +210,7 @@ const TERMINATED_PREFIX = 'g.toon.store';
 // (`g.toon.store.relay`) forwarded for free on that build. Bumping this
 // literal and the compose tag in one reviewed commit is how the connector
 // moves now.
-const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.08.28.1';
+const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.11.1';
 
 // Moved by publish-store-image.yml on every green main, watched by Watchtower.
 const EXPECTED_STORE_IMAGE = 'ghcr.io/toon-protocol/store:release';
