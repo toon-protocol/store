@@ -19,7 +19,11 @@
 #   * after `up -d` the connector must reach `healthy`, or this exits non-zero
 #     so `systemctl status` and the journal show it. A box that comes back
 #     unhealthy is also picked up by the connector repo's fleet-health.yml,
-#     which opens a needs:human issue.
+#     which opens a needs:human issue;
+#   * a render or apply failure is retried, and reported, on every run until
+#     it is fixed -- never silently sat on with the box left on the new
+#     commit and the old config (TOON_Network#164, porting TOON_Network#160;
+#     see `deploy/.applied`, below the fetch, for how).
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -57,8 +61,10 @@ fingerprint_connector_inputs() {
       2>/dev/null || true; } | sha256sum | awk '{print $1}'
 }
 
-# One apply at a time, and never one racing a human.
-exec 9>/var/lock/toon-auto-apply.lock
+# One apply at a time, and never one racing a human. The path is overridable
+# only for tests (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
+LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply.lock}
+exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another apply is already running; leaving it alone"; exit 0; }
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -70,12 +76,40 @@ fi
 git fetch -q origin main
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
-if [ "$LOCAL" = "$REMOTE" ]; then
-  exit 0   # nothing merged since last time; the quiet, common case
+
+# The commit the LAST run applied AND VERIFIED, held separately from HEAD
+# (TOON_Network#160, ported here as TOON_Network#164). Without it,
+# "LOCAL = REMOTE" alone reads as "nothing to do" even when the PREVIOUS run
+# fast-forwarded here and then failed partway through -- render.sh, the pull,
+# `up -d`, or the health/activation checks below -- which leaves the box
+# sitting on the new commit with the OLD rendered config and the OLD
+# containers, reporting success on every run after. Comparing HEAD to
+# `.applied` instead of to what was just fetched means a fetch that brings
+# back nothing new is still retried as work when the two disagree.
+#
+# Missing entirely -- an existing box's first run under this check, or one
+# whose `deploy/.applied` was lost -- is read the SAFER of the two ways: as
+# needing an apply, not as "must already be applied". Re-running the full
+# apply against a box already on the right commit with healthy containers is
+# a harmless no-op (the fingerprint and the `GET /ilp` comparison below find
+# nothing to change), where guessing the other way would paper over a first
+# apply that had in fact failed before this file ever existed. bootstrap.sh
+# deliberately does not write it either: the box's first-ever apply IS this
+# script's first run, and it should prove itself exactly like every later
+# one does.
+APPLIED_FILE="$DEPLOY_DIR/.applied"
+APPLIED=$(cat "$APPLIED_FILE" 2>/dev/null || true)
+
+if [ "$LOCAL" = "$REMOTE" ] && [ "$LOCAL" = "$APPLIED" ]; then
+  exit 0   # nothing merged since last time, and it is already applied
 fi
 
-echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7}"
-git merge --ff-only origin/main
+if [ "$LOCAL" != "$REMOTE" ]; then
+  echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7}"
+  git merge --ff-only origin/main
+else
+  echo "retrying ${LOCAL:0:7}: the last apply did not finish (deploy/.applied is '${APPLIED:-<none>}')"
+fi
 
 cd "$DEPLOY_DIR"
 # This bundle's connector.toml is RENDERED from connector.toml.template and
@@ -102,7 +136,17 @@ cd "$DEPLOY_DIR"
 # this, so on a quiet repo a stale box waits for the next merge, not the
 # next timer tick.
 SUM_BEFORE=$(fingerprint_connector_inputs)
+set +e
 [ -x ./render.sh ] && ./render.sh
+RENDER_STATUS=$?
+set -e
+if [ -x ./render.sh ] && [ "$RENDER_STATUS" != 0 ]; then
+  echo "FAILED: render.sh could not render the config for ${REMOTE:0:7} (its message is" >&2
+  echo "above). If it names a missing .env variable, add it -- deploy/.env.example lists" >&2
+  echo "every required one. deploy/.applied is left naming the last commit that DID apply," >&2
+  echo "so this is retried, and reported the same way, on every run, until it is fixed." >&2
+  exit 1
+fi
 SUM_AFTER=$(fingerprint_connector_inputs)
 
 # The overlay set this box actually runs. Keep in step with README.md. This box
@@ -116,8 +160,16 @@ COMPOSE=(-f docker-compose.yml)
 # be bounced a second time for the same change.
 CONNECTOR_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q connector || true)
 
-docker compose "${COMPOSE[@]}" pull
-docker compose "${COMPOSE[@]}" up -d
+if ! docker compose "${COMPOSE[@]}" pull; then
+  echo "FAILED: 'docker compose pull' could not get the images for ${REMOTE:0:7} (its message" >&2
+  echo "is above). deploy/.applied is left naming the last commit that DID apply, so this is" >&2
+  echo "retried, and reported the same way, on every run, until it is fixed." >&2
+  exit 1
+fi
+if ! docker compose "${COMPOSE[@]}" up -d; then
+  echo "FAILED: 'docker compose up -d' failed for ${REMOTE:0:7} (its message is above)." >&2
+  exit 1
+fi
 
 # The connector must reach `healthy`. Every node bundle defines a healthcheck
 # on it (GET /ilp/identity), so this is a real answer rather than "the
@@ -150,9 +202,11 @@ wait_connector_healthy || exit 1
 # A curl failure is a FAILURE of this function (distinct exit), never an empty
 # address list: an unreachable /ilp must be reported as unreachable, not as a
 # config mismatch. The curl retries a few times first: a run that dies on one
-# connection blip exits 1 once, and every later timer run exits 0 at the
-# LOCAL=REMOTE gate -- one red apply, then green forever on an unverified box.
-# Retries make that state need a real outage, not a blip.
+# connection blip fails loudly, and -- since TOON_Network#164 -- so does every
+# later timer run, because the gate above compares HEAD to deploy/.applied,
+# not to LOCAL=REMOTE. (Before that fix this used to be a one red apply, then
+# green forever on an unverified box; retries alone were the only thing
+# standing between a blip and that silent, unverified state.)
 # The port sed matches the single-quoted '127.0.0.1:N:M' publish rows and
 # takes the first, which is the connector's -- the only loopback-published
 # service in every node bundle. The 4000 fallback matches the committed file.
@@ -227,5 +281,10 @@ if [ -x ./render.sh ]; then
     exit 1
   fi
 fi
+
+# Written only now, after render, the pull, `up -d`, the health wait and (for
+# a bundle that renders) the activation check have all succeeded -- the one
+# thing this file is allowed to claim. Gitignored (deploy/.gitignore).
+printf '%s\n' "$REMOTE" > "$APPLIED_FILE"
 
 echo "applied ${REMOTE:0:7}; connector healthy, rendered config verified live."

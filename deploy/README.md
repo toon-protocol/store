@@ -314,10 +314,43 @@ into a node, which is the posture connector ADR 0068 settled — and it refuses
 to touch a box whose working tree is dirty, so a human mid-operation is never
 overwritten.
 
+### How updates arrive: a failed render or apply is retried, never sat on
+
+**A render or apply failure is retried, and reported, forever — never
+silently sat on (TOON_Network#164, porting TOON_Network#160).** Before this,
+`auto-apply.sh` fast-forwarded the checkout and only then rendered and
+applied — so a `render.sh`, pull or health-check failure after a good
+fast-forward left the box on the new commit with the OLD rendered config and
+containers, and the NEXT run's `git fetch` brought back nothing new, so
+`LOCAL = REMOTE` alone read as "nothing to do" and it exited 0 silently: one
+red apply, then green forever on an unverified box (this file used to say so
+in a comment; it no longer needs to).
+
+The fix is `deploy/.applied` (gitignored). Once render, the pull, `up -d`,
+the health wait and the activation check have all succeeded, `auto-apply.sh`
+records the commit it just applied there. The *next* run compares `HEAD` to
+`.applied`, not to whatever `git fetch` just brought back — so a failure
+anywhere in that chain leaves `.applied` naming the OLD commit, and the very
+next timer tick treats that as work to do even though the fetch brings back
+nothing new. It fails the same way, by the same name, on every run —
+`systemctl status` and the journal keep showing it — until whatever failed
+(most often a newly-required `.env` variable; `.env.example` lists every one)
+is fixed and a run finally succeeds and rewrites `.applied`.
+
+On a box with no `deploy/.applied` yet — an existing box's first run under
+this check, or one where the file was lost — that absence is read as
+*needing* an apply, not as "must already be applied": the run re-renders,
+re-verifies and writes `.applied` once everything reports healthy. That run
+is a harmless no-op if the box was already caught up (nothing on disk or in
+the running connector has anything to change), which is why treating a
+missing file this way, rather than having `bootstrap.sh` write it, is the
+safer of the two: the box's first-ever apply IS this script's first run, and
+it should prove itself exactly like every later one does.
+
 | File | What it is |
 |---|---|
 | `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
-| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, activates the render with a connector restart when needed, and requires the connector to come back healthy serving the rendered config. |
+| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, activates the render with a connector restart when needed, requires the connector to come back healthy serving the rendered config, and retries a failed render or apply on every run until it is fixed. |
 | `toon-auto-apply.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
 
 The split is deliberate: the workflow decides **what** to run and proves it
