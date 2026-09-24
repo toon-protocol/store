@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 connector.toml
+# The last commit auto-apply.sh applied AND verified (TOON_Network#164).
+.applied
 operator-bearer.token
 operator-write.keys
 nginx/conf.d/
