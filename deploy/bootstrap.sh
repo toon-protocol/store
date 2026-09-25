@@ -47,11 +47,25 @@ docker compose pull --ignore-pull-failures
 docker compose up -d
 
 echo "==> [6/6] TLS"
+# Under the shared-edge overlay (COMPOSE_FILE names
+# docker-compose.shared-edge.yml, store#137) nginx and certbot are
+# disabled and the shared edge terminates TLS instead (infra#24) --
+# init-letsencrypt.sh detects that itself and no-ops, so this always calls
+# it rather than duplicating the check.
 ./init-letsencrypt.sh
 
 set -a; . ./.env; set +a
 echo
-echo "store box up."
-echo "  paid ILP edge : https://proxy.ario.${DOMAIN}/ilp"
-echo "  identity      : https://proxy.ario.${DOMAIN}/ilp/identity"
-echo "  health        : https://dvm.${DOMAIN}/health"
+case ":${COMPOSE_FILE:-}:" in
+  *:docker-compose.shared-edge.yml:*)
+    echo "store box up, behind the shared edge (nginx/certbot disabled)."
+    echo "  Joined to the external \"edge-store\" network -- see deploy/README.md"
+    echo "  \"Running behind the shared edge\" for the alias:port table."
+    ;;
+  *)
+    echo "store box up."
+    echo "  paid ILP edge : https://proxy.ario.${DOMAIN}/ilp"
+    echo "  identity      : https://proxy.ario.${DOMAIN}/ilp/identity"
+    echo "  health        : https://dvm.${DOMAIN}/health"
+    ;;
+esac

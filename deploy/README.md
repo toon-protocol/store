@@ -38,6 +38,7 @@ runs is here: the payment proxy, the job backend, TLS and unattended updates. `.
 | `render.sh` | Fills the templates in from `.env`, and writes the operator surface's two credential files — `operator-bearer.token` and `operator-write.keys` — from `OPERATOR_BEARER_TOKEN` and `OPERATOR_WRITE_KEY`. |
 | `bootstrap.sh` | Fresh-host install: firewall, docker, render, start, TLS. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
+| `docker-compose.shared-edge.yml` | The overlay that runs this box behind the devnet host's shared edge instead of its own nginx (infra#24). Off by default. § "Running behind the shared edge". |
 | `.env.example` | Every variable, with what it is and how to generate it. |
 
 `.env`, the rendered `connector.toml`, `operator-bearer.token`,
@@ -164,6 +165,91 @@ generate your own `signer.key` — that key *is* your node's identity.
 Point `docker-compose.yml`'s `store` service at your own image, keep the
 health endpoint so compose can tell when it is ready, and the rest of this
 directory works unchanged.
+
+## Running behind the shared edge
+
+The devnet is moving onto one Linode, shared by the relay, store, gas
+station, workload gateway and faucet nodes, behind one Caddy **edge** that
+owns ports 80 and 443 (infra#24, infra ADR 0001). This box keeps its own
+connector, keys and hostnames — only its own TLS front (`nginx` + `certbot`)
+goes away.
+
+Turn it on with two lines in `.env`, the same pattern as the provider's
+`docker-compose.hidden.yml`:
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
+```
+
+`docker compose` reads `COMPOSE_FILE` from `.env` itself, so every `docker
+compose` command run in this directory — `auto-apply.sh`'s included — sees
+the merged stack; a `.env` with no `COMPOSE_FILE` line runs
+`docker-compose.yml` alone, exactly as before this overlay existed.
+`bootstrap.sh` and `init-letsencrypt.sh` detect it the same way and skip
+issuing or renewing a certificate for this box.
+
+`docker-compose.shared-edge.yml`:
+
+- disables `nginx`, `certbot` and `watchtower` (`profiles: [disabled]` — a
+  profile nothing ever activates). Watchtower is not missed:
+  `auto-apply.sh` already pulls the pinned `store`/`connector` images
+  unattended.
+- joins `connector` and `store` to the **external** Docker network
+  `edge-store` (one of five per-node networks the infra#24 edge project
+  creates — `edge-relay`, `edge-store`, `edge-gas`, `edge-gateway`,
+  `edge-faucet` — with Caddy alone joining all five) under stable aliases.
+  Each node on its own network, rather than one flat network everyone
+  shares, is what keeps this box's connector unreachable from every other
+  node on the host — only the edge itself can reach in.
+- adds a `mem_limit` to every service — provisional, pending real
+  measurements (infra#25 step 2).
+
+### The alias:port table infra#24's edge config is written from
+
+Worked out from `nginx/node.conf.template` — what nginx does today for each
+hostname, which the edge's config has to replicate:
+
+| Hostname | Edge upstream | Container:port | What it serves |
+|---|---|---|---|
+| `proxy.ario.${DOMAIN}` | `store-proxy:4000` | `connector:4000` | the paid ILP edge |
+| `dvm.${DOMAIN}` | `store-dvm:3400` | `store:3400` | health (`BLS_PORT`) |
+
+### What nginx does beyond plain proxying — the edge must replicate this
+
+A storage node's uploads make the body-size cap and the timeout matter more
+than they would for a typical proxy:
+
+- **`client_max_body_size 4m`** on both hostnames. A single `POST /store`
+  upload above this is refused with `413` before it reaches the connector or
+  the store at all.
+- **`proxy_read_timeout 1h`** on both hostnames — a large upload settling
+  through the connector on to Turbo can legitimately run long; the edge's
+  default timeout (Caddy's is far shorter) would sever it mid-upload.
+- **Rate limiting**: `limit_req_zone … rate=200r/s` keyed on the client IP,
+  applied with `burst=400 nodelay` on every location.
+- **CORS on `GET /ilp/identity` only**: `Access-Control-Allow-Origin:
+  https://proxy.${DOMAIN}` plus `Vary: Origin`. No other location sets a CORS
+  header.
+- **`location ^~ /admin { return 404; }`** on both hostnames — nothing behind
+  either upstream exposes an admin surface publicly, and nginx refuses to
+  even proxy the path.
+- **`X-Forwarded-For` and `X-Forwarded-Proto: https`** are set on every
+  proxied request, and the `Upgrade`/`Connection` headers are forwarded so a
+  WebSocket upgrade survives the hop (this box has no WebSocket route today,
+  but the header pass-through is unconditional in the template).
+- **A resolver instead of a config-parse-time DNS lookup**
+  (`resolver 127.0.0.11 valid=10s`) is nginx's own fix for Watchtower
+  recreating a container at a new address; it has no equivalent to replicate
+  on the edge side, since the edge reaches this box's containers by the
+  stable `edge-store` network alias, not by an address that moves.
+
+### What must not change without the overlay
+
+`docker-compose.yml` itself is untouched by this issue: a `.env` with no
+`COMPOSE_FILE` line runs exactly the six-container bundle described at the
+top of this file, `nginx` still owns 80 and 443, and nothing carries a
+`mem_limit` or an `edge-store` network membership. `deploy/docker-compose.shared-edge.test.ts`
+guards both shapes against the real `docker compose config`.
 
 ## Privacy invariant
 
@@ -351,20 +437,40 @@ it should prove itself exactly like every later one does.
 |---|---|
 | `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
 | `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, activates the render with a connector restart when needed, requires the connector to come back healthy serving the rendered config, and retries a failed render or apply on every run until it is fixed. |
-| `toon-auto-apply.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
+| `toon-auto-apply-store.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
 
 The split is deliberate: the workflow decides **what** to run and proves it
 accepts this node's config first; the box decides **when** to apply, by
 pulling. Nothing outside this box can make this box deploy.
 
+The unit pair is named per node (`toon-auto-apply-store.*`, shared contract
+v2) rather than `toon-auto-apply.*`, because the shared-edge host runs five
+of these side by side — a name common to every node could only mean one
+timer, one service and one lock file for all of them, when each node needs
+its own. The lock path in `auto-apply.sh` follows the same rule
+(`/var/lock/toon-auto-apply-store.lock`).
+
 Install the timer once per box:
 
 ```bash
-sudo cp /root/store/deploy/toon-auto-apply.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply.timer
-systemctl list-timers toon-auto-apply.timer     # when it next fires
-journalctl -u toon-auto-apply.service -n 50     # what it last did
-systemctl start toon-auto-apply.service         # run one now, by hand
+sudo cp /root/store/deploy/toon-auto-apply-store.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply-store.timer
+systemctl list-timers toon-auto-apply-store.timer     # when it next fires
+journalctl -u toon-auto-apply-store.service -n 50     # what it last did
+systemctl start toon-auto-apply-store.service         # run one now, by hand
+```
+
+**Migrating an existing box (infra#25 cutover).** A single-node Linode
+already running the old `toon-auto-apply.timer` keeps working unmodified —
+it points at the same `auto-apply.sh` path, which has not moved, so nothing
+breaks if it is left alone. Once that node moves onto the shared host, do
+the one-time swap so its unit name no longer collides with any other node's:
+
+```bash
+sudo systemctl disable --now toon-auto-apply.timer
+sudo rm /etc/systemd/system/toon-auto-apply.{service,timer}
+sudo cp /root/store/deploy/toon-auto-apply-store.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now toon-auto-apply-store.timer
 ```
 
 The pin is still the only place a connector build is named here, and it is

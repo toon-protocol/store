@@ -1,5 +1,5 @@
 [Unit]
-Description=Apply the merged TOON node bundle (fast-forward, render, compose up)
+Description=Apply the merged TOON store bundle (fast-forward, render, compose up)
 Documentation=https://github.com/toon-protocol/store/blob/main/deploy/README.md
 After=docker.service network-online.target
 Requires=docker.service

@@ -27,6 +27,7 @@
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -344,5 +345,69 @@ describe('a box with no deploy/.applied at all', () => {
       result.calls,
       'it actually ran the apply, not a silent no-op'
     ).toMatch(/ps -q connector/);
+  });
+});
+
+describe('the shared-edge overlay (store#137, infra#24)', () => {
+  it('never hard-codes which compose files to use -- COMPOSE_FILE in .env decides, not a -f flag', () => {
+    // The bug this guards: an earlier version built its own
+    // `COMPOSE=(-f docker-compose.yml ...)` array by checking which override
+    // files existed on disk, which silently ignored .env's COMPOSE_FILE and
+    // would apply the base stack underneath a box that had switched to the
+    // shared-edge overlay. `docker compose` reads COMPOSE_FILE out of .env
+    // itself, so the fix is for this script to pass no -f flags at all --
+    // asserted here on the ACTUAL arguments the stub recorded, not on the
+    // script's source text, so a regression that reintroduces a hard-coded
+    // -f is caught even if it is spelled differently.
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, {
+      ...ENV,
+      COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml',
+    });
+
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(
+      result.calls,
+      'auto-apply.sh must never pass its own -f flag to docker compose'
+    ).not.toMatch(/(^|\s)-f(\s|$)/);
+  });
+});
+
+describe('per-node systemd unit and lock naming (shared contract v2, infra#25)', () => {
+  // Several nodes can live on one shared host, each running its own
+  // auto-apply.sh on its own timer -- a name common to every node (the old
+  // `toon-auto-apply.*`) could only mean one timer, one service and one lock
+  // file host-wide. These assert the store's own naming directly, rather
+  // than executing the units (systemd is not available in this sandbox).
+
+  it("defaults the flock path to this node's own name", () => {
+    const script = readFileSync(join(HERE, 'auto-apply.sh'), 'utf8');
+    expect(script).toMatch(
+      /LOCK_FILE=\$\{TOON_AUTOAPPLY_LOCK:-\/var\/lock\/toon-auto-apply-store\.lock\}/
+    );
+    expect(script, 'the old, node-less lock path must be gone').not.toMatch(
+      /\/var\/lock\/toon-auto-apply\.lock/
+    );
+  });
+
+  it("ships toon-auto-apply-store.service pointing at this bundle's auto-apply.sh", () => {
+    const unit = readFileSync(join(HERE, 'toon-auto-apply-store.service'), 'utf8');
+    expect(unit).toMatch(/^ExecStart=.*\/deploy\/auto-apply\.sh\s*$/m);
+  });
+
+  it('ships toon-auto-apply-store.timer wired to the same-named service', () => {
+    const timer = readFileSync(join(HERE, 'toon-auto-apply-store.timer'), 'utf8');
+    expect(timer).toMatch(/^Unit=toon-auto-apply-store\.service\s*$/m);
+  });
+
+  it('no longer ships the old, node-less unit names', () => {
+    for (const name of ['toon-auto-apply.service', 'toon-auto-apply.timer']) {
+      expect(
+        existsSync(join(HERE, name)),
+        `${name} should have been renamed to its per-node form`
+      ).toBe(false);
+    }
   });
 });

@@ -11,6 +11,21 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 set -a; . ./.env; set +a
+
+# Under the shared-edge overlay (docker-compose.shared-edge.yml,
+# store#137) nginx and certbot are disabled -- the shared edge
+# terminates TLS for every node on the host (infra#24), so there is no
+# certificate for this box to issue or renew. Detected the same way
+# docker compose itself picks the overlay up: COMPOSE_FILE in .env.
+case ":${COMPOSE_FILE:-}:" in
+  *:docker-compose.shared-edge.yml:*)
+    echo "==> COMPOSE_FILE names docker-compose.shared-edge.yml: nginx and certbot are"
+    echo "    disabled under the shared edge overlay. TLS terminates at the shared edge"
+    echo "    (deploy/README.md, infra#24) -- nothing to issue or renew here."
+    exit 0
+    ;;
+esac
+
 : "${DOMAIN:?set DOMAIN in .env}"
 : "${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env}"
 
