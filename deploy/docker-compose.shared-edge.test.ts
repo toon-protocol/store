@@ -39,6 +39,7 @@ interface ComposeService {
   profiles?: string[];
   ports?: ComposePort[];
   networks?: Record<string, { aliases?: string[] } | null>;
+  environment?: Record<string, string>;
 }
 
 interface ComposeConfig {
@@ -145,7 +146,7 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
     expect(merged.services['store']?.networks?.['default']).toBeDefined();
   });
 
-  it('gives every one of its services a mem_limit, marked provisional', () => {
+  it('gives every one of its services a mem_limit', () => {
     const names = Object.keys(overlayYaml.services);
     expect(names.sort()).toEqual(
       ['certbot', 'connector', 'nginx', 'store', 'watchtower'].sort()
@@ -155,23 +156,44 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
         /^\d+[mg]$/i
       );
     }
-    expect(
-      readFileSync(`${deployDir}${OVERLAY}`, 'utf8'),
-      'the mem_limit values must be flagged as provisional, pending real measurements'
-    ).toMatch(/provisional/i);
   });
 
-  it("does not undercut the store's own NODE_OPTIONS heap cap", () => {
-    // docker-compose.yml caps the store's V8 heap at 384 MB
-    // (--max-old-space-size=384); a container mem_limit at or below that
-    // leaves no room for the non-heap part of the process and the box OOM
-    // kills it under any real load.
-    const baseCompose = readFileSync(`${deployDir}${BASE}`, 'utf8');
-    const heapCapMatch = baseCompose.match(/--max-old-space-size=(\d+)/);
-    expect(heapCapMatch, 'docker-compose.yml must still cap the store heap').not.toBeNull();
+  it('marks the disabled proxy services\' limits as still provisional, and the active ones as measured', () => {
+    // `connector` and `store` are sized from real idle `docker stats`
+    // (infra#25 step 2); `nginx`, `certbot` and `watchtower` are disabled on
+    // this box and were never re-measured, so their old provisional
+    // wording must stay put rather than being blanket-replaced.
+    const overlayText = readFileSync(`${deployDir}${OVERLAY}`, 'utf8');
+    expect(
+      overlayText,
+      'the disabled services\' limits must still be flagged as provisional'
+    ).toMatch(/provisional/i);
+    expect(
+      overlayText,
+      'the active services\' limits must cite the 2026-09-25 measurement'
+    ).toMatch(/2026-09-25/);
+    expect(
+      overlayText,
+      'the active services\' limits must cite infra#25 step 2'
+    ).toMatch(/infra#25 step 2/);
+  });
+
+  it("does not undercut its own NODE_OPTIONS heap cap", () => {
+    // The overlay overrides NODE_OPTIONS for the store (down from the
+    // base's --max-old-space-size=384), so the effective heap cap must be
+    // read from the MERGED config, not the base file alone -- that's what
+    // actually runs once the overlay applies. A container mem_limit at or
+    // below the effective heap cap leaves no room for the non-heap part of
+    // the process and the box OOM kills it under any real load.
+    const merged = composeConfig([BASE, OVERLAY]);
+    const nodeOptions = merged.services['store']?.environment?.['NODE_OPTIONS'] ?? '';
+    const heapCapMatch = String(nodeOptions).match(/--max-old-space-size=(\d+)/);
+    expect(
+      heapCapMatch,
+      'the merged config must still cap the store heap via NODE_OPTIONS'
+    ).not.toBeNull();
     const heapCapMb = Number(heapCapMatch![1]);
 
-    const merged = composeConfig([BASE, OVERLAY]);
     const storeMemLimitBytes = Number(merged.services['store']?.mem_limit);
     expect(storeMemLimitBytes).toBeGreaterThan(heapCapMb * 1024 * 1024);
   });
