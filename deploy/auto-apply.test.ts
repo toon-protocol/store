@@ -170,6 +170,7 @@ if [ "\${1:-}" = compose ]; then
     "up -d") exit "\${STUB_UP_EXIT:-0}" ;;
     "restart "*) exit "\${STUB_RESTART_EXIT:-0}" ;;
     "logs --tail 40 "*) exit 0 ;;
+    "port connector 4000") echo "\${STUB_PORT:-}"; exit 0 ;;
     "exec -T nginx nginx -s reload") exit "\${STUB_NGINX_RELOAD_EXIT:-0}" ;;
   esac
   echo "stub docker: unexpected compose call: $rest" >&2
@@ -182,6 +183,7 @@ exit 97
 
 const CURL_STUB = `#!/usr/bin/env bash
 url="\${@: -1}"
+echo "curl $url" >> "$STUB_LOG"
 case "$url" in
   http://127.0.0.1:*/ilp)
     addr=$(sed -n '/^\\[node\\]/,/^\\[/s/^[[:space:]]*addresses[[:space:]]*=[[:space:]]*\\[\\(.*\\)\\].*/\\1/p' connector.toml | head -n1)
@@ -210,7 +212,7 @@ interface Run {
 }
 
 let runs = 0;
-function autoApply(boxDir: string): Run {
+function autoApply(boxDir: string, extraEnv: Record<string, string> = {}): Run {
   const log = join(boxDir, `stub-log-${runs++}`);
   writeFileSync(log, '');
   const env = {
@@ -218,6 +220,7 @@ function autoApply(boxDir: string): Run {
     PATH: `${stubBin}:${process.env.PATH}`,
     STUB_LOG: log,
     TOON_AUTOAPPLY_LOCK: join(boxDir, '.autoapply.lock'),
+    ...extraEnv,
   };
   const r = spawnSync('bash', [join(boxDir, 'deploy', 'auto-apply.sh')], {
     env,
@@ -372,6 +375,36 @@ describe('the shared-edge overlay (store#137, infra#24)', () => {
       result.calls,
       'auto-apply.sh must never pass its own -f flag to docker compose'
     ).not.toMatch(/(^|\s)-f(\s|$)/);
+  });
+});
+
+describe('the connector port a box-local overlay remaps (connector#1337)', () => {
+  it('asks compose for the published port, so it reads THIS connector and not a neighbour on the committed port', () => {
+    // On the shared devnet host an untracked overlay publishes this node's
+    // connector on 4003 and the gateway's on 4000. Reading docker-compose.yml
+    // alone asked 4000, compared the gateway's addresses with this node's, and
+    // restarted this connector on every timer run.
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box, { STUB_PORT: '127.0.0.1:4003' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls).toMatch(/port connector 4000/);
+    expect(result.calls, 'GET /ilp goes to the port compose reported').toMatch(
+      /curl http:\/\/127\.0\.0\.1:4003\/ilp/
+    );
+    expect(result.calls).not.toMatch(/curl http:\/\/127\.0\.0\.1:4000\/ilp/);
+  });
+
+  it('falls back to the committed file when compose has no answer', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box);
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls).toMatch(/curl http:\/\/127\.0\.0\.1:\d+\/ilp/);
   });
 });
 
