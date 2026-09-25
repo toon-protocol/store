@@ -151,7 +151,7 @@ const publishedPorts: PublishedPort[] = Object.entries(
 const EXPECTED_CONTRACT_ADDRESS = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
 
 // connector#811: the mock USDC ERC-20 the fleet settles in.
-const EXPECTED_TOKEN_ADDRESS = '0x49beE1Bca5d15Fb0963117923403F9498119a9Ce';
+const EXPECTED_TOKEN_ADDRESS = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
 
 // ADR 0010: the fleet-wide settlement asset is 6-decimal USDC everywhere.
 const EXPECTED_DECIMALS = 6;
