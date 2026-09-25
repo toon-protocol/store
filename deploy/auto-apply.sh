@@ -61,9 +61,13 @@ fingerprint_connector_inputs() {
       2>/dev/null || true; } | sha256sum | awk '{print $1}'
 }
 
-# One apply at a time, and never one racing a human. The path is overridable
-# only for tests (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
-LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply.lock}
+# One apply at a time, and never one racing a human. Per-node (shared
+# contract v2, infra#25): several nodes can live on one shared host, each
+# running its own auto-apply.sh, and a lock name common to all of them would
+# let only one node's apply run at a time host-wide instead of one per node.
+# The path is overridable only for tests (TOON_AUTOAPPLY_LOCK) -- a box
+# always takes the real one.
+LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply-store.lock}
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another apply is already running; leaving it alone"; exit 0; }
 
@@ -149,11 +153,14 @@ if [ -x ./render.sh ] && [ "$RENDER_STATUS" != 0 ]; then
 fi
 SUM_AFTER=$(fingerprint_connector_inputs)
 
-# The overlay set this box actually runs. Keep in step with README.md. This box
-# runs the base file only; the relay box adds a Watchtower overlay, and this
-# picks that up on its own if the file is ever added here.
-COMPOSE=(-f docker-compose.yml)
-[ -f docker-compose.watchtower.yml ] && COMPOSE+=(-f docker-compose.watchtower.yml)
+# No `-f`: compose reads COMPOSE_FILE from .env itself, which is how the
+# shared-edge overlay (docker-compose.shared-edge.yml, store#137) gets
+# picked up here, in bootstrap.sh, and in an operator's own `docker compose
+# ps` -- all from one line in .env. With no COMPOSE_FILE it is
+# docker-compose.yml alone, exactly as before this overlay existed. An
+# explicit `-f` here would silently apply the base stack underneath a box
+# that has switched to the overlay.
+COMPOSE=()
 
 # Captured before `up -d` so a recreation (image bump) is distinguishable: a
 # recreated connector already booted on the just-rendered files and must not

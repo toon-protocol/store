@@ -1,0 +1,111 @@
+# =============================================================================
+# The shared-edge overlay (infra#24, infra ADR 0001, store#137)
+# =============================================================================
+# The devnet is moving onto one Linode, shared by the relay, store, gas
+# station, workload gateway and faucet nodes, behind one shared Caddy edge
+# that owns ports 80 and 443. This node keeps its own connector, keys and
+# hostnames -- only its own TLS front goes away.
+#
+# Turned on the way the provider's HIDDEN overlay is: two lines in .env,
+# together --
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
+#
+# docker compose reads COMPOSE_FILE from .env itself, so every `docker
+# compose` command run in this directory -- auto-apply.sh's included --
+# sees the merged stack. A `.env` with no COMPOSE_FILE line runs
+# docker-compose.yml alone, exactly as before this file existed.
+#
+# What it does:
+#
+#   nginx, certbot, watchtower   DISABLED (`profiles: [disabled]` -- a
+#                                 profile nothing ever activates). No public
+#                                 port 80 or 443 is bound by this bundle at
+#                                 all; the shared edge owns both, on the
+#                                 host, once. auto-apply.sh already pulls the
+#                                 pinned store/connector images unattended,
+#                                 so losing watchtower here costs nothing.
+#   connector                    joins the external `edge-store` network
+#                                 under the stable alias `store-proxy`, so
+#                                 the edge can reach it at `store-proxy:4000`
+#                                 for proxy.ario.${DOMAIN}. Its
+#                                 127.0.0.1:4000 loopback publish from
+#                                 docker-compose.yml is untouched --
+#                                 bootstrap.sh and auto-apply.sh still read
+#                                 it there.
+#   store                        joins `edge-store` under the alias
+#                                 `store-dvm`, so the edge can reach
+#                                 dvm.${DOMAIN} at `store-dvm:3400`.
+#
+# `edge-store` (shared contract v2) is ONE OF FIVE per-node networks the edge
+# project creates -- relay, gas, gateway and faucet each get their own
+# (`edge-relay`, `edge-gas`, `edge-gateway`, `edge-faucet`), and Caddy alone
+# joins all five. This box joins only its own. A single flat network shared
+# by every node (v1 of this contract) would let this box's connector reach
+# every OTHER node's connector /admin and the gateway's handover port;
+# per-node networks mean only the edge itself can reach a node. v1's single
+# shared network name is retired and must not appear anywhere in this bundle
+# any more.
+#
+# See deploy/README.md "Running behind the shared edge" for the alias:port
+# table this was worked out from (deploy/nginx/node.conf.template), and for
+# everything nginx does today that the edge has to replicate -- the rate
+# limit, the upload body-size cap and the long read timeout matter most for
+# a storage node.
+#
+# `networks: default: {}` is repeated on both services below because ADDING
+# an explicit `networks:` key to a service that otherwise gets the implicit
+# default network REPLACES it rather than extending it -- so without this,
+# joining `edge-store` would silently cut the connector and the store off
+# from each other and from the (disabled) nginx. Same pattern as the
+# provider's `docker-compose.hidden.yml`.
+#
+# ── mem_limit ────────────────────────────────────────────────────────────────
+# PROVISIONAL -- replace with docker stats measurements (infra#25 step 2).
+# Nobody has measured the shared box yet. These assume a 2 GB host split five
+# ways (relay, store, gas, gateway, faucet), so roughly 400 MB per node
+# in the mean case; the store gets more of its own share because it is the
+# one node here doing real work (Arweave/Turbo uploads) rather than just
+# proxying. The store's own NODE_OPTIONS already caps its V8 heap at 384 MB
+# (docker-compose.yml ~:95) -- 448m leaves ~64 MB of headroom for the
+# non-heap part of a Node process (native modules, buffers, the process
+# itself), which the heap cap alone does not cover.
+# =============================================================================
+
+services:
+  connector:
+    mem_limit: 192m
+    networks:
+      default: {}
+      edge-store:
+        aliases: [store-proxy]
+
+  store:
+    mem_limit: 448m
+    networks:
+      default: {}
+      edge-store:
+        aliases: [store-dvm]
+
+  # `profiles: [disabled]` names a profile nothing ever activates (no
+  # COMPOSE_PROFILES, no `--profile` flag anywhere in this repo), which is
+  # how a compose overlay switches a service off: `docker compose up -d`
+  # (and `config`, with no profile given) skips it entirely, rather than
+  # starting it and leaving it unused.
+  nginx:
+    mem_limit: 32m
+    profiles: [disabled]
+
+  certbot:
+    mem_limit: 32m
+    profiles: [disabled]
+
+  watchtower:
+    mem_limit: 64m
+    profiles: [disabled]
+
+networks:
+  # Created and owned by infra#24's edge project -- one of five per-node
+  # networks it creates (shared contract v2); this node only joins its own.
+  edge-store:
+    external: true
