@@ -28,11 +28,23 @@
 #   connector                    joins the external `edge-store` network
 #                                 under the stable alias `store-proxy`, so
 #                                 the edge can reach it at `store-proxy:4000`
-#                                 for proxy.ario.${DOMAIN}. Its
-#                                 127.0.0.1:4000 loopback publish from
-#                                 docker-compose.yml is untouched --
-#                                 bootstrap.sh and auto-apply.sh still read
-#                                 it there.
+#                                 for proxy.ario.${DOMAIN}. Its loopback
+#                                 publish MOVES to 127.0.0.1:4003:4000
+#                                 (`ports: !override`, below): every node
+#                                 bundle's own docker-compose.yml publishes
+#                                 its connector on 127.0.0.1:4000, and those
+#                                 collide once several nodes share one host --
+#                                 a real outage (infra#25, connector#1337).
+#                                 The container side stays 4000; only the
+#                                 host side moves, to this node's own
+#                                 assignment. `!override` replaces the whole
+#                                 `ports:` list rather than merging into it,
+#                                 so 4003 is the ONLY thing published once the
+#                                 overlay is on. auto-apply.sh already asks
+#                                 `docker compose port connector 4000` for
+#                                 whatever is actually published rather than
+#                                 assuming 4000 (connector#1337), so it needs
+#                                 no further change for this.
 #   store                        joins `edge-store` under the alias
 #                                 `store-dvm`, so the edge can reach
 #                                 dvm.${DOMAIN} at `store-dvm:3400`.
@@ -78,6 +90,15 @@ services:
       default: {}
       edge-store:
         aliases: [store-proxy]
+    # Shared host, one connector loopback port each (infra#25, connector#1337):
+    # every node bundle's docker-compose.yml publishes its connector on
+    # 127.0.0.1:4000, which collided the day two nodes landed on the same
+    # box. `!override` (Compose >=2.24) replaces the whole `ports:` list
+    # rather than merging into it, so 4003 is this node's ONLY publish under
+    # the overlay. The container side stays 4000 -- nothing inside the
+    # container, including its own healthcheck, changes.
+    ports: !override
+      - '127.0.0.1:4003:4000'
 
   store:
     # measured idle 39 MB on 2026-09-25 (infra#25 step 2). This overlay also

@@ -85,9 +85,8 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
   });
 
   it('never binds host port 80 or 443 when the overlay is on', () => {
-    // The connector keeps its 127.0.0.1:4000 loopback publish from
-    // docker-compose.yml -- bootstrap.sh and auto-apply.sh still read it
-    // there, and it was never a public bind. What must disappear is 80 and
+    // The connector's own loopback publish moves under the overlay (below)
+    // but was never a public bind either way. What must disappear is 80 and
     // 443: with nginx disabled, nothing in this bundle may claim them, since
     // the shared edge owns both on the host.
     const merged = composeConfig([BASE, OVERLAY]);
@@ -99,6 +98,17 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
         ).not.toContain(port.target);
       }
     }
+  });
+
+  it('moves the connector off the shared 4000 to its own loopback port, and nothing else', () => {
+    // infra#25, connector#1337: every node bundle's docker-compose.yml
+    // publishes its connector on 127.0.0.1:4000, which collides once several
+    // share a host. `ports: !override` must leave 4003 as the connector's
+    // ONLY publish under the overlay; the container side stays 4000.
+    const merged = composeConfig([BASE, OVERLAY]);
+    const ports = merged.services['connector']?.ports ?? [];
+    expect(ports).toHaveLength(1);
+    expect(ports[0]).toMatchObject({ host_ip: '127.0.0.1', target: 4000, published: '4003' });
   });
 
   it('joins the connector to the external `edge-store` network as `store-proxy`', () => {
@@ -209,6 +219,11 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
       (p) => p.target
     );
     expect(nginxPorts.sort((a, b) => a - b)).toEqual([80, 443]);
+
+    // Without the overlay, the connector's loopback publish is unchanged.
+    const connectorPorts = withoutOverlay.services['connector']?.ports ?? [];
+    expect(connectorPorts).toHaveLength(1);
+    expect(connectorPorts[0]).toMatchObject({ host_ip: '127.0.0.1', target: 4000, published: '4000' });
 
     // No service carries an `edge-store` network, and nothing carries a
     // mem_limit -- both are the overlay's addition alone.
