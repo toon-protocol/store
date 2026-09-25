@@ -208,6 +208,24 @@ issuing or renewing a certificate for this box.
   measured 2026-09-25 on production Linodes (connector 2 MB, store 39 MB
   idle; infra#25 step 2). `nginx`, `certbot` and `watchtower` stay disabled
   and keep their original provisional limits (32m, 32m, 64m).
+- moves the connector's loopback publish to **`127.0.0.1:4003:4000`**
+  (`ports: !override`, so it is the *only* publish once the overlay is on).
+  Every node bundle's own `docker-compose.yml` publishes its connector on
+  `127.0.0.1:4000`, and those collide once several nodes share one host — a
+  real outage (infra#25). The container side stays 4000; only the host side
+  moves, to this node's own assignment:
+
+  | Node | Host loopback port |
+  |---|---|
+  | relay | `127.0.0.1:3000` |
+  | gateway | `127.0.0.1:4001` |
+  | gas-station | `127.0.0.1:4002` |
+  | store | `127.0.0.1:4003` |
+
+  `auto-apply.sh` already asks `docker compose port connector 4000` for
+  whatever port is actually published, across every file `COMPOSE_FILE`
+  names, rather than assuming 4000 (connector#1337) — it needed no further
+  change for this.
 
 ### The alias:port table infra#24's edge config is written from
 
@@ -275,7 +293,9 @@ This bundle therefore keeps every published port host-IP-prefixed — the
 connector is `127.0.0.1:4000:4000`, and the store publishes nothing at all —
 so the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
-`src/deploy-bundle-guard.test.ts` fails CI if that ever regresses.
+`src/deploy-bundle-guard.test.ts` fails CI if that ever regresses. Under the
+shared-edge overlay this moves to `127.0.0.1:4003:4000` — see "Running behind
+the shared edge", above.
 
 ## The routing table
 
