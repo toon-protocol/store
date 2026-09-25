@@ -214,12 +214,20 @@ wait_connector_healthy || exit 1
 # not to LOCAL=REMOTE. (Before that fix this used to be a one red apply, then
 # green forever on an unverified box; retries alone were the only thing
 # standing between a blip and that silent, unverified state.)
-# The port sed matches the single-quoted '127.0.0.1:N:M' publish rows and
-# takes the first, which is the connector's -- the only loopback-published
-# service in every node bundle. The 4000 fallback matches the committed file.
-# `|| true` because under pipefail a sed that outruns head's one line dies on
-# SIGPIPE and would abort the whole script as a bare exit 141.
-ILP_PORT=$({ sed -n "s/.*'127\.0\.0\.1:\([0-9]*\):[0-9]*'.*/\1/p" docker-compose.yml | head -n 1; } || true)
+# The port is asked of compose first: `docker compose port connector 4000`
+# resolves the connector's published loopback port across EVERY file
+# COMPOSE_FILE names, so a box-local overlay that remaps it is honoured. The
+# shared devnet host (infra#24) publishes this node's connector on 4003 and the
+# gateway's on 4000; reading docker-compose.yml alone asked the gateway's
+# connector, compared its addresses with this node's, and restarted this
+# connector on every timer run (connector#1337). Only when compose gives no
+# answer does the committed file decide: the sed matches the single-quoted
+# '127.0.0.1:N:M' publish rows and takes the first, which is the connector's --
+# the only loopback-published service in every node bundle -- and 4000 matches
+# that file. `|| true` because under pipefail a sed that outruns head's one line
+# dies on SIGPIPE and would abort the whole script as a bare exit 141.
+ILP_PORT=$({ docker compose "${COMPOSE[@]}" port connector 4000 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1; } || true)
+[ -n "$ILP_PORT" ] || ILP_PORT=$({ sed -n "s/.*'127\.0\.0\.1:\([0-9]*\):[0-9]*'.*/\1/p" docker-compose.yml | head -n 1; } || true)
 ILP_PORT=${ILP_PORT:-4000}
 served_ilp_addresses() {
   local body
