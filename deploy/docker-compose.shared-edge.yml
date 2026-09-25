@@ -61,27 +61,35 @@
 # provider's `docker-compose.hidden.yml`.
 #
 # ── mem_limit ────────────────────────────────────────────────────────────────
-# PROVISIONAL -- replace with docker stats measurements (infra#25 step 2).
-# Nobody has measured the shared box yet. These assume a 2 GB host split five
-# ways (relay, store, gas, gateway, faucet), so roughly 400 MB per node
-# in the mean case; the store gets more of its own share because it is the
-# one node here doing real work (Arweave/Turbo uploads) rather than just
-# proxying. The store's own NODE_OPTIONS already caps its V8 heap at 384 MB
-# (docker-compose.yml ~:95) -- 448m leaves ~64 MB of headroom for the
-# non-heap part of a Node process (native modules, buffers, the process
-# itself), which the heap cap alone does not cover.
+# MEASURED (infra#25 step 2) -- the devnet host is confirmed a 1 GB Linode
+# nanode (961 MB total, ~350 MB already used by OS/Docker before any node
+# starts), not the 2 GB box the first pass of this overlay assumed. Idle
+# `docker stats` taken 2026-09-25 on production Linodes running the same
+# images: connector 2 MB, store 39 MB. `nginx`, `certbot` and `watchtower`
+# stay disabled on this box and keep their original provisional limits --
+# see the per-service comments below for how each active limit was derived.
 # =============================================================================
 
 services:
   connector:
-    mem_limit: 192m
+    # measured idle 2 MB on 2026-09-25 (infra#25 step 2); limit ≈4× idle.
+    mem_limit: 64m
     networks:
       default: {}
       edge-store:
         aliases: [store-proxy]
 
   store:
-    mem_limit: 448m
+    # measured idle 39 MB on 2026-09-25 (infra#25 step 2). This overlay also
+    # overrides NODE_OPTIONS below to cap the store's V8 heap at 192 MB (down
+    # from the base's 384m, docker-compose.yml ~:95, which assumed a 2 GB
+    # host). 256m leaves ~64 MB of headroom above that 192 MB heap cap for
+    # the non-heap part of the process (native modules, buffers, the process
+    # itself), which the heap cap alone does not cover, on the shared 1 GB
+    # nanode host.
+    mem_limit: 256m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=192
     networks:
       default: {}
       edge-store:

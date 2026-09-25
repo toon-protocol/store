@@ -201,8 +201,13 @@ issuing or renewing a certificate for this box.
   Each node on its own network, rather than one flat network everyone
   shares, is what keeps this box's connector unreachable from every other
   node on the host — only the edge itself can reach in.
-- adds a `mem_limit` to every service — provisional, pending real
-  measurements (infra#25 step 2).
+- adds a `mem_limit` to every service, sized for the confirmed 1 GB Linode
+  nanode host (961 MB total, ~350 MB used by OS/Docker before any node
+  starts). `connector` (64m) and `store` (256m, with `NODE_OPTIONS` also
+  overridden to `--max-old-space-size=192`) are based on idle `docker stats`
+  measured 2026-09-25 on production Linodes (connector 2 MB, store 39 MB
+  idle; infra#25 step 2). `nginx`, `certbot` and `watchtower` stay disabled
+  and keep their original provisional limits (32m, 32m, 64m).
 
 ### The alias:port table infra#24's edge config is written from
 
