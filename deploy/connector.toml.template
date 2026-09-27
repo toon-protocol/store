@@ -126,10 +126,20 @@ price       = { base = 1000, per_kib = 10 }
 # connector verifies the claim against the chain named here.
 
 [settlement.evm]
-rpc_url          = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
-token_address    = "0x0C996d7c934c79a6255254875607Fe69df25C0E1"  # USDC (6dp)
-decimals         = 6
+rpc_url                  = "https://base-sepolia-rpc.publicnode.com"
+contract_address         = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
+token_address            = "0x0C996d7c934c79a6255254875607Fe69df25C0E1"  # USDC (6dp)
+decimals                 = 6
+# The local channel index (connector issue #661) backfills
+# ChannelOpened/ChannelNewDeposit/ChannelSettled logs from here on a cold
+# start with no checkpoint. Left at its default of 0, a cold connector would
+# ask the RPC above for block 0, which it refuses — it prunes history well
+# below this block — so the index would never warm up and every channel
+# lookup would pay a direct chain read forever (TOON_Network#182). This is
+# the deploy block of the TokenNetwork above: the createTokenNetwork
+# transaction recorded in connector
+# packages/contracts/deployments/base-sepolia.md's 2026-09-25 USDC cutover.
+channel_index_from_block = 47285026
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"

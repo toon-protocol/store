@@ -66,7 +66,12 @@ interface ConnectorToml {
   client_edge_addr: string;
   state_dir: string;
   settlement: {
-    evm: { contract_address: string; token_address: string; decimals: number };
+    evm: {
+      contract_address: string;
+      token_address: string;
+      decimals: number;
+      channel_index_from_block: number;
+    };
     solana: { program_id: string; token_address: string; decimals: number };
   };
   routes: ConnectorRoute[];
@@ -155,6 +160,17 @@ const EXPECTED_TOKEN_ADDRESS = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
 
 // ADR 0010: the fleet-wide settlement asset is 6-decimal USDC everywhere.
 const EXPECTED_DECIMALS = 6;
+
+// TOON_Network#182: the local channel index (connector issue #661) backfills
+// from here on a cold start with no checkpoint. Left at the default of 0, a
+// cold connector asks base-sepolia-rpc.publicnode.com for block 0, which it
+// refuses (the RPC prunes history well short of genesis) — the index never
+// warms up and every channel lookup pays a direct chain read forever. This is
+// the deploy block of the EXPECTED_CONTRACT_ADDRESS/TOKEN_ADDRESS
+// TokenNetwork above: the createTokenNetwork transaction recorded in
+// connector packages/contracts/deployments/base-sepolia.md's 2026-09-25 USDC
+// cutover.
+const EXPECTED_CHANNEL_INDEX_FROM_BLOCK = 47285026;
 
 // The Solana half of the same settlement statement. connector#1212: the mock
 // USDC this node named until 2026-08-27 is still on chain and still holds its
@@ -315,6 +331,9 @@ describe('deploy/ bundle is internally consistent', () => {
     );
     expect(connectorToml.settlement.evm.token_address).toBe(EXPECTED_TOKEN_ADDRESS);
     expect(connectorToml.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
+    expect(connectorToml.settlement.evm.channel_index_from_block).toBe(
+      EXPECTED_CHANNEL_INDEX_FROM_BLOCK
+    );
   });
 
   it('settles against the current Solana program, mint and decimals', () => {
