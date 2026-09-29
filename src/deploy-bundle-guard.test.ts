@@ -71,6 +71,8 @@ interface ConnectorToml {
       decimals: number;
       asset_eip712_name: string;
       asset_eip712_version: string;
+      asset_transfer_method?: string;
+      facilitator_url?: string;
     };
     solana: {
       token_address: string;
@@ -229,7 +231,7 @@ const TERMINATED_PREFIX = 'g.toon.store';
 // (`g.toon.store.relay`) forwarded for free on that build. Bumping this
 // literal and the compose tag in one reviewed commit is how the connector
 // moves now.
-const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
+const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.29.1';
 
 // Moved by publish-store-image.yml on every green main, watched by Watchtower.
 const EXPECTED_STORE_IMAGE = 'ghcr.io/toon-protocol/store:release';
@@ -336,6 +338,12 @@ describe('deploy/ bundle is internally consistent', () => {
     );
     expect(connectorToml.settlement.evm.asset_eip712_version).toBe(
       EXPECTED_ASSET_EIP712_VERSION
+    );
+    // connector#1419: published so a payer knows how to deposit, and who pays
+    // its gas (connector ADR 0076, toon-client#695).
+    expect(connectorToml.settlement.evm.asset_transfer_method).toBe('eip3009');
+    expect(connectorToml.settlement.evm.facilitator_url).toBe(
+      'https://onboard.devnet.toonprotocol.dev'
     );
   });
 

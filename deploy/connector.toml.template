@@ -149,6 +149,14 @@ decimals               = 6
 # wrong value builds a signature that never verifies.
 asset_eip712_name      = "USDC"
 asset_eip712_version   = "2"
+# How a deposit moves the token, published as `assetTransferMethod`
+# (connector#1419): the devnet USDC is Circle's FiatToken, with ERC-3009. The
+# connector checks it against the token at boot (connector#1425).
+asset_transfer_method = "eip3009"
+# The x402 facilitator this node names for deposits into its channels,
+# published as `facilitator`: the devnet's Onboarder, whose gas the operator
+# pays (connector ADR 0076, toon-client#695).
+facilitator_url = "https://onboard.devnet.toonprotocol.dev"
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
