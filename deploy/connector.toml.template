@@ -46,6 +46,18 @@
 #     verified claim on a `[[peer_channels]]` row, not by a shared string.
 #   * `[node]` endpoints are required exactly when `peer_expose` opens that
 #     carriage (connector#1232). This file opens BTP and declares both.
+#   * ADR 0075 (the x402-only build, connector release 2026.09.28.1): every
+#     settlement channel is now an x402 `batch-settlement` channel, on both
+#     chains. TOON's own `TokenNetwork`/`TokenNetworkRegistry` (EVM) and
+#     payment-channel program (Solana) are gone from the connector — they are
+#     fixed constants of the binary now, never config — so
+#     `contract_address` and `channel_index_from_block` (EVM) and
+#     `program_id` (Solana) are refused by name. `asset_eip712_name` /
+#     `asset_eip712_version` (EVM) and `min_sponsored_deposit` (Solana) are
+#     newly required wherever those tables exist. This box declares no
+#     `[[peer_channels]]`/`[[pay_channels]]`/`[[client_channels]]` row, so
+#     there was nothing here to convert to the new per-channel shape — see
+#     connector docs/releases/x402-only.md for the full before/after.
 #
 # deploy/README.md § "Bumping the connector pin" has the procedure.
 # src/deploy-bundle-guard.test.ts asserts this shape and the pin, so CI tells
@@ -126,29 +138,32 @@ price       = { base = 1000, per_kib = 10 }
 # connector verifies the claim against the chain named here.
 
 [settlement.evm]
-rpc_url                  = "https://base-sepolia-rpc.publicnode.com"
-contract_address         = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
-token_address            = "0x0C996d7c934c79a6255254875607Fe69df25C0E1"  # USDC (6dp)
-decimals                 = 6
-# The local channel index (connector issue #661) backfills
-# ChannelOpened/ChannelNewDeposit/ChannelSettled logs from here on a cold
-# start with no checkpoint. Left at its default of 0, a cold connector would
-# ask the RPC above for block 0, which it refuses — it prunes history well
-# below this block — so the index would never warm up and every channel
-# lookup would pay a direct chain read forever (TOON_Network#182). This is
-# the deploy block of the TokenNetwork above: the createTokenNetwork
-# transaction recorded in connector
-# packages/contracts/deployments/base-sepolia.md's 2026-09-25 USDC cutover.
-channel_index_from_block = 47285026
+rpc_url                = "https://base-sepolia-rpc.publicnode.com"
+token_address          = "0x0C996d7c934c79a6255254875607Fe69df25C0E1"  # USDC (6dp)
+decimals               = 6
+# The x402 contract (x402BatchSettlement) is a fixed constant of the binary
+# now (ADR 0075) — never config. Every channel is an x402 channel, so these
+# two are required wherever this table exists: the EIP-712 domain of
+# token_address, the devnet's own deployment of Circle's FiatToken v2.2
+# (connector#1337). Published to clients, who sign their deposit under it — a
+# wrong value builds a signature that never verifies.
+asset_eip712_name      = "USDC"
+asset_eip712_version   = "2"
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
+# `payment-channels` (solana-foundation's program, ADR 0074) is a fixed
+# constant of the binary now — unrelated to the token_address below, and no
+# longer named here.
 [settlement.solana]
-rpc_url       = "https://api.devnet.solana.com"
-program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"   # mock USDC (6dp)
-decimals      = 6
+rpc_url               = "https://api.devnet.solana.com"
+token_address         = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"   # mock USDC (6dp)
+decimals              = 6
+# The smallest deposit this node spends its own rent on, in the mint's base
+# units: 1 USDC. Required wherever this table exists — it bounds how much SOL
+# a stranger can make this node spend through the sponsor endpoint.
+min_sponsored_deposit = 1000000
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"

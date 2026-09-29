@@ -67,12 +67,16 @@ interface ConnectorToml {
   state_dir: string;
   settlement: {
     evm: {
-      contract_address: string;
       token_address: string;
       decimals: number;
-      channel_index_from_block: number;
+      asset_eip712_name: string;
+      asset_eip712_version: string;
     };
-    solana: { program_id: string; token_address: string; decimals: number };
+    solana: {
+      token_address: string;
+      decimals: number;
+      min_sponsored_deposit: number;
+    };
   };
   routes: ConnectorRoute[];
   operator: Record<string, unknown>;
@@ -150,27 +154,22 @@ const publishedPorts: PublishedPort[] = Object.entries(
 // Constants — each one a thing that has been wrong on a live box.
 // ---------------------------------------------------------------------------
 
-// connector#695 / connector#811: the ERC-2771 (meta-tx-aware)
-// TokenNetworkRegistry -- since 2026-08-28 the ADR 0059 cutover's (connector
-// docs/evm-deployment.md), whose TokenNetwork derives channel ids.
-const EXPECTED_CONTRACT_ADDRESS = '0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5';
-
-// connector#811: the mock USDC ERC-20 the fleet settles in.
+// connector#811: the mock USDC ERC-20 the fleet settles in. The x402 contract
+// (x402BatchSettlement) and payment-channels program are fixed binary
+// constants as of ADR 0075 / connector#1385 (the x402-only build) and are no
+// longer named in config, so there is no registry/program address to pin here
+// any more.
 const EXPECTED_TOKEN_ADDRESS = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
 
 // ADR 0010: the fleet-wide settlement asset is 6-decimal USDC everywhere.
 const EXPECTED_DECIMALS = 6;
 
-// TOON_Network#182: the local channel index (connector issue #661) backfills
-// from here on a cold start with no checkpoint. Left at the default of 0, a
-// cold connector asks base-sepolia-rpc.publicnode.com for block 0, which it
-// refuses (the RPC prunes history well short of genesis) — the index never
-// warms up and every channel lookup pays a direct chain read forever. This is
-// the deploy block of the EXPECTED_CONTRACT_ADDRESS/TOKEN_ADDRESS
-// TokenNetwork above: the createTokenNetwork transaction recorded in
-// connector packages/contracts/deployments/base-sepolia.md's 2026-09-25 USDC
-// cutover.
-const EXPECTED_CHANNEL_INDEX_FROM_BLOCK = 47285026;
+// ADR 0075: every channel is an x402 channel now, so these are required
+// wherever [settlement.evm] exists. The EIP-712 domain of the devnet's own
+// Circle FiatToken v2.2 deployment (connector#1337) — a wrong value builds a
+// signature that never verifies.
+const EXPECTED_ASSET_EIP712_NAME = 'USDC';
+const EXPECTED_ASSET_EIP712_VERSION = '2';
 
 // The Solana half of the same settlement statement. connector#1212: the mock
 // USDC this node named until 2026-08-27 is still on chain and still holds its
@@ -182,9 +181,13 @@ const EXPECTED_CHANNEL_INDEX_FROM_BLOCK = 47285026;
 //
 // Squarely "a thing that has been wrong on a live box", and it went unnoticed
 // because only the EVM leg above was ever asserted here.
-const EXPECTED_SOLANA_PROGRAM_ID = '2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip';
 const EXPECTED_SOLANA_TOKEN_ADDRESS =
   '34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU';
+
+// ADR 0075: required wherever [settlement.solana] exists — bounds how much
+// SOL a stranger can make this node spend through the sponsor endpoint. 1 USDC
+// in the mint's base units.
+const EXPECTED_MIN_SPONSORED_DEPOSIT = 1000000;
 
 // The store bills a SCHEDULE, not a flat price: an upload can be any size, and
 // a flat figure charges a 50 MB object the same as a 1 KB one. `base` is the
@@ -226,7 +229,7 @@ const TERMINATED_PREFIX = 'g.toon.store';
 // (`g.toon.store.relay`) forwarded for free on that build. Bumping this
 // literal and the compose tag in one reviewed commit is how the connector
 // moves now.
-const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.27.2';
+const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
 
 // Moved by publish-store-image.yml on every green main, watched by Watchtower.
 const EXPECTED_STORE_IMAGE = 'ghcr.io/toon-protocol/store:release';
@@ -325,28 +328,28 @@ describe('deploy/ bundle is internally consistent', () => {
     }
   });
 
-  it('settles against the current registry, token and decimals', () => {
-    expect(connectorToml.settlement.evm.contract_address).toBe(
-      EXPECTED_CONTRACT_ADDRESS
-    );
+  it('settles against the current token, decimals and EIP-712 domain', () => {
     expect(connectorToml.settlement.evm.token_address).toBe(EXPECTED_TOKEN_ADDRESS);
     expect(connectorToml.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
-    expect(connectorToml.settlement.evm.channel_index_from_block).toBe(
-      EXPECTED_CHANNEL_INDEX_FROM_BLOCK
+    expect(connectorToml.settlement.evm.asset_eip712_name).toBe(
+      EXPECTED_ASSET_EIP712_NAME
+    );
+    expect(connectorToml.settlement.evm.asset_eip712_version).toBe(
+      EXPECTED_ASSET_EIP712_VERSION
     );
   });
 
-  it('settles against the current Solana program, mint and decimals', () => {
-    // A claim resolves against ONE deployment (connector ADR 0053 binds the
-    // program into the signed message), so naming a different program or mint
-    // than the fleet does is a node that cannot settle what buyers opened.
-    expect(connectorToml.settlement.solana.program_id).toBe(
-      EXPECTED_SOLANA_PROGRAM_ID
-    );
+  it('settles against the current Solana mint, decimals and sponsor floor', () => {
+    // A claim resolves against the one payment-channels deployment the binary
+    // fixes (ADR 0075), so naming a different mint than the fleet does is a
+    // node that cannot settle what buyers opened.
     expect(connectorToml.settlement.solana.token_address).toBe(
       EXPECTED_SOLANA_TOKEN_ADDRESS
     );
     expect(connectorToml.settlement.solana.decimals).toBe(EXPECTED_DECIMALS);
+    expect(connectorToml.settlement.solana.min_sponsored_deposit).toBe(
+      EXPECTED_MIN_SPONSORED_DEPOSIT
+    );
   });
 
   it('keeps the claim watermark on a mounted volume', () => {
