@@ -54,7 +54,7 @@
 # It does not touch the box. The box runs `deploy/auto-apply.sh` on a timer and
 # pulls what was merged here, so no CI job anywhere holds SSH into a node — the
 # posture ADR 0068 settled. If a bad build ever does reach a box, the
-# connector repo's `fleet-health.yml` opens a `needs:human` issue for it.
+# connector repo's `fleet-health.yml` opens a `needs-triage` issue for it.
 #
 # ── WHY IT PUSHES AS A GITHUB APP, AND FAILS WITHOUT ONE ────────────────────
 # The pin bump is pushed with a GitHub App installation token (the org secrets
@@ -323,7 +323,7 @@ jobs:
 
           Once merged the box applies it on its own timer (`deploy/auto-apply.sh`); no CI job holds
           SSH into a node (connector ADR 0068). If the applied build misbehaves, the connector repo's
-          `fleet-health.yml` opens a `needs:human` issue for it.
+          `fleet-health.yml` opens a `needs-triage` issue for it.
 
           <sub>Opened automatically by `.github/workflows/adopt-connector-release.yml`.</sub>
           MD

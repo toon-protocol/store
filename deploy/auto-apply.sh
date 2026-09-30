@@ -19,7 +19,7 @@
 #   * after `up -d` the connector must reach `healthy`, or this exits non-zero
 #     so `systemctl status` and the journal show it. A box that comes back
 #     unhealthy is also picked up by the connector repo's fleet-health.yml,
-#     which opens a needs:human issue;
+#     which opens a needs-triage issue;
 #   * a render or apply failure is retried, and reported, on every run until
 #     it is fixed -- never silently sat on with the box left on the new
 #     commit and the old config (TOON_Network#164, porting TOON_Network#160;
