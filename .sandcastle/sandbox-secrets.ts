@@ -2,7 +2,7 @@
 //
 // WHY THIS EXISTS — root cause of the relay#68 first-run failure
 // -------------------------------------------------------------
-// The `agent:implement` runner reached the sandbox, but claude-code inside it
+// The implement runner reached the sandbox, but claude-code inside it
 // died with `Not logged in · Please run /login`, even though the workflow step
 // exported CLAUDE_CODE_OAUTH_TOKEN (and GH_TOKEN) into the runner's env.
 //

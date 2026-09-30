@@ -5,7 +5,8 @@
  * that something similar to CI is good enough. `blockersInBody` decides which
  * ready-for-agent issues an agent may start, so a wrong parse starts blocked work.
  */
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { blockersInBody } from './ready-issues.ts';
@@ -33,15 +34,14 @@ describe('the runner gate is ci.yml build job', () => {
   });
 });
 
-describe('workflow and runner use only the canonical labels', () => {
-  const retired = ['agent:implement', 'agent:review', 'agent:fix', 'needs:human', 'tracking'];
-  const files = [
-    '.github/workflows/agent-implement.yml',
-    '.github/workflows/adopt-connector-release.yml',
-    '.sandcastle/agent-implement-issue.ts',
-    '.sandcastle/ready-issues.ts',
-  ];
-  it.each(files)('%s names no retired label', (file) => {
+describe('nothing in the repo names a retired label', () => {
+  const retired = ['agent:implement', 'agent:review', 'agent:fix', 'needs:human'];
+  // The label docs say which are retired, and this file lists them.
+  const exempt = new Set(['docs/agents/triage-labels.md', '.sandcastle/agent-factory.test.ts']);
+  const files = execFileSync('git', ['ls-files'], { encoding: 'utf-8' })
+    .split('\n')
+    .filter((f) => f && !exempt.has(f) && existsSync(f) && !/\.(png|jpg|gz)$/.test(f));
+  it.each(files)('%s', (file) => {
     const text = readFileSync(file, 'utf-8');
     for (const label of retired) expect(text).not.toContain(label);
   });
