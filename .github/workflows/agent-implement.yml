@@ -101,25 +101,22 @@ jobs:
       # gate runs inside the sandbox.
       - run: pnpm install --frozen-lockfile
 
-      # The sandbox image is prebuilt so the run doesn't pay for building it. It's built
-      # with AGENT_UID/GID=1001 to match the runner user, then retagged to the name
-      # sandcastle expects. It has its own GHCR package, apart from the published
-      # `ghcr.io/toon-protocol/store` image that Watchtower follows. Rebuild and push
-      # it whenever .sandcastle/Dockerfile changes:
-      #   docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 \
-      #     -t ghcr.io/toon-protocol/store-sandcastle-agent:latest .sandcastle/
-      #   docker push ghcr.io/toon-protocol/store-sandcastle-agent:latest
-      # An image built before the skills plugin was added can't run /implement, so
-      # it counts as missing.
-      - name: 'Pull prebuilt sandcastle agent image (fallback: build)'
+      # Every factory repo runs the same sandbox image, ghcr.io/toon-protocol/sandcastle-agent,
+      # built from toon-protocol/connector's .sandcastle/Dockerfile. It carries Node, pnpm
+      # (corepack reads this repo's `packageManager`), gh, Claude Code with the skills plugin,
+      # Rust, Foundry and the Solana CLI. It's retagged to the name sandcastle derives from the
+      # checkout dir. An image without the skills plugin can't run /implement, so it counts as
+      # missing and the runner builds connector's Dockerfile instead.
+      - name: 'Pull the shared sandcastle agent image (fallback: build)'
         run: |
-          image=ghcr.io/toon-protocol/store-sandcastle-agent:latest
+          image=ghcr.io/toon-protocol/sandcastle-agent:latest
           if docker pull "$image" \
             && docker run --rm --entrypoint bash "$image" -lc 'claude plugin list | grep -q mattpocock-skills'; then
             docker tag "$image" sandcastle:store
           else
-            echo "::warning::No usable prebuilt image (missing, or without the skills plugin) — building on the runner."
-            npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+            echo "::warning::No usable shared image — building connector's .sandcastle/Dockerfile on the runner."
+            docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 \
+              -t sandcastle:store https://github.com/toon-protocol/connector.git#main:.sandcastle
           fi
 
       # A PR opened with the App token (unlike GITHUB_TOKEN) triggers ci.yml. This

@@ -16,7 +16,7 @@ push, open a PR or close the issue. The runner does all three once you finish.
   consistent. Change a pin in `deploy/` and the literal in that guard test together.
 - Never commit key material or a rendered `deploy/` output. The `ARNS_DVM_SOLANA_SECRET_KEY`
   credential spends, so no ticket needs it in the sandbox.
-- The package manager is pnpm 8.15.9, and `pnpm install --frozen-lockfile` has already run.
+- The package manager is pnpm 8.15.9, and `pnpm install --frozen-lockfile` has already run. The sandbox is the shared image, which also carries Rust, Foundry and the Solana CLI that this repo does not use.
   Add a dependency only if the ticket needs one, and commit the lockfile with it.
 - After you finish, the runner runs CI's `build` job commands itself and won't open a PR
   while any is red: `pnpm build`, `pnpm typecheck`, `pnpm lint` and `pnpm test`. Run them
