@@ -101,7 +101,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Depth 3 covers the merge commit and both parents.
+      # The script reads the merge commit and both parents (depth 2); 3 is slack.
       - name: Check out the merge result
         uses: actions/checkout@v4
         with:

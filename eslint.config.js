@@ -13,6 +13,8 @@ export default tseslint.config(
       parserOptions: {
         projectService: {
           allowDefaultProject: ['src/*.test.ts'],
+          // tsconfig excludes the tests, so every one goes through the default
+          // project; the default cap of 8 files is already exceeded.
           maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 20,
         },
         tsconfigRootDir: import.meta.dirname,

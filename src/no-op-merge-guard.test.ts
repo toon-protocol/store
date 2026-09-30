@@ -21,11 +21,11 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /**
- * The PR head rewrites f.txt to `headContent`. When that is 'new\n', main has
- * already landed the same content (the connector#1008 shape), so the merge
- * result equals main; otherwise main moves on with an unrelated file.
+ * The PR head rewrites f.txt. With `alreadyLanded`, main has landed the same
+ * content (the connector#1008 shape), so the merge result equals main;
+ * otherwise main moves on with an unrelated file.
  */
-function setup(headContent: string): { cwd: string; head: string } {
+function setup(alreadyLanded: boolean): { cwd: string; head: string } {
   const cwd = mkdtempSync(`${tmpdir()}/noop-guard-`);
   dirs.push(cwd);
   git(cwd, 'init', '-q', '-b', 'main');
@@ -36,11 +36,11 @@ function setup(headContent: string): { cwd: string; head: string } {
   git(cwd, 'add', '.');
   git(cwd, 'commit', '-qm', 'base');
   git(cwd, 'checkout', '-qb', 'pr');
-  writeFileSync(`${cwd}/f.txt`, headContent);
+  writeFileSync(`${cwd}/f.txt`, 'new\n');
   git(cwd, 'commit', '-qam', 'pr change');
   const head = git(cwd, 'rev-parse', 'HEAD');
   git(cwd, 'checkout', '-q', 'main');
-  if (headContent === 'new\n') {
+  if (alreadyLanded) {
     writeFileSync(`${cwd}/f.txt`, 'new\n');
     git(cwd, 'commit', '-qam', 'same change landed elsewhere');
   } else {
@@ -74,21 +74,21 @@ afterEach(() => {
 
 describe('no-op merge guard', () => {
   it('fails a PR whose merge result changes nothing', () => {
-    const { cwd, head } = setup('new\n');
+    const { cwd, head } = setup(true);
     const r = run(cwd, head);
     expect(r.status).toBe(1);
     expect(r.stdout).toContain('EMPTY commit');
   });
 
   it('passes a PR with a real diff', () => {
-    const { cwd, head } = setup('different\n');
+    const { cwd, head } = setup(false);
     const r = run(cwd, head);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('changes');
+    expect(r.stdout).toContain('✓ merging this PR changes');
   });
 
   it('passes on push, where there is no merge result to evaluate', () => {
-    const { cwd, head } = setup('new\n');
+    const { cwd, head } = setup(true);
     expect(run(cwd, head, 'push').status).toBe(0);
   });
 });
