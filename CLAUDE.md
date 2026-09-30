@@ -15,13 +15,19 @@ docker build -f Dockerfile.store -t toon-store .
 ```
 Image-publish workflow: `publish-store-image.yml` (the store app → `ghcr.io/toon-protocol/store`, moving the `:release` tag Watchtower follows on every green `main`).
 
-## Shared skills, docs & project context → toon-protocol/toon-meta
-Cross-cutting agent skills, docs, and the canonical project context live in **[toon-protocol/toon-meta](https://github.com/toon-protocol/toon-meta)**. Load the shared skills:
-```
-/plugin marketplace add toon-protocol/toon-meta
-/plugin install toon-skills@toon-meta
-```
-Canonical rules/decisions: `toon-meta` → `context/context.md`.
+## Agent skills
+
+### Issue tracker
+Issues live in this repo's GitHub Issues (`toon-protocol/store`, via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+The five canonical triage labels, names unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+Single-context: this file and `README.md`; the shared vocabulary and ADRs live in `toon-protocol/connector`. See `docs/agents/domain.md`.
+
+## The AFK factory
+`ready-for-agent` is the queue. `.github/workflows/agent-implement.yml` finds the issues an agent can start (`.sandcastle/ready-issues.ts`: not a spec, no open blocker, no open PR), and `.sandcastle/agent-implement-issue.ts` runs `/mattpocock-skills:implement`, then `/mattpocock-skills:code-review` in a second session, then the gate, then opens a PR labelled `ready-for-human`. The gate (`.sandcastle/run-gate.ts`) is `ci.yml`'s `build` job commands (`pnpm build`, `typecheck`, `lint`, `test`), and `.sandcastle/agent-factory.test.ts` fails if the two drift. `.sandcastle/Dockerfile` is the sandbox image; `Dockerfile.store` is the published store image. Keep them separate.
 
 ## Cross-repo dependencies
 - Consumes `@toon-protocol/{core,sdk}` from **npm** (pinned semver) — the Arweave handler lives in `sdk`.
