@@ -25,7 +25,10 @@ function git(cwd: string, ...args: string[]): string {
  * content (the connector#1008 shape), so the merge result equals main;
  * otherwise main moves on with an unrelated file.
  */
-function setup(alreadyLanded: boolean): { cwd: string; head: string } {
+function setup({ alreadyLanded }: { alreadyLanded: boolean }): {
+  cwd: string;
+  head: string;
+} {
   const cwd = mkdtempSync(`${tmpdir()}/noop-guard-`);
   dirs.push(cwd);
   git(cwd, 'init', '-q', '-b', 'main');
@@ -74,21 +77,21 @@ afterEach(() => {
 
 describe('no-op merge guard', () => {
   it('fails a PR whose merge result changes nothing', () => {
-    const { cwd, head } = setup(true);
+    const { cwd, head } = setup({ alreadyLanded: true });
     const r = run(cwd, head);
     expect(r.status).toBe(1);
     expect(r.stdout).toContain('EMPTY commit');
   });
 
   it('passes a PR with a real diff', () => {
-    const { cwd, head } = setup(false);
+    const { cwd, head } = setup({ alreadyLanded: false });
     const r = run(cwd, head);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('✓ merging this PR changes');
   });
 
   it('passes on push, where there is no merge result to evaluate', () => {
-    const { cwd, head } = setup(true);
+    const { cwd, head } = setup({ alreadyLanded: true });
     expect(run(cwd, head, 'push').status).toBe(0);
   });
 });

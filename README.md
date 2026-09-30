@@ -272,8 +272,7 @@ Interledger.
 - **[connector](https://github.com/toon-protocol/connector)** — the payment
   engine that runs in front of this. Claim validation lives there and only
   there.
-- **[toon-meta](https://github.com/toon-protocol/toon-meta)** — shared docs,
-  agent skills, and the canonical project context.
+  The shared vocabulary and ADRs live there too.
 
 This repo publishes no npm package. It is a container:
 `ghcr.io/toon-protocol/store`.

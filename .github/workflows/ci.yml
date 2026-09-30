@@ -2,8 +2,9 @@ name: CI
 
 on:
   pull_request:
-    # `synchronize` is what catches a PR that becomes a no-op after its branch
-    # is updated; the four types are the no-op merge guard's triggers.
+    # The no-op merge guard's triggers, and so the whole workflow's: the three
+    # defaults plus `ready_for_review`. `synchronize` is what catches a PR that
+    # becomes a no-op after its branch is updated.
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
