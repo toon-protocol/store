@@ -3,8 +3,9 @@
 # =============================================================================
 # The devnet is moving onto one Linode, shared by the relay, store, gas
 # station, workload gateway and faucet nodes, behind one shared Caddy edge
-# that owns ports 80 and 443. This node keeps its own connector, keys and
-# hostnames -- only its own TLS front goes away.
+# that owns ports 80 and 443. This node's own TLS front goes away, and so does
+# its own connector: the devnet runs ONE connector, the relay's, at
+# https://toonprotocol.dev/ilp, which routes to the store directly.
 #
 # Turned on the way the provider's HIDDEN overlay is: two lines in .env,
 # together --
@@ -25,29 +26,26 @@
 #                                 host, once. auto-apply.sh already pulls the
 #                                 pinned store/connector images unattended,
 #                                 so losing watchtower here costs nothing.
-#   connector                    joins the external `edge-store` network
-#                                 under the stable alias `store-proxy`, so
-#                                 the edge can reach it at `store-proxy:4000`
-#                                 for proxy.ario.${DOMAIN}. Its loopback
-#                                 publish MOVES to 127.0.0.1:4003:4000
-#                                 (`ports: !override`, below): every node
-#                                 bundle's own docker-compose.yml publishes
-#                                 its connector on 127.0.0.1:4000, and those
-#                                 collide once several nodes share one host --
-#                                 a real outage (infra#25, connector#1337).
-#                                 The container side stays 4000; only the
-#                                 host side moves, to this node's own
-#                                 assignment. `!override` replaces the whole
-#                                 `ports:` list rather than merging into it,
-#                                 so 4003 is the ONLY thing published once the
-#                                 overlay is on. auto-apply.sh already asks
-#                                 `docker compose port connector 4000` for
-#                                 whatever is actually published rather than
-#                                 assuming 4000 (connector#1337), so it needs
-#                                 no further change for this.
+#   connector                    DISABLED too (`profiles: [disabled]`). The
+#                                 devnet runs ONE connector, the relay's, at
+#                                 https://toonprotocol.dev/ilp; it joins
+#                                 `edge-store` itself and routes the store's
+#                                 prefixes straight to
+#                                 http://store-dvm:3300/store (prices
+#                                 unchanged). docker-compose.yml and
+#                                 connector.toml.template keep this bundle's
+#                                 own connector for every operator who runs
+#                                 it standalone. Its volume (connector_state)
+#                                 is left in place. auto-apply.sh notices the
+#                                 connector is gone from the stack, removes
+#                                 its old container (`up -d` alone leaves a
+#                                 profile-disabled container running) and
+#                                 waits on the store's healthcheck instead.
 #   store                        joins `edge-store` under the alias
 #                                 `store-dvm`, so the edge can reach
-#                                 dvm.${DOMAIN} at `store-dvm:3400`.
+#                                 dvm.${DOMAIN} at `store-dvm:3400` and the
+#                                 relay's one connector can reach
+#                                 `store-dvm:3300/store`.
 #
 # `edge-store` (shared contract v2) is ONE OF FIVE per-node networks the edge
 # project creates -- relay, gas, gateway and faucet each get their own
@@ -55,7 +53,8 @@
 # joins all five. This box joins only its own. A single flat network shared
 # by every node (v1 of this contract) would let this box's connector reach
 # every OTHER node's connector /admin and the gateway's handover port;
-# per-node networks mean only the edge itself can reach a node. v1's single
+# per-node networks mean only the edge (and the relay's one connector, which
+# joins each app's network to route to it) can reach a node. v1's single
 # shared network name is retired and must not appear anywhere in this bundle
 # any more.
 #
@@ -65,11 +64,11 @@
 # limit, the upload body-size cap and the long read timeout matter most for
 # a storage node.
 #
-# `networks: default: {}` is repeated on both services below because ADDING
-# an explicit `networks:` key to a service that otherwise gets the implicit
+# `networks: default: {}` is kept on the store below because ADDING an
+# explicit `networks:` key to a service that otherwise gets the implicit
 # default network REPLACES it rather than extending it -- so without this,
-# joining `edge-store` would silently cut the connector and the store off
-# from each other and from the (disabled) nginx. Same pattern as the
+# joining `edge-store` would silently cut the store off from the rest of its
+# own project. Same pattern as the
 # provider's `docker-compose.hidden.yml`.
 #
 # ── mem_limit ────────────────────────────────────────────────────────────────
@@ -78,27 +77,23 @@
 # starts), not the 2 GB box the first pass of this overlay assumed. Idle
 # `docker stats` taken 2026-09-25 on production Linodes running the same
 # images: connector 2 MB, store 39 MB. `nginx`, `certbot` and `watchtower`
-# stay disabled on this box and keep their original provisional limits --
+# stay disabled on this box and keep their original provisional limits (the
+# connector, disabled too now, keeps its measured one) --
 # see the per-service comments below for how each active limit was derived.
 # =============================================================================
 
 services:
+  # Disabled the same way as nginx/certbot/watchtower below. The devnet's one
+  # connector is the relay's (https://toonprotocol.dev/ilp): it joins
+  # `edge-store` and routes the store's prefixes straight to
+  # http://store-dvm:3300/store, at the same prices as before.
+  # No edge alias and no loopback publish any more -- nothing runs to carry
+  # them. The connector_state volume is left in place.
   connector:
-    # measured idle 2 MB on 2026-09-25 (infra#25 step 2); limit ≈4× idle.
+    # measured idle 2 MB on 2026-09-25 (infra#25 step 2); limit ≈4× idle,
+    # kept in case the profile is ever activated by hand.
     mem_limit: 64m
-    networks:
-      default: {}
-      edge-store:
-        aliases: [store-proxy]
-    # Shared host, one connector loopback port each (infra#25, connector#1337):
-    # every node bundle's docker-compose.yml publishes its connector on
-    # 127.0.0.1:4000, which collided the day two nodes landed on the same
-    # box. `!override` (Compose >=2.24) replaces the whole `ports:` list
-    # rather than merging into it, so 4003 is this node's ONLY publish under
-    # the overlay. The container side stays 4000 -- nothing inside the
-    # container, including its own healthcheck, changes.
-    ports: !override
-      - '127.0.0.1:4003:4000'
+    profiles: [disabled]
 
   store:
     # measured idle 39 MB on 2026-09-25 (infra#25 step 2). This overlay also

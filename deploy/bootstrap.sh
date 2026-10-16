@@ -58,7 +58,8 @@ set -a; . ./.env; set +a
 echo
 case ":${COMPOSE_FILE:-}:" in
   *:docker-compose.shared-edge.yml:*)
-    echo "store box up, behind the shared edge (nginx/certbot disabled)."
+    echo "store box up, behind the shared edge (nginx/certbot/connector disabled)."
+    echo "  paid ILP edge : the relay's one connector, https://toonprotocol.dev/ilp"
     echo "  Joined to the external \"edge-store\" network -- see deploy/README.md"
     echo "  \"Running behind the shared edge\" for the alias:port table."
     ;;

@@ -19,7 +19,9 @@
 #   * after `up -d` the connector must reach `healthy`, or this exits non-zero
 #     so `systemctl status` and the journal show it. A box that comes back
 #     unhealthy is also picked up by the connector repo's fleet-health.yml,
-#     which opens a needs-triage issue;
+#     which opens a needs-triage issue. (A stack whose connector is disabled
+#     -- the devnet's shared-edge overlay -- has its connector container
+#     removed and waits on the store's healthcheck instead; see below.);
 #   * a render or apply failure is retried, and reported, on every run until
 #     it is fixed -- never silently sat on with the box left on the new
 #     commit and the old config (TOON_Network#164, porting TOON_Network#160;
@@ -182,18 +184,50 @@ fi
 # on it (GET /ilp/identity), so this is a real answer rather than "the
 # container exists". Docker resets Health.Status to `starting` on restart, so
 # calling this right after a restart cannot read a stale `healthy`.
-wait_connector_healthy() {
-  local connector status
-  connector=$(docker compose "${COMPOSE[@]}" ps -q connector)
+wait_service_healthy() {
+  local service=$1 container status
+  container=$(docker compose "${COMPOSE[@]}" ps -q "$service")
   for _ in $(seq 1 40); do
-    status=$(docker inspect "$connector" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')
+    status=$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')
     [ "$status" = healthy ] && return 0
     sleep 3
   done
-  echo "FAILED: the connector is '${status:-unknown}' after applying ${REMOTE:0:7}."
-  docker compose "${COMPOSE[@]}" logs --tail 40 connector || true
+  echo "FAILED: the $service is '${status:-unknown}' after applying ${REMOTE:0:7}."
+  docker compose "${COMPOSE[@]}" logs --tail 40 "$service" || true
   return 1
 }
+wait_connector_healthy() { wait_service_healthy connector; }
+
+# A stack with no connector in it. The devnet's shared-edge overlay disables
+# this node's connector (`profiles: [disabled]`): the devnet runs ONE
+# connector, the relay's at https://toonprotocol.dev/ilp, which reaches the
+# store over `edge-store` as `store-dvm:3300`. Two things follow.
+#
+#   * `up -d` does NOT stop a container whose service a profile has just
+#     switched off -- it is not an orphan, so not even --remove-orphans
+#     touches it, and `ps -q connector` keeps finding it. Left alone, the old
+#     connector would keep running (and keep passing the checks below)
+#     forever. `rm -sf` stops and removes it; its named volume
+#     (connector_state) is kept.
+#   * There is no connector to wait for or verify, so the store's own
+#     healthcheck is what this apply waits on instead.
+#
+# `config --services` lists only the services the active compose files and
+# profiles enable. A failure here is a failure, never read as "no connector".
+if ! SERVICES=$(docker compose "${COMPOSE[@]}" config --services); then
+  echo "FAILED: 'docker compose config --services' failed for ${REMOTE:0:7} (its message is above)." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$SERVICES" | grep -qx connector; then
+  if [ -n "$CONNECTOR_BEFORE_UP" ]; then
+    echo "the connector is disabled in this stack; stopping and removing its container (connector_state is kept)"
+    docker compose "${COMPOSE[@]}" rm -sf connector
+  fi
+  wait_service_healthy store || exit 1
+  printf '%s\n' "$REMOTE" > "$APPLIED_FILE"
+  echo "applied ${REMOTE:0:7}; no connector in this stack, store healthy."
+  exit 0
+fi
 
 wait_connector_healthy || exit 1
 
