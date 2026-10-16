@@ -1,8 +1,8 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
-import { parse } from 'smol-toml';
-import { parse as parseYaml } from 'yaml';
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { parse } from "smol-toml";
+import { parse as parseYaml } from "yaml";
 
 /**
  * Repo-consistency guard for deploy/ — the bundle that IS the store box.
@@ -12,9 +12,9 @@ import { parse as parseYaml } from 'yaml';
  * because every one of them has been wrong on a live box at least once.
  */
 
-const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const readRepoFile = (relativePath: string): string =>
-  readFileSync(`${repoRoot}${relativePath}`, 'utf8');
+  readFileSync(`${repoRoot}${relativePath}`, "utf8");
 
 // ---------------------------------------------------------------------------
 // The connector config is a TEMPLATE. The rendered connector.toml is gitignored
@@ -24,17 +24,18 @@ const readRepoFile = (relativePath: string): string =>
 // the template has to be rendered here too rather than parsed as literal text.
 // ---------------------------------------------------------------------------
 
-const CONNECTOR_TEMPLATE = readRepoFile('deploy/connector.toml.template');
-const RENDER_SH = readRepoFile('deploy/render.sh');
+const CONNECTOR_TEMPLATE = readRepoFile("deploy/connector.toml.template");
+const RENDER_SH = readRepoFile("deploy/render.sh");
 
 const RENDER_SUBSTITUTIONS: Record<string, string> = {
-  OPERATOR_BEARER_TOKEN: 'f'.repeat(64),
-  OPERATOR_WRITE_KEY: 'a'.repeat(64),
+  DOMAIN: "example.com",
+  OPERATOR_BEARER_TOKEN: "f".repeat(64),
+  OPERATOR_WRITE_KEY: "a".repeat(64),
 };
 
 const renderedConnectorToml = Object.entries(RENDER_SUBSTITUTIONS).reduce(
   (text, [name, value]) => text.replaceAll(`\${${name}}`, value),
-  CONNECTOR_TEMPLATE
+  CONNECTOR_TEMPLATE,
 );
 
 /** A price is either a flat integer or a `{ base, per_kib }` schedule (ADR 0065). */
@@ -58,7 +59,7 @@ interface ConnectorPeer {
 
 /** What a route charges for a packet with `payloadLen` bytes of payload. */
 const chargeFor = (price: ConnectorPrice, payloadLen: number): number =>
-  typeof price === 'number'
+  typeof price === "number"
     ? price
     : price.base + price.per_kib * Math.ceil(payloadLen / 1024);
 
@@ -85,17 +86,25 @@ interface ConnectorToml {
   node?: { addresses: string[]; http_endpoint: string; btp_endpoint: string };
   announce?: unknown;
   peers?: ConnectorPeer[];
-  peer_channels?: { peer_id: string; channel_id: string; counterparty_key: string }[];
-  pay_channels?: { peer_id: string; channel_id: string; client_edge_url: string }[];
+  peer_channels?: {
+    peer_id: string;
+    channel_id: string;
+    counterparty_key: string;
+  }[];
+  pay_channels?: {
+    peer_id: string;
+    channel_id: string;
+    client_edge_url: string;
+  }[];
 }
 
 const connectorToml = parse(renderedConnectorToml) as unknown as ConnectorToml;
 
 /** The template with comment lines removed — for assertions about config that
  *  must not be confused by prose that merely NAMES a key. */
-const connectorTemplateCode = CONNECTOR_TEMPLATE.split('\n')
+const connectorTemplateCode = CONNECTOR_TEMPLATE.split("\n")
   .filter((line) => !/^\s*#/.test(line))
-  .join('\n');
+  .join("\n");
 
 // ---------------------------------------------------------------------------
 // Compose
@@ -117,7 +126,7 @@ interface ComposeFile {
 }
 
 const composeFile = parseYaml(
-  readRepoFile('deploy/docker-compose.yml')
+  readRepoFile("deploy/docker-compose.yml"),
 ) as unknown as ComposeFile;
 
 // A compose `ports:` entry may be a string like '${EDGE_BIND:-127.0.0.1}:3000:3000'
@@ -130,7 +139,7 @@ const composeFile = parseYaml(
 function substituteComposeVars(value: string): string {
   return value.replace(
     /\$\{[^}:]+(?::-([^}]*))?\}/g,
-    (_match, def: string | undefined) => def ?? ''
+    (_match, def: string | undefined) => def ?? "",
   );
 }
 
@@ -140,16 +149,20 @@ interface PublishedPort {
   resolved: string;
 }
 
-const describePort = ({ serviceName, entry, resolved }: PublishedPort): string =>
+const describePort = ({
+  serviceName,
+  entry,
+  resolved,
+}: PublishedPort): string =>
   `deploy/docker-compose.yml service "${serviceName}" ports entry "${entry}" (resolves to "${resolved}")`;
 
 const publishedPorts: PublishedPort[] = Object.entries(
-  composeFile.services
+  composeFile.services,
 ).flatMap(([serviceName, service]) =>
   (service.ports ?? []).map((rawEntry) => {
     const entry = String(rawEntry);
     return { serviceName, entry, resolved: substituteComposeVars(entry) };
-  })
+  }),
 );
 
 // ---------------------------------------------------------------------------
@@ -161,7 +174,7 @@ const publishedPorts: PublishedPort[] = Object.entries(
 // constants as of ADR 0075 / connector#1385 (the x402-only build) and are no
 // longer named in config, so there is no registry/program address to pin here
 // any more.
-const EXPECTED_TOKEN_ADDRESS = '0x0C996d7c934c79a6255254875607Fe69df25C0E1';
+const EXPECTED_TOKEN_ADDRESS = "0x0C996d7c934c79a6255254875607Fe69df25C0E1";
 
 // ADR 0010: the fleet-wide settlement asset is 6-decimal USDC everywhere.
 const EXPECTED_DECIMALS = 6;
@@ -170,8 +183,8 @@ const EXPECTED_DECIMALS = 6;
 // wherever [settlement.evm] exists. The EIP-712 domain of the devnet's own
 // Circle FiatToken v2.2 deployment (connector#1337) — a wrong value builds a
 // signature that never verifies.
-const EXPECTED_ASSET_EIP712_NAME = 'USDC';
-const EXPECTED_ASSET_EIP712_VERSION = '2';
+const EXPECTED_ASSET_EIP712_NAME = "USDC";
+const EXPECTED_ASSET_EIP712_VERSION = "2";
 
 // The Solana half of the same settlement statement. connector#1212: the mock
 // USDC this node named until 2026-08-27 is still on chain and still holds its
@@ -184,7 +197,7 @@ const EXPECTED_ASSET_EIP712_VERSION = '2';
 // Squarely "a thing that has been wrong on a live box", and it went unnoticed
 // because only the EVM leg above was ever asserted here.
 const EXPECTED_SOLANA_TOKEN_ADDRESS =
-  '34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU';
+  "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU";
 
 // ADR 0075: required wherever [settlement.solana] exists — bounds how much
 // SOL a stranger can make this node spend through the sponsor endpoint. 1 USDC
@@ -215,11 +228,11 @@ const EXPECTED_ROUTE_PER_KIB = 10;
 // It ADVERTISES one: its own. `g.toon.relay.store` belongs to the relay's
 // prefix and is the relay's to hand out; this box answers to it without
 // claiming it in `GET /ilp`.
-const EXPECTED_ROUTE_PREFIXES = ['g.toon.store', 'g.toon.relay.store'].sort();
-const EXPECTED_ADVERTISED_ADDRESSES = ['g.toon.store'];
-const RELAYS_NAME_FOR_US = 'g.toon.relay.store';
+const EXPECTED_ROUTE_PREFIXES = ["g.toon.store", "g.toon.relay.store"].sort();
+const EXPECTED_ADVERTISED_ADDRESSES = ["g.toon.store"];
+const RELAYS_NAME_FOR_US = "g.toon.relay.store";
 
-const TERMINATED_PREFIX = 'g.toon.store';
+const TERMINATED_PREFIX = "g.toon.store";
 
 // One immutable connector build, pinned here and in docker-compose.yml
 // together. This box used to follow the fleet's `:rust-release` pointer on the
@@ -231,41 +244,47 @@ const TERMINATED_PREFIX = 'g.toon.store';
 // (`g.toon.store.relay`) forwarded for free on that build. Bumping this
 // literal and the compose tag in one reviewed commit is how the connector
 // moves now.
-const EXPECTED_CONNECTOR_IMAGE = 'ghcr.io/toon-protocol/connector:rust-2026.09.29.1';
+const EXPECTED_CONNECTOR_IMAGE =
+  "ghcr.io/toon-protocol/connector:rust-2026.09.29.1";
 
 // Moved by publish-store-image.yml on every green main, watched by Watchtower.
-const EXPECTED_STORE_IMAGE = 'ghcr.io/toon-protocol/store:release';
+const EXPECTED_STORE_IMAGE = "ghcr.io/toon-protocol/store:release";
 
-const WATCHTOWER_LABEL = 'com.centurylinklabs.watchtower.enable';
+const WATCHTOWER_LABEL = "com.centurylinklabs.watchtower.enable";
 
 // The two app services, and therefore the two — and only two — that
 // Watchtower may recreate: the store follows a moving tag, and the connector
 // keeps the label so a bumped pin is picked up on the next `up -d`. nginx
 // holds the resolver that lets every other recreate self-heal; certbot holds
 // the renewal timer; Watchtower must not recreate itself.
-const WATCHED_SERVICES = ['connector', 'store'].sort();
+const WATCHED_SERVICES = ["connector", "store"].sort();
 
-describe('deploy/ bundle is internally consistent', () => {
-  it('terminates exactly the route prefixes the fleet expects', () => {
+describe("deploy/ bundle is internally consistent", () => {
+  it("terminates exactly the route prefixes the fleet expects", () => {
     expect(connectorToml.routes.map((r) => r.prefix).sort()).toEqual(
-      EXPECTED_ROUTE_PREFIXES
+      EXPECTED_ROUTE_PREFIXES,
     );
   });
 
-  it('prices the store route as a schedule over payload length', () => {
-    const terminated = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX);
+  it("prices the store route as a schedule over payload length", () => {
+    const terminated = connectorToml.routes.find(
+      (r) => r.prefix === TERMINATED_PREFIX,
+    );
     expect(terminated?.price).toEqual({
       base: EXPECTED_ROUTE_BASE,
       per_kib: EXPECTED_ROUTE_PER_KIB,
     });
   });
 
-
   it("terminates the relay's name for us at the same handler, on the same schedule", () => {
     // One handler at two prices is refused by the connector outright, and a
     // cheaper second door would take every packet anyway.
-    const ours = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX);
-    const theirs = connectorToml.routes.find((r) => r.prefix === RELAYS_NAME_FOR_US);
+    const ours = connectorToml.routes.find(
+      (r) => r.prefix === TERMINATED_PREFIX,
+    );
+    const theirs = connectorToml.routes.find(
+      (r) => r.prefix === RELAYS_NAME_FOR_US,
+    );
     expect(theirs?.handler_url).toBe(ours?.handler_url);
     expect(theirs?.price).toEqual(ours?.price);
   });
@@ -274,47 +293,55 @@ describe('deploy/ bundle is internally consistent', () => {
     // The gap between the two lists, asserted directly: routed, not claimed.
     // Re-adding it to `[node]` would have this box telling every client that
     // discovers it that it owns a name under the relay's prefix.
-    expect(connectorToml.routes.map((r) => r.prefix)).toContain(RELAYS_NAME_FOR_US);
+    expect(connectorToml.routes.map((r) => r.prefix)).toContain(
+      RELAYS_NAME_FOR_US,
+    );
     expect(connectorToml.node?.addresses).not.toContain(RELAYS_NAME_FOR_US);
   });
 
-  it('charges more for a bigger upload', () => {
+  it("charges more for a bigger upload", () => {
     // The whole point of the schedule. Guards against someone flattening it
     // back to an integer without noticing what it was for.
-    const price = connectorToml.routes.find((r) => r.prefix === TERMINATED_PREFIX)!.price;
+    const price = connectorToml.routes.find(
+      (r) => r.prefix === TERMINATED_PREFIX,
+    )!.price;
     expect(chargeFor(price, 1024)).toBeLessThan(chargeFor(price, 1024 * 1024));
     // base + per_kib * ceil(bytes/1024), rounded UP to the whole kibibyte
-    expect(chargeFor(price, 1)).toBe(EXPECTED_ROUTE_BASE + EXPECTED_ROUTE_PER_KIB);
+    expect(chargeFor(price, 1)).toBe(
+      EXPECTED_ROUTE_BASE + EXPECTED_ROUTE_PER_KIB,
+    );
     expect(chargeFor(price, 0)).toBe(EXPECTED_ROUTE_BASE);
   });
 
-  it('points every terminated route at the backend\'s /store path', () => {
+  it("points every terminated route at the backend's /store path", () => {
     // The connector POSTs to handler_url LITERALLY. A bare `http://store:3300`
     // reaches the backend and comes back F99 "app declined the delivery with
     // HTTP 404", because the backend serves POST /store.
-    const terminated = connectorToml.routes.filter((r) => r.handler_url !== undefined);
+    const terminated = connectorToml.routes.filter(
+      (r) => r.handler_url !== undefined,
+    );
     expect(terminated.length).toBeGreaterThan(0);
     for (const route of terminated) {
       expect(
         route.handler_url,
-        `route "${route.prefix}" handler_url must end in /store`
+        `route "${route.prefix}" handler_url must end in /store`,
       ).toMatch(/^http:\/\/store:3300\/store$/);
     }
   });
 
-  it('gives every route exactly one of handler_url or peer_id', () => {
+  it("gives every route exactly one of handler_url or peer_id", () => {
     for (const route of connectorToml.routes) {
       const branches = [route.handler_url, route.peer_id].filter(
-        (b) => b !== undefined
+        (b) => b !== undefined,
       );
       expect(
         branches.length,
-        `route "${route.prefix}" must have exactly one of handler_url / peer_id`
+        `route "${route.prefix}" must have exactly one of handler_url / peer_id`,
       ).toBe(1);
     }
   });
 
-  it('routes sharing a handler_url agree on price', () => {
+  it("routes sharing a handler_url agree on price", () => {
     const priceByHandler = new Map<string, string>();
     for (const route of connectorToml.routes) {
       if (route.handler_url === undefined) continue;
@@ -323,57 +350,59 @@ describe('deploy/ bundle is internally consistent', () => {
       if (seen !== undefined) {
         expect(
           price,
-          `routes sharing ${route.handler_url} must agree on price`
+          `routes sharing ${route.handler_url} must agree on price`,
         ).toBe(seen);
       }
       priceByHandler.set(route.handler_url, price);
     }
   });
 
-  it('settles against the current token, decimals and EIP-712 domain', () => {
-    expect(connectorToml.settlement.evm.token_address).toBe(EXPECTED_TOKEN_ADDRESS);
+  it("settles against the current token, decimals and EIP-712 domain", () => {
+    expect(connectorToml.settlement.evm.token_address).toBe(
+      EXPECTED_TOKEN_ADDRESS,
+    );
     expect(connectorToml.settlement.evm.decimals).toBe(EXPECTED_DECIMALS);
     expect(connectorToml.settlement.evm.asset_eip712_name).toBe(
-      EXPECTED_ASSET_EIP712_NAME
+      EXPECTED_ASSET_EIP712_NAME,
     );
     expect(connectorToml.settlement.evm.asset_eip712_version).toBe(
-      EXPECTED_ASSET_EIP712_VERSION
+      EXPECTED_ASSET_EIP712_VERSION,
     );
     // connector#1419: published so a payer knows how to deposit, and who pays
     // its gas (connector ADR 0076, toon-client#695).
-    expect(connectorToml.settlement.evm.asset_transfer_method).toBe('eip3009');
+    expect(connectorToml.settlement.evm.asset_transfer_method).toBe("eip3009");
     expect(connectorToml.settlement.evm.facilitator_url).toBe(
-      'https://onboard.devnet.toonprotocol.dev'
+      "https://onboard.devnet.toonprotocol.dev",
     );
   });
 
-  it('settles against the current Solana mint, decimals and sponsor floor', () => {
+  it("settles against the current Solana mint, decimals and sponsor floor", () => {
     // A claim resolves against the one payment-channels deployment the binary
     // fixes (ADR 0075), so naming a different mint than the fleet does is a
     // node that cannot settle what buyers opened.
     expect(connectorToml.settlement.solana.token_address).toBe(
-      EXPECTED_SOLANA_TOKEN_ADDRESS
+      EXPECTED_SOLANA_TOKEN_ADDRESS,
     );
     expect(connectorToml.settlement.solana.decimals).toBe(EXPECTED_DECIMALS);
     expect(connectorToml.settlement.solana.min_sponsored_deposit).toBe(
-      EXPECTED_MIN_SPONSORED_DEPOSIT
+      EXPECTED_MIN_SPONSORED_DEPOSIT,
     );
   });
 
-  it('keeps the claim watermark on a mounted volume', () => {
+  it("keeps the claim watermark on a mounted volume", () => {
     // A state_dir that dies with the container hands every payer their
     // already-spent claims back as free service.
-    expect(connectorToml.state_dir).toBe('/app/state');
-    const connector = composeFile.services['connector'];
+    expect(connectorToml.state_dir).toBe("/app/state");
+    const connector = composeFile.services["connector"];
     expect(
       JSON.stringify(connector),
-      'connector must mount a volume at /app/state'
-    ).toContain(':/app/state');
+      "connector must mount a volume at /app/state",
+    ).toContain(":/app/state");
   });
 });
 
-describe('deploy/ pins the connector and follows the store tag', () => {
-  it('pins one immutable build -- a rust-sha- build or a rust-<release handle> -- never a moving tag', () => {
+describe("deploy/ pins the connector and follows the store tag", () => {
+  it("pins one immutable build -- a rust-sha- build or a rust-<release handle> -- never a moving tag", () => {
     // Nothing moves `:rust-release` any more (connector ADR 0068); a bundle
     // following it stands still. The literal here and in docker-compose.yml
     // are the two places a bump has to land, together, and
@@ -387,68 +416,75 @@ describe('deploy/ pins the connector and follows the store tag', () => {
     // `:rust-main`, `:latest` -- is what this rejects, because it would make
     // the pin a pointer someone else controls and put an unreviewed build on
     // this box.
-    const image = composeFile.services['connector']?.image;
+    const image = composeFile.services["connector"]?.image;
     expect(image).toBe(EXPECTED_CONNECTOR_IMAGE);
-    expect(image).toMatch(/:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/);
-    expect(readRepoFile('deploy/docker-compose.yml')).not.toContain('rust-release');
+    expect(image).toMatch(
+      /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/,
+    );
+    expect(readRepoFile("deploy/docker-compose.yml")).not.toContain(
+      "rust-release",
+    );
   });
 
-  it('ships no announce sidecar', () => {
+  it("ships no announce sidecar", () => {
     // ADR 0046 removed the one-shot `connector announce` verb the sidecar ran
     // in a loop; `GET /ilp` serves the [node] self-description instead.
-    expect(composeFile.services['announce']).toBeUndefined();
+    expect(composeFile.services["announce"]).toBeUndefined();
   });
 
-  it('runs the store on the tag green main moves', () => {
-    expect(composeFile.services['store']?.image).toBe(EXPECTED_STORE_IMAGE);
+  it("runs the store on the tag green main moves", () => {
+    expect(composeFile.services["store"]?.image).toBe(EXPECTED_STORE_IMAGE);
   });
 
-  it('carries the pin literal in docker-compose.yml and nowhere else in the bundle', () => {
+  it("carries the pin literal in docker-compose.yml and nowhere else in the bundle", () => {
     // One pin, one place. A second rust-sha- literal in the template, the env
     // example or the README is a stale copy waiting to be read as the truth
     // after the next bump; the docs say `rust-sha-` generically instead.
     for (const file of [
-      'deploy/connector.toml.template',
-      'deploy/.env.example',
-      'deploy/README.md',
+      "deploy/connector.toml.template",
+      "deploy/.env.example",
+      "deploy/README.md",
     ]) {
-      expect(readRepoFile(file), `${file} must not pin a rust-sha- tag`).not.toMatch(
-        /rust-sha-[0-9a-f]{7}/
-      );
+      expect(
+        readRepoFile(file),
+        `${file} must not pin a rust-sha- tag`,
+      ).not.toMatch(/rust-sha-[0-9a-f]{7}/);
     }
   });
 
-  it('says out loud how the pin is bumped', () => {
+  it("says out loud how the pin is bumped", () => {
     expect(CONNECTOR_TEMPLATE).toMatch(/targets an exact, immutable build/);
-    expect(readRepoFile('deploy/README.md')).toMatch(/^## Bumping the connector pin/m);
+    expect(readRepoFile("deploy/README.md")).toMatch(
+      /^## Bumping the connector pin/m,
+    );
   });
 
-  it('labels exactly the two app services for Watchtower', () => {
+  it("labels exactly the two app services for Watchtower", () => {
     const labelled = Object.entries(composeFile.services)
-      .filter(([, service]) => service.labels?.[WATCHTOWER_LABEL] === 'true')
+      .filter(([, service]) => service.labels?.[WATCHTOWER_LABEL] === "true")
       .map(([name]) => name)
       .sort();
     expect(labelled).toEqual(WATCHED_SERVICES);
   });
 
-  it('never lets Watchtower recreate the TLS edge or itself', () => {
-    for (const name of ['nginx', 'certbot', 'watchtower']) {
+  it("never lets Watchtower recreate the TLS edge or itself", () => {
+    for (const name of ["nginx", "certbot", "watchtower"]) {
       expect(
         composeFile.services[name]?.labels?.[WATCHTOWER_LABEL],
-        `service "${name}" must NOT carry the Watchtower enable label`
+        `service "${name}" must NOT carry the Watchtower enable label`,
       ).toBeUndefined();
     }
   });
 });
 
-describe('deploy/ config matches the pinned connector', () => {
+describe("deploy/ config matches the pinned connector", () => {
   // The connector parser is deny_unknown_fields and startup is fail-closed, so
   // a key a connector has removed is a refuse-to-start, not a degraded run.
   // Verified by booting the pinned image on this config. Asserted
   // against the parsed document and comment-stripped source, so prose that
   // merely names a retired key does not trip them.
 
-  it('uses [node], not the retired [announce]', () => {
+  it("uses [node], not the retired [announce]", () => {
     expect(connectorToml.announce).toBeUndefined();
     expect(connectorTemplateCode).not.toMatch(/^\s*\[announce\]/m);
     // Advertise this box's OWN name and nothing else. Not every terminated
@@ -465,14 +501,25 @@ describe('deploy/ config matches the pinned connector', () => {
     // That is why dropping the relay's name from here does not disturb the
     // peering or the route the relay holds.
     expect(connectorToml.node?.addresses.slice().sort()).toEqual(
-      EXPECTED_ADVERTISED_ADDRESSES.slice().sort()
+      EXPECTED_ADVERTISED_ADDRESSES.slice().sort(),
     );
     for (const advertised of connectorToml.node?.addresses ?? []) {
       expect(EXPECTED_ROUTE_PREFIXES).toContain(advertised);
     }
   });
 
-  it('declares no peering shared secret', () => {
+  it("advertises the operator's own edge, not a hostname of the TOON devnet", () => {
+    // A box running this bundle is reached at proxy.ario.<its DOMAIN>, the
+    // name nginx and the certificate serve.
+    expect(connectorToml.node?.http_endpoint).toBe(
+      "https://proxy.ario.example.com/ilp",
+    );
+    expect(connectorToml.node?.btp_endpoint).toBe(
+      "wss://proxy.ario.example.com/ilp/btp",
+    );
+  });
+
+  it("declares no peering shared secret", () => {
     // ADR 0060 deleted `[[peers]] credential` by name — a peering is proven by
     // a verified claim on a [[peer_channels]] row, not by a string both
     // operators wrote into their own config files.
@@ -484,16 +531,16 @@ describe('deploy/ config matches the pinned connector', () => {
   // Inline values made the rendered connector.toml itself a secret; paths mean
   // the only secret on the box is the file, which is the same shape the relay
   // and gas-station bundles run.
-  it('names the operator credentials by path, never inline', () => {
+  it("names the operator credentials by path, never inline", () => {
     expect(Object.keys(connectorToml.operator).sort()).toEqual([
-      'bearer_token_file',
-      'write_keys_file',
+      "bearer_token_file",
+      "write_keys_file",
     ]);
-    expect(connectorToml.operator['bearer_token_file']).toBe(
-      '/app/data/operator-bearer.token'
+    expect(connectorToml.operator["bearer_token_file"]).toBe(
+      "/app/data/operator-bearer.token",
     );
-    expect(connectorToml.operator['write_keys_file']).toBe(
-      '/app/data/operator-write.keys'
+    expect(connectorToml.operator["write_keys_file"]).toBe(
+      "/app/data/operator-write.keys",
     );
     // The inline spelling must not come back: it would put a live credential
     // into the rendered file again.
@@ -501,95 +548,102 @@ describe('deploy/ config matches the pinned connector', () => {
     expect(connectorTemplateCode).not.toMatch(/^\s*write_keys\s*=/m);
   });
 
-  it('mounts both operator credential files read-only where the config names them', () => {
+  it("mounts both operator credential files read-only where the config names them", () => {
     // A path the config names but the compose file does not mount is a
     // refuse-to-start: the connector reads the section at boot, fail-closed.
-    const volumes = composeFile.services['connector']?.volumes ?? [];
-    for (const file of ['operator-bearer.token', 'operator-write.keys']) {
+    const volumes = composeFile.services["connector"]?.volumes ?? [];
+    for (const file of ["operator-bearer.token", "operator-write.keys"]) {
       expect(
         volumes,
-        `connector must mount ./${file} at /app/data/${file} read-only`
+        `connector must mount ./${file} at /app/data/${file} read-only`,
       ).toContain(`./${file}:/app/data/${file}:ro`);
     }
   });
 
-  it('proves the connector is SERVING, not merely up', () => {
+  it("proves the connector is SERVING, not merely up", () => {
     // `docker ps` showing "Up" says the process exists. GET /ilp/identity is
     // unauthenticated and answers 200 only once the listener is bound and the
     // signer key file has been read.
-    const healthcheck = composeFile.services['connector']?.healthcheck;
-    expect(healthcheck, 'the connector service needs a healthcheck').toBeDefined();
-    const test = (healthcheck?.test ?? []).join(' ');
-    expect(test).toContain('/ilp/identity');
+    const healthcheck = composeFile.services["connector"]?.healthcheck;
+    expect(
+      healthcheck,
+      "the connector service needs a healthcheck",
+    ).toBeDefined();
+    const test = (healthcheck?.test ?? []).join(" ");
+    expect(test).toContain("/ilp/identity");
     // 127.0.0.1, never localhost: the listener is IPv4-only, and "localhost"
     // in a container can resolve to ::1, where nothing answers.
-    expect(test).toContain('http://127.0.0.1:4000/ilp/identity');
-    expect(test, 'localhost can resolve to ::1 in a container').not.toContain(
-      'localhost'
+    expect(test).toContain("http://127.0.0.1:4000/ilp/identity");
+    expect(test, "localhost can resolve to ::1 in a container").not.toContain(
+      "localhost",
     );
   });
 });
 
-describe('deploy/ render.sh substitutes exactly what the templates need', () => {
+describe("deploy/ render.sh substitutes exactly what the templates need", () => {
   const placeholdersIn = (text: string): string[] =>
     [...text.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)].map((m) => m[1]!).sort();
 
-  it('covers every placeholder in the connector template', () => {
+  it("covers every placeholder in the connector template", () => {
     const needed = new Set(placeholdersIn(connectorTemplateCode));
     for (const name of needed) {
       expect(
         RENDER_SH,
-        `render.sh must pass \${${name}} to envsubst for connector.toml.template`
+        `render.sh must pass \${${name}} to envsubst for connector.toml.template`,
       ).toContain(`\${${name}}`);
       expect(
         Object.keys(RENDER_SUBSTITUTIONS),
-        `this test must render \${${name}} too`
+        `this test must render \${${name}} too`,
       ).toContain(name);
     }
   });
 
-  it('covers every placeholder in the nginx template', () => {
-    const nginxTemplate = readRepoFile('deploy/nginx/node.conf.template');
+  it("covers every placeholder in the nginx template", () => {
+    const nginxTemplate = readRepoFile("deploy/nginx/node.conf.template");
     for (const name of new Set(placeholdersIn(nginxTemplate))) {
       expect(
         RENDER_SH,
-        `render.sh must pass \${${name}} to envsubst for node.conf.template`
+        `render.sh must pass \${${name}} to envsubst for node.conf.template`,
       ).toContain(`\${${name}}`);
     }
   });
 
-  it('renders the connector template into valid TOML with no leftovers', () => {
+  it("renders the connector template into valid TOML with no leftovers", () => {
     expect(renderedConnectorToml).not.toMatch(/\$\{/);
     expect(() => parse(renderedConnectorToml)).not.toThrow();
   });
 
-  it('keeps every rendered file, and both operator credentials, out of git', () => {
+  it("keeps every rendered file, and both operator credentials, out of git", () => {
     // connector.toml is only paths now, but the two files render.sh writes
     // beside it are the real credentials — and neither matches the `*.key`
     // rule already there.
-    const ignored = readRepoFile('deploy/.gitignore');
+    const ignored = readRepoFile("deploy/.gitignore");
     expect(ignored).toMatch(/^connector\.toml$/m);
     expect(ignored).toMatch(/^operator-bearer\.token$/m);
     expect(ignored).toMatch(/^operator-write\.keys$/m);
   });
 
-  it('writes both operator credential files from the same .env variables', () => {
+  it("writes both operator credential files from the same .env variables", () => {
     // The variable names did not change — operators already have them set.
-    expect(RENDER_SH).toMatch(/\$\{OPERATOR_BEARER_TOKEN\}.*>\s*operator-bearer\.token/s);
-    expect(RENDER_SH).toContain('${OPERATOR_WRITE_KEY}');
-    expect(RENDER_SH).toContain('> operator-write.keys');
+    expect(RENDER_SH).toMatch(
+      /\$\{OPERATOR_BEARER_TOKEN\}.*>\s*operator-bearer\.token/s,
+    );
+    expect(RENDER_SH).toContain("${OPERATOR_WRITE_KEY}");
+    expect(RENDER_SH).toContain("> operator-write.keys");
   });
 
-  it('hands both operator files to the container uid, 0600', () => {
+  it("hands both operator files to the container uid, 0600", () => {
     // A root-owned 0600 file is unreadable to uid 10001 — "Permission denied",
     // then a restart loop.
-    expect(RENDER_SH).toMatch(/chmod 600 .*operator-bearer\.token operator-write\.keys/);
+    expect(RENDER_SH).toMatch(
+      /chmod 600 .*operator-bearer\.token operator-write\.keys/,
+    );
     expect(RENDER_SH).toMatch(/chown "\$\{CONNECTOR_UID:-10001\}/);
     expect(RENDER_SH).toMatch(/not running as root/);
   });
 });
 
-describe('deploy/ leaves the relay peering to the operator surface', () => {
+describe("deploy/ leaves the relay peering to the operator surface", () => {
   // ADR 0058 establishes a peering from the counterparty's URL at runtime:
   // POST /peers reads its self-description, derives the payment channel and
   // opens it on chain if absent, then POST /routes/peers adds the forwarded
@@ -601,65 +655,75 @@ describe('deploy/ leaves the relay peering to the operator surface', () => {
   // (CF-33). Ownership is permanent, so writing a peer row here would take the
   // peering away from the surface that manages it, for good.
 
-  it('declares no peer, and no channel book, in the config file', () => {
-    expect(connectorToml.peers, 'a [[peers]] row here would claim the key from the operator surface').toBeUndefined();
+  it("declares no peer, and no channel book, in the config file", () => {
+    expect(
+      connectorToml.peers,
+      "a [[peers]] row here would claim the key from the operator surface",
+    ).toBeUndefined();
     expect(connectorToml.peer_channels).toBeUndefined();
     expect(connectorToml.pay_channels).toBeUndefined();
   });
 
-  it('declares no forwarded route in the config file', () => {
+  it("declares no forwarded route in the config file", () => {
     for (const route of connectorToml.routes) {
       expect(
         route.peer_id,
-        `route "${route.prefix}" forwards, and a forwarded route belongs to the runtime table`
+        `route "${route.prefix}" forwards, and a forwarded route belongs to the runtime table`,
       ).toBeUndefined();
     }
   });
 
-  it('still accepts peer carriage, so a peering can be established at all', () => {
+  it("still accepts peer carriage, so a peering can be established at all", () => {
     // A peering needs somewhere to arrive. The relay dials us.
     expect(connectorTemplateCode).toMatch(/^\s*peer_expose\s*=\s*"btp"/m);
   });
 });
 
-describe('deploy/ publishes nothing it should not', () => {
-  it('publishes only the TLS edge on public interfaces', () => {
+describe("deploy/ publishes nothing it should not", () => {
+  it("publishes only the TLS edge on public interfaces", () => {
     for (const port of publishedPorts) {
-      const segments = port.resolved.split(':');
+      const segments = port.resolved.split(":");
       const isPublic =
-        segments.length < 3 || segments[0] === '' || segments[0] === '0.0.0.0';
+        segments.length < 3 || segments[0] === "" || segments[0] === "0.0.0.0";
       if (isPublic) {
         expect(
           port.serviceName,
-          `${describePort(port)} publishes on all interfaces; only nginx may`
-        ).toBe('nginx');
+          `${describePort(port)} publishes on all interfaces; only nginx may`,
+        ).toBe("nginx");
         expect(
           segments[segments.length - 2],
-          `${describePort(port)} — nginx may publish only 80 and 443`
+          `${describePort(port)} — nginx may publish only 80 and 443`,
         ).toMatch(/^(80|443)$/);
       }
     }
   });
 
-  it('binds the paid connector edge to the loopback only', () => {
+  it("binds the paid connector edge to the loopback only", () => {
     // Docker publishes ports by writing iptables rules that BYPASS ufw, so a
     // 0.0.0.0 bind here would put the paid edge on the public internet behind
     // a firewall that says otherwise. nginx is the only intended front door.
-    const connectorPorts = publishedPorts.filter((p) => p.serviceName === 'connector');
+    const connectorPorts = publishedPorts.filter(
+      (p) => p.serviceName === "connector",
+    );
     expect(connectorPorts.length).toBeGreaterThan(0);
     for (const port of connectorPorts) {
-      expect(port.resolved, describePort(port)).toMatch(/^127\.0\.0\.1:\d+:\d+$/);
+      expect(port.resolved, describePort(port)).toMatch(
+        /^127\.0\.0\.1:\d+:\d+$/,
+      );
     }
   });
 
-  it('keeps the store backend and health ports off the host entirely', () => {
-    const store = composeFile.services['store'];
-    expect(store?.ports, 'store must not publish any host port').toBeUndefined();
-    expect((store?.expose ?? []).map(String).sort()).toEqual(['3300', '3400']);
+  it("keeps the store backend and health ports off the host entirely", () => {
+    const store = composeFile.services["store"];
+    expect(
+      store?.ports,
+      "store must not publish any host port",
+    ).toBeUndefined();
+    expect((store?.expose ?? []).map(String).sort()).toEqual(["3300", "3400"]);
   });
 });
 
-describe('deploy/ auto-apply.sh activates what it renders', () => {
+describe("deploy/ auto-apply.sh activates what it renders", () => {
   // store#124: the rendered connector.toml is bind-mounted, and `up -d`
   // recreates a container on a changed image or definition, never on changed
   // bytes behind a bind mount, so a green apply left a rendered addresses
@@ -668,30 +732,32 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
   // connector (and only the connector) a restart, in the right order, and the
   // script then proves the running connector serves what was rendered.
 
-  const AUTO_APPLY = readRepoFile('deploy/auto-apply.sh');
-  const lines = AUTO_APPLY.split('\n');
+  const AUTO_APPLY = readRepoFile("deploy/auto-apply.sh");
+  const lines = AUTO_APPLY.split("\n");
   const isCode = (line: string): boolean => !/^\s*#/.test(line);
   const firstCodeLine = (re: RegExp): number =>
     lines.findIndex((line) => isCode(line) && re.test(line));
 
-  it('restarts the connector service, and never the whole project', () => {
+  it("restarts the connector service, and never the whole project", () => {
     // `restarting`/`restarted` in log text deliberately do not match \brestart\b.
-    const restarts = lines.filter((line) => isCode(line) && /\brestart\b/.test(line));
+    const restarts = lines.filter(
+      (line) => isCode(line) && /\brestart\b/.test(line),
+    );
     expect(
       restarts.length,
-      'a rendered config change must be activated by a restart'
+      "a rendered config change must be activated by a restart",
     ).toBeGreaterThan(0);
     for (const line of restarts) {
       // A bare `restart` bounces every service, nginx included, whose whole
       // job is to outlive the others.
       expect(
         line,
-        'every restart must name exactly the connector service'
+        "every restart must name exactly the connector service",
       ).toMatch(/\brestart\s+connector\s*$/);
     }
   });
 
-  it('keys the restart on the fingerprints AND the served state, inside a conditional', () => {
+  it("keys the restart on the fingerprints AND the served state, inside a conditional", () => {
     // The mechanism: fingerprint the connector's rendered inputs before and
     // after render.sh runs, read what the RUNNING connector serves, and
     // restart when either disagrees. The served-state trigger is the one that
@@ -699,18 +765,27 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
     // byte-comparison of this run's disk can never see that state.
     const checksumAt = lines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => isCode(line) && /\b(?:sha\d+sum|md5sum|cksum)\b/.test(line))
+      .filter(
+        ({ line }) =>
+          isCode(line) && /\b(?:sha\d+sum|md5sum|cksum)\b/.test(line),
+      )
       .map(({ index }) => index);
     expect(
       checksumAt.length,
-      'the rendered inputs must be fingerprinted (before AND after render.sh)'
+      "the rendered inputs must be fingerprinted (before AND after render.sh)",
     ).toBeGreaterThanOrEqual(1);
     const renderAt = firstCodeLine(/\.\/render\.sh$/);
     expect(renderAt).toBeGreaterThanOrEqual(0);
     const sumBeforeAt = firstCodeLine(/^SUM_BEFORE=/);
     const sumAfterAt = firstCodeLine(/^SUM_AFTER=/);
-    expect(sumBeforeAt, 'a fingerprint must be taken before render.sh').toBeLessThan(renderAt);
-    expect(sumAfterAt, 'a fingerprint must be taken after render.sh').toBeGreaterThan(renderAt);
+    expect(
+      sumBeforeAt,
+      "a fingerprint must be taken before render.sh",
+    ).toBeLessThan(renderAt);
+    expect(
+      sumAfterAt,
+      "a fingerprint must be taken after render.sh",
+    ).toBeGreaterThan(renderAt);
 
     const restartAt = firstCodeLine(/\brestart\s+connector\b/);
     expect(restartAt).toBeGreaterThanOrEqual(0);
@@ -724,18 +799,31 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
         .filter(isCode)
         .reduce(
           (depth, line) =>
-            depth + (/^\s*if\b/.test(line) ? 1 : 0) - (/^\s*fi\b/.test(line) ? 1 : 0),
-          0
+            depth +
+            (/^\s*if\b/.test(line) ? 1 : 0) -
+            (/^\s*fi\b/.test(line) ? 1 : 0),
+          0,
         );
-    expect(depthAt(restartAt), 'the restart must be inside an if-block').toBeGreaterThan(0);
+    expect(
+      depthAt(restartAt),
+      "the restart must be inside an if-block",
+    ).toBeGreaterThan(0);
 
     // Both triggers must exist as code, before the restart: the fingerprint
     // inequality and the served-vs-rendered inequality.
-    const fingerprintTrigger = firstCodeLine(/"\$SUM_AFTER"\s*!=\s*"\$SUM_BEFORE"/);
+    const fingerprintTrigger = firstCodeLine(
+      /"\$SUM_AFTER"\s*!=\s*"\$SUM_BEFORE"/,
+    );
     const servedTrigger = firstCodeLine(/"\$GOT"\s*!=\s*"\$WANT"/);
-    expect(fingerprintTrigger, 'the fingerprint inequality must gate activation').toBeGreaterThanOrEqual(0);
+    expect(
+      fingerprintTrigger,
+      "the fingerprint inequality must gate activation",
+    ).toBeGreaterThanOrEqual(0);
     expect(fingerprintTrigger).toBeLessThan(restartAt);
-    expect(servedTrigger, 'the served-state inequality must gate activation').toBeGreaterThanOrEqual(0);
+    expect(
+      servedTrigger,
+      "the served-state inequality must gate activation",
+    ).toBeGreaterThanOrEqual(0);
     expect(servedTrigger).toBeLessThan(restartAt);
 
     // And the restart's own guard must consume what those triggers set — with
@@ -747,31 +835,34 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
       .slice(0, restartAt)
       .reverse()
       .find((line) => isCode(line) && /^\s*if\b/.test(line));
-    expect(guard, 'the restart must be conditional').toBeDefined();
+    expect(guard, "the restart must be conditional").toBeDefined();
     expect(
       guard,
-      'the condition must fire exactly when a trigger armed it (= 1, not a flipped polarity)'
+      "the condition must fire exactly when a trigger armed it (= 1, not a flipped polarity)",
     ).toMatch(/\[\s*"\$NEEDS_RESTART"\s*=\s*1\s*\]/);
     const triggerAssignments = lines.filter(
-      (line) => isCode(line) && /NEEDS_RESTART=1/.test(line)
+      (line) => isCode(line) && /NEEDS_RESTART=1/.test(line),
     );
     expect(
       triggerAssignments.length,
-      'both triggers must arm the restart'
+      "both triggers must arm the restart",
     ).toBeGreaterThanOrEqual(2);
     // The disarm side is pinned too: the flag must start 0 (a run with no
     // trigger must not restart), and no line may ever set it back to 0 after
     // a trigger armed it.
     const disarmAt = firstCodeLine(/NEEDS_RESTART=0/);
-    expect(disarmAt, 'the flag must be initialised to 0').toBeGreaterThanOrEqual(0);
+    expect(
+      disarmAt,
+      "the flag must be initialised to 0",
+    ).toBeGreaterThanOrEqual(0);
     expect(disarmAt).toBeLessThan(fingerprintTrigger);
     expect(
       lines.filter((line) => isCode(line) && /NEEDS_RESTART=0/.test(line)),
-      'nothing may disarm the flag after a trigger'
+      "nothing may disarm the flag after a trigger",
     ).toHaveLength(1);
   });
 
-  it('renders, reads the served state, restarts, waits healthy again, then re-verifies', () => {
+  it("renders, reads the served state, restarts, waits healthy again, then re-verifies", () => {
     // Story 8's ordering, asserted on the lines that DO the work rather than
     // on any curl in a helper definition: after the restart there must be a
     // fresh health wait and a fresh served-state read, and the final
@@ -779,49 +870,57 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
     const renderAt = firstCodeLine(/\.\/render\.sh$/);
     const restartAt = firstCodeLine(/\brestart\s+connector\b/);
     expect(renderAt).toBeGreaterThanOrEqual(0);
-    expect(restartAt, 'the restart must come after render.sh').toBeGreaterThan(renderAt);
+    expect(restartAt, "the restart must come after render.sh").toBeGreaterThan(
+      renderAt,
+    );
 
     // An invocation, not the function definition line.
     const healthWaits = lines
       .map((line, index) => ({ line, index }))
       .filter(
         ({ line }) =>
-          isCode(line) && /wait_connector_healthy\b/.test(line) && !/\(\)/.test(line)
+          isCode(line) &&
+          /wait_connector_healthy\b/.test(line) &&
+          !/\(\)/.test(line),
       )
       .map(({ index }) => index);
     expect(
       healthWaits.some((index) => index > restartAt),
-      'a health wait must follow the restart -- a restart after the last wait is story 8 broken'
+      "a health wait must follow the restart -- a restart after the last wait is story 8 broken",
     ).toBe(true);
 
     const servedReads = lines
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => isCode(line) && /GOT=\$\(served_ilp_addresses\)/.test(line))
+      .filter(
+        ({ line }) =>
+          isCode(line) && /GOT=\$\(served_ilp_addresses\)/.test(line),
+      )
       .map(({ index }) => index);
     expect(
       servedReads.length,
-      'the served state must be read before the decision and again after the restart'
+      "the served state must be read before the decision and again after the restart",
     ).toBeGreaterThanOrEqual(2);
     const lastServedRead = Math.max(...servedReads);
-    expect(lastServedRead, 'the post-restart read must follow the restart').toBeGreaterThan(
-      restartAt
-    );
+    expect(
+      lastServedRead,
+      "the post-restart read must follow the restart",
+    ).toBeGreaterThan(restartAt);
     const lastCompareAt = lines.reduce(
       (last, line, index) =>
         isCode(line) && /"\$GOT"\s*!=\s*"\$WANT"/.test(line) ? index : last,
-      -1
+      -1,
     );
     expect(
       lastCompareAt,
-      'the final verdict must judge the post-restart read'
+      "the final verdict must judge the post-restart read",
     ).toBeGreaterThan(lastServedRead);
     expect(
-      lines.slice(lastCompareAt).join('\n'),
-      'a mismatch must exit non-zero'
+      lines.slice(lastCompareAt).join("\n"),
+      "a mismatch must exit non-zero",
     ).toMatch(/\bexit\s+1\b/);
   });
 
-  it('verifies against ilpAddresses specifically, and refuses vacuous or unreachable answers', () => {
+  it("verifies against ilpAddresses specifically, and refuses vacuous or unreachable answers", () => {
     // The body also lists routes[].prefix, and this box deliberately
     // terminates a name it does not advertise -- comparing anything wider
     // than ilpAddresses fails every healthy apply. The assertion pins the
@@ -830,54 +929,61 @@ describe('deploy/ auto-apply.sh activates what it renders', () => {
     const producerAt = firstCodeLine(/grep -o '"ilpAddresses":/);
     expect(
       producerAt,
-      'the served-address extraction must select the ilpAddresses field'
+      "the served-address extraction must select the ilpAddresses field",
     ).toBeGreaterThanOrEqual(0);
     const helperStart = firstCodeLine(/^served_ilp_addresses\(\)/);
     expect(helperStart).toBeGreaterThanOrEqual(0);
     expect(
       producerAt,
-      'the extraction must live in the helper every GOT read goes through'
+      "the extraction must live in the helper every GOT read goes through",
     ).toBeGreaterThan(helperStart);
 
     // An empty rendered address list would let the comparison pass vacuously.
     const emptyWantGuard = firstCodeLine(/-z\s+"\$WANT"/);
-    expect(emptyWantGuard, 'an empty WANT must be refused, not compared').toBeGreaterThanOrEqual(0);
+    expect(
+      emptyWantGuard,
+      "an empty WANT must be refused, not compared",
+    ).toBeGreaterThanOrEqual(0);
 
     // A curl failure must surface as "unreachable", never as a mismatch: the
     // helper propagates curl's failure, and both call sites handle it.
-    expect(
-      AUTO_APPLY,
-      'curl must not be masked with || true'
-    ).not.toMatch(/curl[^\n]*\|\|\s*true/);
+    expect(AUTO_APPLY, "curl must not be masked with || true").not.toMatch(
+      /curl[^\n]*\|\|\s*true/,
+    );
     const unreachableHandlers = lines.filter(
-      (line) => isCode(line) && /unreachable/.test(line)
+      (line) => isCode(line) && /unreachable/.test(line),
     );
     expect(
       unreachableHandlers.length,
-      'both served-state reads must report an unreachable /ilp by name'
+      "both served-state reads must report an unreachable /ilp by name",
     ).toBeGreaterThanOrEqual(2);
   });
 
-  it('fingerprints every file render.sh writes that the connector bind-mounts', () => {
+  it("fingerprints every file render.sh writes that the connector bind-mounts", () => {
     // A rotated OPERATOR_WRITE_KEY re-renders only operator-write.keys; if the
     // fingerprint watched connector.toml alone, the revoked key would stay
     // authorised behind a green apply -- store#124's bug class, for a
     // security-relevant file. The fingerprinted set must cover every ./ bind
     // into the connector service.
     const helperStart = firstCodeLine(/^fingerprint_connector_inputs\(\)/);
-    expect(helperStart, 'the fingerprint helper must exist').toBeGreaterThanOrEqual(0);
-    const helperEnd = lines.findIndex((line, index) => index > helperStart && /^\}/.test(line));
-    const helperBody = lines.slice(helperStart, helperEnd + 1).join('\n');
+    expect(
+      helperStart,
+      "the fingerprint helper must exist",
+    ).toBeGreaterThanOrEqual(0);
+    const helperEnd = lines.findIndex(
+      (line, index) => index > helperStart && /^\}/.test(line),
+    );
+    const helperBody = lines.slice(helperStart, helperEnd + 1).join("\n");
 
-    const connectorBinds = (composeFile.services['connector']?.volumes ?? [])
+    const connectorBinds = (composeFile.services["connector"]?.volumes ?? [])
       .map(String)
-      .filter((volume) => volume.startsWith('./'))
-      .map((volume) => volume.slice(2).split(':')[0] ?? '');
+      .filter((volume) => volume.startsWith("./"))
+      .map((volume) => volume.slice(2).split(":")[0] ?? "");
     expect(connectorBinds.length).toBeGreaterThan(0);
     for (const bind of connectorBinds) {
       expect(
         helperBody,
-        `the fingerprint must cover the bind-mounted ${bind}`
+        `the fingerprint must cover the bind-mounted ${bind}`,
       ).toContain(bind);
     }
   });
