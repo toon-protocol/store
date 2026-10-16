@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render the files that carry deployment-specific values.
 #
-#   connector.toml.template   -> connector.toml            (paths, no secrets)
+#   connector.toml.template   -> connector.toml            (DOMAIN, no secrets)
 #   .env OPERATOR_BEARER_TOKEN-> operator-bearer.token     (0600 — a secret)
 #   .env OPERATOR_WRITE_KEY   -> operator-write.keys       (0600 — public keys)
 #   nginx/node.conf.template  -> nginx/conf.d/node.conf
@@ -23,11 +23,11 @@ set -a; . ./.env; set +a
 : "${CERT_NAME:=proxy.ario.${DOMAIN}}"
 export CERT_NAME
 
-# The connector template carries no placeholder any more: the operator
-# credentials moved out into the two files written below, and everything else
-# in it is a literal. Copying keeps the template/rendered split, so the file
-# the box runs is still an output nobody edits in place.
-cp connector.toml.template connector.toml
+# The connector template's one placeholder is DOMAIN, in the public URLs
+# `[node]` advertises. The operator credentials moved out into the two files
+# written below, and everything else in it is a literal. The template/rendered
+# split means the file the box runs is still an output nobody edits in place.
+envsubst '${DOMAIN}' < connector.toml.template > connector.toml
 
 # ── The operator surface's two credentials ───────────────────────────────────
 # The connector reads them from files, so connector.toml names paths and holds

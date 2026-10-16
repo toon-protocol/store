@@ -241,8 +241,10 @@ write_keys_file   = "/app/data/operator-write.keys"
 
 # What this node cannot introspect about itself: the addresses it answers for
 # and the public URLs it is reachable on. Clients read this back from
-# `GET /ilp` to discover the node.
+# `GET /ilp` to discover the node. The URLs are your own paid edge,
+# `proxy.ario.${DOMAIN}` — the name nginx and the certificate serve; render.sh
+# fills DOMAIN in from .env.
 [node]
 addresses     = ["g.toon.store"]
-http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
-btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
+http_endpoint = "https://proxy.ario.${DOMAIN}/ilp"
+btp_endpoint  = "wss://proxy.ario.${DOMAIN}/ilp/btp"
