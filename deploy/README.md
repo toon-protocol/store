@@ -170,9 +170,13 @@ directory works unchanged.
 
 The devnet is moving onto one Linode, shared by the relay, store, gas
 station, workload gateway and faucet nodes, behind one Caddy **edge** that
-owns ports 80 and 443 (infra#24, infra ADR 0001). This box keeps its own
-connector, keys and hostnames — only its own TLS front (`nginx` + `certbot`)
-goes away.
+owns ports 80 and 443 (infra#24, infra ADR 0001). This box's own TLS front
+(`nginx` + `certbot`) goes away, and so does its own connector: the devnet
+runs **one** connector, the relay's, at **`https://toonprotocol.dev/ilp`**.
+It joins `edge-store` and routes the store's prefixes straight to
+`http://store-dvm:3300/store`, at the same prices as before. A store
+operator running this bundle standalone is unaffected: `docker-compose.yml`
+and `connector.toml.template` still bring up this bundle's own connector.
 
 Turn it on with two lines in `.env`, the same pattern as the provider's
 `docker-compose.hidden.yml`:
@@ -190,42 +194,32 @@ issuing or renewing a certificate for this box.
 
 `docker-compose.shared-edge.yml`:
 
-- disables `nginx`, `certbot` and `watchtower` (`profiles: [disabled]` — a
-  profile nothing ever activates). Watchtower is not missed:
-  `auto-apply.sh` already pulls the pinned `store`/`connector` images
-  unattended.
-- joins `connector` and `store` to the **external** Docker network
-  `edge-store` (one of five per-node networks the infra#24 edge project
-  creates — `edge-relay`, `edge-store`, `edge-gas`, `edge-gateway`,
-  `edge-faucet` — with Caddy alone joining all five) under stable aliases.
-  Each node on its own network, rather than one flat network everyone
-  shares, is what keeps this box's connector unreachable from every other
-  node on the host — only the edge itself can reach in.
+- disables `nginx`, `certbot`, `watchtower` and `connector`
+  (`profiles: [disabled]` — a profile nothing ever activates). Watchtower is
+  not missed: `auto-apply.sh` already pulls the pinned `store` image
+  unattended. The connector's `connector_state` volume is left in place.
+- joins `store` to the **external** Docker network `edge-store` (one of five
+  per-node networks the infra#24 edge project creates — `edge-relay`,
+  `edge-store`, `edge-gas`, `edge-gateway`, `edge-faucet` — with Caddy, and
+  the relay's one connector, joining them) under the stable alias
+  `store-dvm`. Each node on its own network, rather than one flat network
+  everyone shares, keeps this box unreachable from every other node on the
+  host.
 - adds a `mem_limit` to every service, sized for the confirmed 1 GB Linode
   nanode host (961 MB total, ~350 MB used by OS/Docker before any node
-  starts). `connector` (64m) and `store` (256m, with `NODE_OPTIONS` also
-  overridden to `--max-old-space-size=192`) are based on idle `docker stats`
+  starts). `connector` (64m, kept though it is disabled) and `store` (256m,
+  with `NODE_OPTIONS` also overridden to `--max-old-space-size=192`) are
+  based on idle `docker stats`
   measured 2026-09-25 on production Linodes (connector 2 MB, store 39 MB
   idle; infra#25 step 2). `nginx`, `certbot` and `watchtower` stay disabled
   and keep their original provisional limits (32m, 32m, 64m).
-- moves the connector's loopback publish to **`127.0.0.1:4003:4000`**
-  (`ports: !override`, so it is the *only* publish once the overlay is on).
-  Every node bundle's own `docker-compose.yml` publishes its connector on
-  `127.0.0.1:4000`, and those collide once several nodes share one host — a
-  real outage (infra#25). The container side stays 4000; only the host side
-  moves, to this node's own assignment:
 
-  | Node | Host loopback port |
-  |---|---|
-  | relay | `127.0.0.1:3000` |
-  | gateway | `127.0.0.1:4001` |
-  | gas-station | `127.0.0.1:4002` |
-  | store | `127.0.0.1:4003` |
-
-  `auto-apply.sh` already asks `docker compose port connector 4000` for
-  whatever port is actually published, across every file `COMPOSE_FILE`
-  names, rather than assuming 4000 (connector#1337) — it needed no further
-  change for this.
+`docker compose up -d` does **not** stop a container whose service a profile
+has just switched off, so `auto-apply.sh` asks `docker compose config
+--services` whether the stack still has a connector. When it does not, it
+stops and removes the old connector container (`rm -sf`, which keeps
+`connector_state`), skips the connector health wait and the `GET /ilp`
+activation check, and waits on the store's own healthcheck instead.
 
 ### The alias:port table infra#24's edge config is written from
 
@@ -234,8 +228,12 @@ hostname, which the edge's config has to replicate:
 
 | Hostname | Edge upstream | Container:port | What it serves |
 |---|---|---|---|
-| `proxy.ario.${DOMAIN}` | `store-proxy:4000` | `connector:4000` | the paid ILP edge |
 | `dvm.${DOMAIN}` | `store-dvm:3400` | `store:3400` | health (`BLS_PORT`) |
+
+`proxy.ario.${DOMAIN}` no longer has an upstream on this box: the paid ILP
+edge is the relay's one connector at `https://toonprotocol.dev/ilp` (the
+infra repo repoints the old `proxy.*` names at it), and it reaches the store
+at `store-dvm:3300/store`.
 
 ### What nginx does beyond plain proxying — the edge must replicate this
 
@@ -294,8 +292,8 @@ connector is `127.0.0.1:4000:4000`, and the store publishes nothing at all —
 so the paid edge is reachable only through this box's own reverse proxy rather
 than by trusting the firewall to hide a `0.0.0.0` bind.
 `src/deploy-bundle-guard.test.ts` fails CI if that ever regresses. Under the
-shared-edge overlay this moves to `127.0.0.1:4003:4000` — see "Running behind
-the shared edge", above.
+shared-edge overlay this bundle runs no connector at all and publishes nothing
+— see "Running behind the shared edge", above.
 
 ## The routing table
 
@@ -420,7 +418,9 @@ Once that PR merges, the box applies it within five minutes:
 re-renders, runs `docker compose up -d`, restarts the connector whenever its
 rendered inputs changed **or** the running connector serves addresses that
 disagree with the render, and requires it to come back **healthy** and to
-prove (via `GET /ilp`) that the rendered config is what is actually served. It is pull-based deliberately — no CI job anywhere holds SSH
+prove (via `GET /ilp`) that the rendered config is what is actually served.
+(Under the shared-edge overlay there is no connector; it waits on the store
+instead — see "Running behind the shared edge".) It is pull-based deliberately — no CI job anywhere holds SSH
 into a node, which is the posture connector ADR 0068 settled — and it refuses
 to touch a box whose working tree is dirty, so a human mid-operation is never
 overwritten.
@@ -461,7 +461,7 @@ it should prove itself exactly like every later one does.
 | File | What it is |
 |---|---|
 | `../.github/workflows/adopt-connector-release.yml` | Watches the connector repo for a cut release, renders this bundle's `connector.toml` and boots the candidate against it, then opens (and auto-merges) the pin bump. |
-| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, activates the render with a connector restart when needed, requires the connector to come back healthy serving the rendered config, and retries a failed render or apply on every run until it is fixed. |
+| `auto-apply.sh` | On the box: fast-forwards `main`, re-renders, `docker compose up -d`, activates the render with a connector restart when needed, requires the connector to come back healthy serving the rendered config (or, when the stack disables the connector, removes its container and requires the store healthy), and retries a failed render or apply on every run until it is fixed. |
 | `toon-auto-apply-store.service` / `.timer` | The systemd pair that runs it every five minutes. Install once, below. |
 
 The split is deliberate: the workflow decides **what** to run and proves it

@@ -171,6 +171,8 @@ if [ "\${1:-}" = compose ]; then
     "restart "*) exit "\${STUB_RESTART_EXIT:-0}" ;;
     "logs --tail 40 "*) exit 0 ;;
     "port connector 4000") echo "\${STUB_PORT:-}"; exit 0 ;;
+    "config --services") printf '%s\n' \${STUB_SERVICES:-connector store}; exit 0 ;;
+    "rm -sf connector") exit 0 ;;
     "exec -T nginx nginx -s reload") exit "\${STUB_NGINX_RELOAD_EXIT:-0}" ;;
   esac
   echo "stub docker: unexpected compose call: $rest" >&2
@@ -375,6 +377,52 @@ describe('the shared-edge overlay (store#137, infra#24)', () => {
       result.calls,
       'auto-apply.sh must never pass its own -f flag to docker compose'
     ).not.toMatch(/(^|\s)-f(\s|$)/);
+  });
+});
+
+describe('a stack whose connector is disabled (the devnet one-connector overlay)', () => {
+  it('removes the still-running connector container, waits on the store instead, and records the apply', () => {
+    // docker-compose.shared-edge.yml sets the connector `profiles: [disabled]`
+    // -- the devnet runs one connector, the relay's. `up -d` does NOT stop a
+    // container whose service a profile just switched off, and `ps -q
+    // connector` still finds it (the stub answers cid-connector), so the
+    // script must take it down itself rather than keep verifying it.
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box, { STUB_SERVICES: 'store' });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.calls).toMatch(/compose config --services/);
+    expect(result.calls, 'the old connector container is stopped and removed').toMatch(
+      /compose rm -sf connector/
+    );
+    expect(result.calls, 'it waits on the store').toMatch(/compose ps -q store/);
+    expect(result.calls, 'no GET /ilp: there is no connector to ask').not.toMatch(/curl /);
+    expect(result.calls, 'never restarts a connector that is not there').not.toMatch(
+      /restart connector/
+    );
+    expect(applied(box)).toBe(origin.sha);
+  });
+
+  it('fails the apply when the store never turns healthy', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    // A short-circuited wait: 40 polls of `sleep 3` would make this slow, so
+    // stub sleep out on PATH for this run only.
+    const sleepBin = tmp('store-stub-sleep-');
+    writeFileSync(join(sleepBin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+    chmodSync(join(sleepBin, 'sleep'), 0o755);
+    const result = autoApply(box, {
+      STUB_SERVICES: 'store',
+      STUB_HEALTH: 'unhealthy',
+      PATH: `${sleepBin}:${stubBin}:${process.env.PATH}`,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toMatch(/FAILED: the store is 'unhealthy'/);
+    expect(applied(box)).toBeNull();
   });
 });
 

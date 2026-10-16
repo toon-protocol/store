@@ -73,22 +73,24 @@ const overlayYaml = parseYaml(
 ) as { services: Record<string, ComposeService> };
 
 describe('deploy/docker-compose.shared-edge.yml', () => {
-  it('disables nginx, certbot and watchtower entirely with no active profile', () => {
+  it('disables nginx, certbot, watchtower and the connector entirely with no active profile', () => {
+    // The connector too: the devnet runs ONE connector, the relay's at
+    // https://toonprotocol.dev/ilp, which reaches the store over edge-store
+    // as store-dvm:3300. docker-compose.yml keeps its own connector for
+    // standalone operators (asserted at the bottom of this file).
     const merged = composeConfig([BASE, OVERLAY]);
-    for (const name of ['nginx', 'certbot', 'watchtower']) {
+    for (const name of ['nginx', 'certbot', 'watchtower', 'connector']) {
       expect(
         merged.services[name],
         `"${name}" must be dropped from the default (no-profile) config`
       ).toBeUndefined();
     }
-    expect(Object.keys(merged.services).sort()).toEqual(['connector', 'store']);
+    expect(Object.keys(merged.services).sort()).toEqual(['store']);
   });
 
   it('never binds host port 80 or 443 when the overlay is on', () => {
-    // The connector's own loopback publish moves under the overlay (below)
-    // but was never a public bind either way. What must disappear is 80 and
-    // 443: with nginx disabled, nothing in this bundle may claim them, since
-    // the shared edge owns both on the host.
+    // What must disappear is 80 and 443: with nginx disabled, nothing in
+    // this bundle may claim them, since the shared edge owns both on the host.
     const merged = composeConfig([BASE, OVERLAY]);
     for (const [name, service] of Object.entries(merged.services)) {
       for (const port of service.ports ?? []) {
@@ -100,22 +102,16 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
     }
   });
 
-  it('moves the connector off the shared 4000 to its own loopback port, and nothing else', () => {
-    // infra#25, connector#1337: every node bundle's docker-compose.yml
-    // publishes its connector on 127.0.0.1:4000, which collides once several
-    // share a host. `ports: !override` must leave 4003 as the connector's
-    // ONLY publish under the overlay; the container side stays 4000.
-    const merged = composeConfig([BASE, OVERLAY]);
-    const ports = merged.services['connector']?.ports ?? [];
-    expect(ports).toHaveLength(1);
-    expect(ports[0]).toMatchObject({ host_ip: '127.0.0.1', target: 4000, published: '4003' });
-  });
-
-  it('joins the connector to the external `edge-store` network as `store-proxy`', () => {
-    const merged = composeConfig([BASE, OVERLAY]);
-    const networks = merged.services['connector']?.networks ?? {};
-    expect(Object.keys(networks).sort()).toEqual(['default', 'edge-store']);
-    expect(networks['edge-store']?.aliases).toEqual(['store-proxy']);
+  it('disables the connector the same way as the other switched-off services', () => {
+    // Read from the overlay's own text, since a profile-disabled service is
+    // absent from the merged config. Same profile name as nginx/certbot/
+    // watchtower, and no leftover edge alias or loopback publish.
+    const connector = overlayYaml.services['connector'];
+    expect(connector?.profiles).toEqual(['disabled']);
+    expect(connector?.networks).toBeUndefined();
+    expect(connector?.ports).toBeUndefined();
+    const overlayText = readFileSync(`${deployDir}${OVERLAY}`, 'utf8');
+    expect(overlayText).not.toMatch(/store-proxy/);
   });
 
   it('joins the store to the external `edge-store` network as `store-dvm`', () => {
@@ -147,12 +143,11 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
     );
   });
 
-  it('keeps the connector reachable on the default network too, alongside edge-store', () => {
+  it('keeps the store on the default network too, alongside edge-store', () => {
     // A `networks:` override REPLACES the implicit default network rather
     // than extending it -- without `default: {}` in the overlay, joining
-    // `edge-store` would silently cut the connector off from the store.
+    // `edge-store` would silently cut the store off from its own project.
     const merged = composeConfig([BASE, OVERLAY]);
-    expect(merged.services['connector']?.networks?.['default']).toBeDefined();
     expect(merged.services['store']?.networks?.['default']).toBeDefined();
   });
 
@@ -170,7 +165,8 @@ describe('deploy/docker-compose.shared-edge.yml', () => {
 
   it('marks the disabled proxy services\' limits as still provisional, and the active ones as measured', () => {
     // `connector` and `store` are sized from real idle `docker stats`
-    // (infra#25 step 2); `nginx`, `certbot` and `watchtower` are disabled on
+    // (infra#25 step 2; the connector is disabled now but keeps its measured
+    // limit); `nginx`, `certbot` and `watchtower` are disabled on
     // this box and were never re-measured, so their old provisional
     // wording must stay put rather than being blanket-replaced.
     const overlayText = readFileSync(`${deployDir}${OVERLAY}`, 'utf8');
