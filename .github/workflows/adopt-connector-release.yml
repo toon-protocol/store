@@ -44,6 +44,14 @@
 #     the expected path here, and it is still a genuine answer to Decision 1's
 #     question, because config validation happens strictly before backend
 #     construction.
+#   * `[settlement.<chain>] could not be bound:`       -> PASS. The x402-only
+#     connector builds (2026.09.28.1 on, connector ADR 0074/0075) stop here
+#     instead, e.g. "[settlement.solana] could not be bound: ... holds no
+#     lamports". It is raised while building the live connector from an
+#     already validated `Config`, so it too comes strictly after config
+#     validation. It also covers a token/contract the chain disagrees with,
+#     which the gate accepts on purpose: its question is whether the build
+#     accepts the file, not whether the file settles.
 #   * anything else, including `config file ... is not valid`
 #                                                      -> FAIL. A key this
 #     build refuses by name, a renamed field, a newly required one: exactly
@@ -248,6 +256,11 @@ jobs:
           if echo "$OUT" | grep -q 'failed to construct the configured settlement backend'; then
             echo "✅ the candidate ACCEPTED this node's config; it got as far as"
             echo "   dialling a chain, which a CI runner holds no funded key for."
+            exit 0
+          fi
+          if echo "$OUT" | grep -Eq '\[settlement\.[A-Za-z0-9_-]+\] could not be bound:'; then
+            echo "✅ the candidate ACCEPTED this node's config; it stopped at"
+            echo "   binding a chain backend that a CI runner holds no funded key for."
             exit 0
           fi
 
