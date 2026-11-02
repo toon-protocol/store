@@ -160,9 +160,9 @@ serves the free tier.
 
 Payment is **per upload, on demand** (store#128). With
 `STORE_TURBO_MAX_ARIO_PER_UPLOAD` set, every upload takes the paid route, whatever
-its size: turbo-sdk's `OnDemandFunding` prices the actual byte count, buys the
-credits the wallet is short of from its $ARIO, and throws rather than spending
-above the ceiling. Setting the ceiling is the spend authorization. Unset, uploads
+its size: the store prices the actual byte count, buys what the key's raw-pubkey
+Turbo account (the one the bundler debits) is short of from the wallet's $ARIO,
+and throws rather than spending above the ceiling. Setting the ceiling is the spend authorization. Unset, uploads
 whose *signed* data item fits Turbo's 107,520-byte free ceiling rely on the
 bundler's free allowance, which is finite (an exhausted signer gets a 402), and
 above-ceiling uploads are refused by name before any bytes reach Turbo. There is
