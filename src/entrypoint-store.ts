@@ -20,8 +20,8 @@
  *                            enforces the flat route price)
  *   KIND_PRICING_<kind>   -> config.kindPricing[kind] (per-kind override)
  *   STORE_TURBO_SOLANA_KEY -> base58 64-byte Solana secret key: the ONE Turbo
- *                            credential. Signs every upload and pays for the
- *                            above-free-tier ones in $ARIO. Treated as secret
+ *                            credential. Signs every upload and, with the
+ *                            ceiling below, pays for them in $ARIO. Treated as secret
  *                            — never logged. Unset: an ephemeral Solana key
  *                            serves the free tier only.
  *   ARNS_DVM_SOLANA_SECRET_KEY -> OPTIONAL: 128-char hex (64-byte Ed25519
@@ -39,7 +39,7 @@
  *   STORE_TURBO_SOLANA_GATEWAY -> OPTIONAL Solana RPC override for the $ARIO
  *                            path. devnet REQUIRES one naming a devnet RPC.
  *   STORE_TURBO_MAX_ARIO_PER_UPLOAD -> per-upload $ARIO ceiling for on-demand
- *                            funding. Setting it turns the paid route ON;
+ *                            funding. Setting it pays for every upload;
  *                            unset, the store serves the free tier only.
  *                            See ./turbo-funding.ts (store#123/#128).
 
@@ -561,12 +561,12 @@ async function main(): Promise<void> {
   console.log(
     onDemandEnv.paidUploadsEnabled
       ? `[store] paid uploads: ON DEMAND, at most ${onDemandEnv.maxArioPerUpload} $ARIO per upload ` +
-          '(each above-free-tier upload buys exactly its own credits; no standing balance)'
+          '(each upload buys the credits it is short of)'
       : '[store] paid uploads: OFF (no STORE_TURBO_MAX_ARIO_PER_UPLOAD; above-free-tier uploads are refused by name)'
   );
 
-  // Route by the SIGNED-item size: free tier at or under the ceiling, bounded
-  // on-demand $ARIO above it (or a named refusal with no spend authority).
+  // Bounded on-demand $ARIO for every upload; with no spend authority, the free
+  // tier at or under the SIGNED-item ceiling and a named refusal above it.
   // Sits behind the existing adapter seam; the job handler knows nothing.
   const uploadAdapter = createOnDemandUploadAdapter({
     client: turboResult.client,

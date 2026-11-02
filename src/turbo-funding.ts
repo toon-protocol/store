@@ -17,18 +17,20 @@
  *  - THE FREE TIER IS A SIZE ROUTE, NOT A FALLBACK. Turbo uploads whose
  *    SIGNED data item fits the measured 107,520-byte free ceiling are free
  *    for any valid signer at any balance, including zero (verified on mainnet
- *    2026-08-29). The adapter routes by that size: at or under the ceiling,
- *    the upload is submitted with no funding at all; above it, the upload is
- *    paid for.
+ *    2026-08-29), but that allowance is finite: once a signer has used it the
+ *    bundler answers 402 to items under the ceiling too. So the free tier is
+ *    only for a store with no spend authority. A store with a spend ceiling
+ *    pays for every upload, whatever its size; one without routes by that size
+ *    and refuses what is over the ceiling.
  *
  *  - PAID UPLOADS ARE ON-DEMAND AND BOUNDED PER UPLOAD. turbo-sdk's
  *    OnDemandFunding prices the actual byte count, buys only the shortfall,
  *    and THROWS rather than spending above `maxTokenAmount` -- a per-upload
  *    bound that needs no memory of previous uploads. The bound is
  *    STORE_TURBO_MAX_ARIO_PER_UPLOAD, and setting it is what turns the paid
- *    route on: unset, the store serves the free tier and refuses an
- *    above-ceiling upload BY NAME, so an operator can run a node with no
- *    spend authority at all. This also aligns cost with revenue: the
+ *    route on, for every upload: unset, the store serves the free tier and
+ *    refuses an above-ceiling upload BY NAME, so an operator can run a node
+ *    with no spend authority at all. This also aligns cost with revenue: the
  *    connector charges the client per upload (ADR 0065 schedules), so the
  *    store pays per upload.
  *
@@ -188,7 +190,7 @@ export function estimateDataItemBytes(
 export interface TurboOnDemandEnvConfig {
   /**
    * Per-upload $ARIO ceiling handed to OnDemandFunding as `maxTokenAmount`.
-   * Set = the paid route is ON, bounded at this much per upload. Unset = the
+   * Set = every upload takes the paid route, bounded at this much. Unset = the
    * store serves the free tier only and refuses above-ceiling uploads by name.
    */
   maxArioPerUpload?: number;
@@ -237,13 +239,12 @@ interface AdapterLogger {
 }
 
 /**
- * The store's ArweaveUploadAdapter: route by the SIGNED data item size. At or
- * under the free ceiling the upload is submitted with no funding mode (the
- * free tier applies to any signer). Above it, the upload is submitted with
- * OnDemandFunding bounded by `maxArioPerUpload` -- or refused by name when no
- * bound is configured, so "no spend authority" and "your blob is malformed"
- * stay different messages, and the refusal happens before any bytes reach
- * Turbo.
+ * The store's ArweaveUploadAdapter. With `maxArioPerUpload` set, every upload
+ * is submitted with OnDemandFunding bounded by it. With none, route by the
+ * SIGNED data item size: at or under the free ceiling the upload is submitted
+ * with no funding mode, and above it the upload is refused by name, so "no
+ * spend authority" and "your blob is malformed" stay different messages, and
+ * the refusal happens before any bytes reach Turbo.
  */
 export function createOnDemandUploadAdapter(options: {
   client: TurboOnDemandClient;
@@ -299,15 +300,14 @@ export function createOnDemandUploadAdapter(options: {
       // The ceiling is on the signed data item, not the payload (the review
       // on store#128 caught the envelope-wide hole at the boundary).
       const itemBytes = estimateDataItemBytes(data.length, signerKind, tags);
-      if (itemBytes <= TURBO_FREE_TIER_MAX_BYTES) {
-        const result = await client.upload({
-          data,
-          ...(dataItemOpts ? { dataItemOpts } : {}),
-        });
-        return { txId: result.id };
-      }
-
       if (maxArioPerUpload === undefined) {
+        if (itemBytes <= TURBO_FREE_TIER_MAX_BYTES) {
+          const result = await client.upload({
+            data,
+            ...(dataItemOpts ? { dataItemOpts } : {}),
+          });
+          return { txId: result.id };
+        }
         throw new Error(
           `paid uploads are off: upload is ${data.length} bytes (~${itemBytes} signed), above the ` +
             `${TURBO_FREE_TIER_MAX_BYTES}-byte free tier, and no per-upload spend ceiling is ` +
@@ -319,7 +319,7 @@ export function createOnDemandUploadAdapter(options: {
       // actual amount is priced by Turbo for exactly this byte count, and
       // OnDemandFunding throws instead of exceeding the ceiling.
       log.info(
-        `[store] paid upload: ${data.length} bytes (~${itemBytes} signed) over the free tier, ` +
+        `[store] paid upload: ${data.length} bytes (~${itemBytes} signed), ` +
           `buying on demand (ceiling ${maxArioPerUpload} $ARIO)`
       );
       const fundingMode = await createFundingMode(maxArioPerUpload);
