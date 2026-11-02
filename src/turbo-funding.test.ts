@@ -150,12 +150,11 @@ function stubClient(): TurboOnDemandClient & { upload: ReturnType<typeof vi.fn> 
 }
 
 describe('createOnDemandUploadAdapter', () => {
-  it('submits a free-tier-sized upload with NO funding mode, tags mapped', async () => {
+  it('with no spend ceiling, submits a free-tier-sized upload with NO funding mode, tags mapped', async () => {
     const client = stubClient();
     const adapter = createOnDemandUploadAdapter({
       client,
       signerKind: 'solana-ed25519',
-      maxArioPerUpload: 5,
       log: silentLog,
     });
     const result = await adapter.upload(SMALL, { a: 'b' });
@@ -169,6 +168,24 @@ describe('createOnDemandUploadAdapter', () => {
     expect(params.data).toBe(SMALL);
     expect(params.dataItemOpts).toEqual({ tags: [{ name: 'a', value: 'b' }] });
     expect(params.fundingMode).toBeUndefined();
+  });
+
+  it('with a spend ceiling, pays for a free-tier-sized upload too', async () => {
+    // The bundler's free allowance is finite: an exhausted signer gets a 402
+    // under the size ceiling as well, so a store that can pay must not rely on it.
+    const client = stubClient();
+    const fundingMode = { marker: 'on-demand' };
+    const createFundingMode = vi.fn(async () => fundingMode);
+    const adapter = createOnDemandUploadAdapter({
+      client,
+      signerKind: 'solana-ed25519',
+      maxArioPerUpload: 5,
+      log: silentLog,
+      createFundingMode,
+    });
+    await adapter.upload(SMALL);
+    expect(createFundingMode).toHaveBeenCalledWith(5);
+    expect(client.upload.mock.calls[0]?.[0]?.fundingMode).toBe(fundingMode);
   });
 
   it('submits an above-ceiling upload WITH OnDemandFunding carrying the ceiling', async () => {
@@ -293,9 +310,10 @@ describe('createOnDemandUploadAdapter', () => {
     await adapter.upload(BIG);
     const lines = log.info.mock.calls.map((c) => String(c[0]));
     expect(lines.some((l) => l.includes('paid upload') && l.includes('5 $ARIO'))).toBe(true);
-    // ...and a free-tier upload is not.
+    // ...and a free-tier upload with no spend ceiling is not.
     log.info.mockClear();
-    await adapter.upload(SMALL);
+    const free = createOnDemandUploadAdapter({ client, signerKind: 'solana-ed25519', log });
+    await free.upload(SMALL);
     expect(log.info).not.toHaveBeenCalled();
   });
 
