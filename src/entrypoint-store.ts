@@ -61,6 +61,7 @@ import {
   createArweaveDvmHandler,
   type ArweaveDvmConfig,
   ChunkManager,
+  base58Decode,
   base58Encode,
   generateSolanaKeypair,
 } from '@toon-protocol/sdk';
@@ -235,6 +236,8 @@ interface CreateTurboAdapterResult {
   source: 'ario-solana' | 'ephemeral-free-tier';
   /** Turbo's account address for the signing key (sha256-shaped, not the Solana pubkey). */
   arweaveAddress?: string;
+  /** The signer's raw Solana pubkey: the Turbo account the bundler debits. */
+  creditAccount?: string;
 }
 
 // --- Helper: Create the Turbo client from the ONE credential (store#128) ---
@@ -269,6 +272,7 @@ export async function createTurboAdapter(
     return {
       client: client as unknown as TurboOnDemandClient,
       source: 'ario-solana',
+      creditAccount: base58Encode(base58Decode(solanaKey).slice(32)),
       ...(arweaveAddress ? { arweaveAddress } : {}),
     };
   }
@@ -574,7 +578,10 @@ async function main(): Promise<void> {
     // ceiling is measured against the ed25519 envelope.
     signerKind: 'solana-ed25519',
     ...(onDemandEnv.paidUploadsEnabled && onDemandEnv.maxArioPerUpload !== undefined
-      ? { maxArioPerUpload: onDemandEnv.maxArioPerUpload }
+      ? {
+          maxArioPerUpload: onDemandEnv.maxArioPerUpload,
+          ...(turboResult.creditAccount ? { creditAccount: turboResult.creditAccount } : {}),
+        }
       : {}),
   });
 
@@ -617,7 +624,6 @@ async function main(): Promise<void> {
   // balance. Compare public halves only; neither secret is logged.
   if (turboSolanaKey?.trim() && arnsBuyEnv.solanaSecretKey) {
     try {
-      const { base58Decode } = await import('@toon-protocol/sdk');
       const turboPub = base58Decode(turboSolanaKey.trim()).slice(32);
       const arnsPub = arnsBuyEnv.solanaSecretKey.slice(32);
       if (
@@ -698,6 +704,7 @@ async function main(): Promise<void> {
         ...(onDemandEnv.maxArioPerUpload !== undefined
           ? { maxArioPerUpload: onDemandEnv.maxArioPerUpload }
           : {}),
+        ...(turboResult.creditAccount ? { creditAccount: turboResult.creditAccount } : {}),
         ...(turboResult.arweaveAddress
           ? { accountAddress: turboResult.arweaveAddress }
           : {}),

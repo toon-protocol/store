@@ -143,10 +143,19 @@ const BIG = Buffer.alloc(TURBO_FREE_TIER_MAX_BYTES + 1, 1);
 
 const silentLog = { info: vi.fn(), warn: vi.fn() };
 
-function stubClient(): TurboOnDemandClient & { upload: ReturnType<typeof vi.fn> } {
+const ACCOUNT = 'raw-pubkey-account';
+
+function stubClient(balance = 1_000_000n) {
   return {
     upload: vi.fn(async () => ({ id: 'stub-tx' })),
-  };
+    getBalance: vi.fn(async () => ({ effectiveBalance: balance.toString() })),
+    getUploadCosts: vi.fn(async () => [{ winc: '1000' }]),
+    getWincForToken: vi.fn(async () => ({ winc: '1000000' })),
+    topUpWithTokens: vi.fn(async () => {
+      balance += 2_000_000n;
+      return { id: 'fund-tx' };
+    }),
+  } satisfies TurboOnDemandClient;
 }
 
 describe('createOnDemandUploadAdapter', () => {
@@ -163,68 +172,107 @@ describe('createOnDemandUploadAdapter', () => {
     const params = client.upload.mock.calls[0]?.[0] as {
       data: Buffer;
       dataItemOpts?: unknown;
-      fundingMode?: unknown;
     };
     expect(params.data).toBe(SMALL);
     expect(params.dataItemOpts).toEqual({ tags: [{ name: 'a', value: 'b' }] });
-    expect(params.fundingMode).toBeUndefined();
   });
 
-  it('with a spend ceiling, pays for a free-tier-sized upload too', async () => {
+  it('with a spend ceiling, a funded account pays without a top-up, whatever the size', async () => {
     // The bundler's free allowance is finite: an exhausted signer gets a 402
     // under the size ceiling as well, so a store that can pay must not rely on it.
-    const client = stubClient();
-    const fundingMode = { marker: 'on-demand' };
-    const createFundingMode = vi.fn(async () => fundingMode);
+    for (const data of [SMALL, BIG]) {
+      const client = stubClient();
+      const adapter = createOnDemandUploadAdapter({
+        client,
+        signerKind: 'solana-ed25519',
+        maxArioPerUpload: 5,
+        creditAccount: ACCOUNT,
+        log: silentLog,
+      });
+      await expect(adapter.upload(data)).resolves.toEqual({ txId: 'stub-tx' });
+      expect(client.getBalance).toHaveBeenCalledWith(ACCOUNT);
+      expect(client.topUpWithTokens).not.toHaveBeenCalled();
+    }
+  });
+
+  it('buys the shortfall plus the buffer into the raw-pubkey account, then uploads', async () => {
+    // Credit on the sha256-shaped account does not pay the bundler: the
+    // destination must be named, or the SDK picks its own (mainnet, 2026-11-02).
+    const client = stubClient(0n);
     const adapter = createOnDemandUploadAdapter({
       client,
       signerKind: 'solana-ed25519',
       maxArioPerUpload: 5,
+      creditAccount: ACCOUNT,
       log: silentLog,
-      createFundingMode,
     });
+    client.getUploadCosts.mockResolvedValue([{ winc: '1000000' }]);
     await adapter.upload(SMALL);
-    expect(createFundingMode).toHaveBeenCalledWith(5);
-    expect(client.upload.mock.calls[0]?.[0]?.fundingMode).toBe(fundingMode);
+    expect(client.getUploadCosts).toHaveBeenCalledWith({
+      bytes: [estimateDataItemBytes(SMALL.length, 'solana-ed25519')],
+    });
+    expect(client.getWincForToken).toHaveBeenCalledWith({ tokenAmount: '1000000' });
+    // 1,000,000 winc short x 1.1, at 1 base unit per winc, rounded up.
+    expect(client.topUpWithTokens).toHaveBeenCalledWith({
+      tokenAmount: '1100001',
+      turboCreditDestinationAddress: ACCOUNT,
+    });
+    expect(client.upload).toHaveBeenCalledTimes(1);
   });
 
-  it('submits an above-ceiling upload WITH OnDemandFunding carrying the ceiling', async () => {
-    const client = stubClient();
-    const fundingMode = { marker: 'on-demand' };
-    const createFundingMode = vi.fn(async () => fundingMode);
+  it('refuses a top-up over the ceiling before spending or uploading', async () => {
+    const client = stubClient(0n);
+    const adapter = createOnDemandUploadAdapter({
+      client,
+      signerKind: 'solana-ed25519',
+      maxArioPerUpload: 1,
+      creditAccount: ACCOUNT,
+      log: silentLog,
+    });
+    client.getUploadCosts.mockResolvedValue([{ winc: '1000000' }]);
+    await expect(adapter.upload(SMALL)).rejects.toThrow(/over the ceiling of 1 \$ARIO/);
+    expect(client.topUpWithTokens).not.toHaveBeenCalled();
+    expect(client.upload).not.toHaveBeenCalled();
+  });
+
+  it('waits for a top-up to be credited, and fails without uploading if it never is', async () => {
+    const client = stubClient(0n);
+    client.topUpWithTokens.mockResolvedValue({ id: 'fund-tx' });
     const adapter = createOnDemandUploadAdapter({
       client,
       signerKind: 'solana-ed25519',
       maxArioPerUpload: 5,
+      creditAccount: ACCOUNT,
       log: silentLog,
-      createFundingMode,
+      creditPollMs: 0,
     });
-    const result = await adapter.upload(BIG);
-    expect(result.txId).toBe('stub-tx');
-    expect(createFundingMode).toHaveBeenCalledWith(5);
-    expect(client.upload.mock.calls[0]?.[0]?.fundingMode).toBe(fundingMode);
+    await expect(adapter.upload(SMALL)).rejects.toThrow(/fund-tx was not credited/);
+    expect(client.upload).not.toHaveBeenCalled();
   });
 
-  it('the default funding-mode factory builds a real OnDemandFunding with the ceiling', async () => {
-    const client = stubClient();
+  it('concurrent uploads buy one shortfall, not one each', async () => {
+    const client = stubClient(0n);
     const adapter = createOnDemandUploadAdapter({
       client,
       signerKind: 'solana-ed25519',
-      maxArioPerUpload: 3,
+      maxArioPerUpload: 5,
+      creditAccount: ACCOUNT,
       log: silentLog,
     });
-    await adapter.upload(BIG);
-    const { OnDemandFunding } = await import('@ardrive/turbo-sdk/node');
-    const mode = client.upload.mock.calls[0]?.[0]?.fundingMode;
-    expect(mode).toBeInstanceOf(OnDemandFunding);
-    // The operator's 3 $ARIO must reach the SDK as 3,000,000 base units;
-    // asserting '3' here is what let the unit bug through (store#128 review).
-    const onDemand = mode as InstanceType<typeof OnDemandFunding>;
-    expect(String(onDemand.maxTokenAmount)).toBe('3000000');
-    // SDK default buffer: Turbo's real per-item price sits ~0.58% above the
-    // SDK's linear estimate, so a multiplier of 1 under-buys every upload
-    // (measured on mainnet 2026-09-03).
-    expect(onDemand.topUpBufferMultiplier).toBe(1.1);
+    await Promise.all([adapter.upload(SMALL), adapter.upload(SMALL), adapter.upload(SMALL)]);
+    expect(client.topUpWithTokens).toHaveBeenCalledTimes(1);
+    expect(client.upload).toHaveBeenCalledTimes(3);
+  });
+
+  it('a spend ceiling with no account to pay into is refused at construction', () => {
+    expect(() =>
+      createOnDemandUploadAdapter({
+        client: stubClient(),
+        signerKind: 'solana-ed25519',
+        maxArioPerUpload: 5,
+        log: silentLog,
+      })
+    ).toThrow(/creditAccount/);
   });
 
   it('refuses an above-ceiling upload by name when no spend ceiling is configured', async () => {
@@ -266,7 +314,6 @@ describe('createOnDemandUploadAdapter', () => {
     });
     const result = await solana.upload(boundaryPayload);
     expect(result.txId).toBe('stub-tx');
-    expect(client2.upload.mock.calls[0]?.[0]?.fundingMode).toBeUndefined();
   });
 
   it('tags count toward the signed size at the boundary', async () => {
@@ -304,8 +351,8 @@ describe('createOnDemandUploadAdapter', () => {
       client,
       signerKind: 'solana-ed25519',
       maxArioPerUpload: 5,
+      creditAccount: ACCOUNT,
       log,
-      createFundingMode: async () => ({}),
     });
     await adapter.upload(BIG);
     const lines = log.info.mock.calls.map((c) => String(c[0]));
@@ -317,22 +364,17 @@ describe('createOnDemandUploadAdapter', () => {
     expect(log.info).not.toHaveBeenCalled();
   });
 
-  it('propagates the ceiling breach from turbo-sdk instead of retrying or absorbing it', async () => {
-    // OnDemandFunding throws rather than spending above maxTokenAmount; the
-    // adapter must surface that, not loop.
-    const client: TurboOnDemandClient & { upload: ReturnType<typeof vi.fn> } = {
-      upload: vi.fn(async () => {
-        throw new Error('fund amount exceeds maxTokenAmount');
-      }),
-    };
+  it('propagates an upload failure instead of retrying or absorbing it', async () => {
+    const client = stubClient();
+    client.upload.mockRejectedValue(new Error('bundler said no'));
     const adapter = createOnDemandUploadAdapter({
       client,
       signerKind: 'solana-ed25519',
       maxArioPerUpload: 1,
+      creditAccount: ACCOUNT,
       log: silentLog,
-      createFundingMode: async () => ({}),
     });
-    await expect(adapter.upload(BIG)).rejects.toThrow(/maxTokenAmount/);
+    await expect(adapter.upload(BIG)).rejects.toThrow(/bundler said no/);
     expect(client.upload).toHaveBeenCalledTimes(1);
   });
 });

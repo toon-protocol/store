@@ -35,14 +35,18 @@
  *    store pays per upload.
  *
  * Decision record: the balance monitor #128 first shipped (threshold,
- * timed top-ups, landed-transfer recovery) was reviewed away -- the SDK's
- * on-demand mode deletes the whole category it existed to manage. The x402
- * per-upload path (#98) had the right SHAPE and the wrong token; this is
- * that shape in ar.io's own token. Which Turbo account on-demand credits and
- * debits was settled empirically on mainnet 2026-08-31: both sides of an
- * implicit fund land on the account keyed by the RAW SOLANA PUBKEY (upload
- * zSKTqUwpMc... debited the pubkey account and left the sha256-shaped
- * account untouched), so the SDK's implicit path is self-consistent.
+ * timed top-ups, landed-transfer recovery) was reviewed away. The x402
+ * per-upload path (#98) had the right SHAPE and the wrong token; this is that
+ * shape in ar.io's own token.
+ *
+ * WHICH ACCOUNT: a Solana key has two Turbo accounts, and they differ. The
+ * bundler debits the one keyed by the RAW SOLANA PUBKEY. turbo-sdk's
+ * OnDemandFunding reads the balance of the sha256-shaped one, so credit on that
+ * account stops it buying while the bundler answers 402 (mainnet, 2026-11-02:
+ * 69.7B winc there, 15M on the pubkey, every upload refused; 920M winc sent to
+ * the pubkey and a 23,565-byte upload went through, debiting only the pubkey).
+ * So this module does not use OnDemandFunding: it reads and funds the pubkey
+ * account itself.
  */
 
 import type { ArweaveUploadAdapter } from '@toon-protocol/sdk';
@@ -223,13 +227,19 @@ export function resolveTurboOnDemandEnv(
 
 /**
  * The slice of a Turbo client the adapter needs (duck-typed; stubbed in
- * tests): `upload` accepts turbo-sdk's UploadDataInput plus FundingOptions.
+ * tests).
  */
 export interface TurboOnDemandClient {
   upload(params: {
     data: Buffer;
     dataItemOpts?: { tags: { name: string; value: string }[] };
-    fundingMode?: unknown;
+  }): Promise<{ id: string }>;
+  getBalance(address: string): Promise<{ effectiveBalance: string }>;
+  getUploadCosts(params: { bytes: number[] }): Promise<{ winc: string }[]>;
+  getWincForToken(params: { tokenAmount: string }): Promise<{ winc: string }>;
+  topUpWithTokens(params: {
+    tokenAmount: string;
+    turboCreditDestinationAddress: string;
   }): Promise<{ id: string }>;
 }
 
@@ -238,13 +248,18 @@ interface AdapterLogger {
   warn(message: string): void;
 }
 
+/** Turbo's price can move between the quote and the upload; buy a little over the shortfall. */
+const TOP_UP_BUFFER_PERCENT = 110n;
+const ONE_ARIO = 10n ** BigInt(ARIO_TOKEN_DECIMALS);
+
 /**
  * The store's ArweaveUploadAdapter. With `maxArioPerUpload` set, every upload
- * is submitted with OnDemandFunding bounded by it. With none, route by the
- * SIGNED data item size: at or under the free ceiling the upload is submitted
- * with no funding mode, and above it the upload is refused by name, so "no
- * spend authority" and "your blob is malformed" stay different messages, and
- * the refusal happens before any bytes reach Turbo.
+ * first makes sure `creditAccount` can pay for it, buying the shortfall in
+ * $ARIO and refusing to spend above the bound. With none, route by the SIGNED
+ * data item size: at or under the free ceiling the upload is submitted as it
+ * is, and above it the upload is refused by name, so "no spend authority" and
+ * "your blob is malformed" stay different messages, and the refusal happens
+ * before any bytes reach Turbo.
  */
 export function createOnDemandUploadAdapter(options: {
   client: TurboOnDemandClient;
@@ -252,43 +267,58 @@ export function createOnDemandUploadAdapter(options: {
   signerKind: DataItemSignerKind;
   /** Per-upload $ARIO ceiling; undefined = paid route off. */
   maxArioPerUpload?: number;
+  /** The signer's raw Solana pubkey: the account the bundler debits. */
+  creditAccount?: string;
   log?: AdapterLogger;
-  /**
-   * Test seam: builds the funding mode handed to turbo-sdk. Defaults to a
-   * lazy `new OnDemandFunding({ maxTokenAmount })` from @ardrive/turbo-sdk.
-   */
-  createFundingMode?: (maxArioPerUpload: number) => Promise<unknown>;
+  /** Test seam: how long to wait between balance reads after a top-up. */
+  creditPollMs?: number;
 }): ArweaveUploadAdapter {
-  const { client, signerKind, maxArioPerUpload } = options;
+  const { client, signerKind, maxArioPerUpload, creditAccount } = options;
+  if (maxArioPerUpload !== undefined && !creditAccount) {
+    throw new Error('a spend ceiling needs the creditAccount it pays into');
+  }
   const log = options.log ?? {
     info: (m: string) => console.log(m),
     warn: (m: string) => console.warn(m),
   };
-  const createFundingMode =
-    options.createFundingMode ??
-    (async (maxArio: number) => {
-      const { OnDemandFunding } = await import('@ardrive/turbo-sdk/node');
-      // `maxTokenAmount` is compared against a BASE-UNIT amount inside the
-      // SDK (upload.js multiplies the quote by tokenToBaseMap before the
-      // ceiling check) and the constructor does not convert; turbo-sdk's own
-      // CLI converts before constructing. The operator configures whole
-      // $ARIO, so convert here or a ceiling of 5 means 0.000005 $ARIO and
-      // every paid upload throws.
-      //
-      // The buffer stays at the SDK default (1.1). The SDK sizes its buy by a
-      // straight line from the 1 GiB rate, while Turbo's real per-item price
-      // runs above that line (measured on mainnet 2026-09-03 for a 110,201-byte
-      // signed item: real 1,342,263,496 winc vs the SDK's 1,334,512,354, a
-      // constant ~0.58%). With a multiplier of 1 the store buys exactly the
-      // estimate, the bundler answers 402, and the same under-buy repeats on
-      // every attempt at every size (store#128 shipped 1 on the turbo-sdk#455
-      // reading that the credited and debited accounts differ; they are the
-      // same raw-pubkey account, so the buffer IS spendable by the next
-      // upload and costs nothing but float).
-      return new OnDemandFunding({
-        maxTokenAmount: maxArio * 10 ** ARIO_TOKEN_DECIMALS,
-      });
+  const creditPollMs = options.creditPollMs ?? 3_000;
+
+  const creditFor = async (account: string, price: bigint, maxArio: number) => {
+    const balance = BigInt((await client.getBalance(account)).effectiveBalance);
+    if (balance >= price) return;
+
+    const wincPerArio = BigInt(
+      (await client.getWincForToken({ tokenAmount: ONE_ARIO.toString() })).winc
+    );
+    const winc = ((price - balance) * TOP_UP_BUFFER_PERCENT) / 100n;
+    const tokenAmount = (winc * ONE_ARIO) / wincPerArio + 1n;
+    const ceiling = BigInt(Math.floor(maxArio * Number(ONE_ARIO)));
+    if (tokenAmount > ceiling) {
+      throw new Error(
+        `top-up of ${tokenAmount} $ARIO base units is over the ceiling of ${maxArio} $ARIO per upload`
+      );
+    }
+    const { id } = await client.topUpWithTokens({
+      tokenAmount: tokenAmount.toString(),
+      turboCreditDestinationAddress: account,
     });
+    log.info(`[store] bought ${tokenAmount} $ARIO base units of credit for ${account}: ${id}`);
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const now = BigInt((await client.getBalance(account)).effectiveBalance);
+      if (now >= price) return;
+      await new Promise((resolve) => setTimeout(resolve, creditPollMs));
+    }
+    throw new Error(`top-up ${id} was not credited to ${account} in time`);
+  };
+
+  // One at a time, so concurrent uploads do not each buy the same shortfall.
+  let funding: Promise<unknown> = Promise.resolve();
+  const ensureCredit = (account: string, price: bigint, maxArio: number) => {
+    const next = funding.then(() => creditFor(account, price, maxArio));
+    funding = next.catch(() => undefined);
+    return next;
+  };
 
   return {
     async upload(data, tags) {
@@ -315,18 +345,17 @@ export function createOnDemandUploadAdapter(options: {
         );
       }
 
-      // The audit line: every act of spending says so, with its bound. The
-      // actual amount is priced by Turbo for exactly this byte count, and
-      // OnDemandFunding throws instead of exceeding the ceiling.
+      // The audit line: every act of spending says so, with its bound.
       log.info(
         `[store] paid upload: ${data.length} bytes (~${itemBytes} signed), ` +
-          `buying on demand (ceiling ${maxArioPerUpload} $ARIO)`
+          `paying from ${creditAccount} (ceiling ${maxArioPerUpload} $ARIO)`
       );
-      const fundingMode = await createFundingMode(maxArioPerUpload);
+      const [cost] = await client.getUploadCosts({ bytes: [itemBytes] });
+      if (!cost) throw new Error('Turbo returned no price for this upload');
+      await ensureCredit(creditAccount as string, BigInt(cost.winc), maxArioPerUpload);
       const result = await client.upload({
         data,
         ...(dataItemOpts ? { dataItemOpts } : {}),
-        fundingMode,
       });
       log.info(`[store] paid upload done: ${result.id}`);
       return { txId: result.id };
