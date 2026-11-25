@@ -20,12 +20,8 @@ import { verifyEvent } from 'nostr-tools/pure';
 import type { NostrEvent } from 'nostr-tools/pure';
 
 /**
- * Minimal structural mirror of the SDK's `HandlerContext` / `HandlerResponse`.
- * Defined locally so this backend does not depend on a specific
- * `@toon-protocol/sdk` version re-exporting these types — the handler itself is
- * passed in by the entrypoint, already bound to the SDK's
- * `createArweaveDvmHandler`. The shapes match `@toon-protocol/core`'s
- * `HandlePacket{Accept,Reject}Response` and the SDK `HandlerContext`.
+ * The handler context and response this backend hands to every handler. The
+ * shapes match `@toon-protocol/core`'s `HandlePacket{Accept,Reject}Response`.
  */
 export interface StoreHandlerContext {
   readonly toon: string;

@@ -3,7 +3,7 @@
  * carries an ENCRYPTED increment artifact through the real path unmodified:
  *
  *   buildBlobStorageRequest (core) -> POST /store (real startStoreBackend) ->
- *   real createArweaveDvmHandler (sdk) -> stub ArweaveUploadAdapter -> receipt
+ *   real createArweaveDvmHandler -> stub ArweaveUploadAdapter -> receipt
  *
  * Nothing here is mocked except the Turbo/Arweave network call itself (a stub
  * adapter that records what it was given) — the nostr event build/parse, HTTP
@@ -22,11 +22,9 @@ import { randomBytes } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { generateSecretKey } from 'nostr-tools/pure';
 import { buildBlobStorageRequest } from '@toon-protocol/core';
-import {
-  createArweaveDvmHandler,
-  ChunkManager,
-  type ArweaveUploadAdapter,
-} from '@toon-protocol/sdk';
+import { createArweaveDvmHandler } from './arweave-dvm-handler.js';
+import { ChunkManager } from './chunk-manager.js';
+import type { ArweaveUploadAdapter } from './turbo-adapter.js';
 import { startStoreBackend, type StoreHandler } from './store-backend.js';
 
 /** Records every upload it receives instead of touching the network. */

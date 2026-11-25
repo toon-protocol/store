@@ -8,24 +8,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type * as SdkModule from '@toon-protocol/sdk';
 
 // ── Mock heavy deps that would pull in WASM/native modules ──────────────────
 
-vi.mock('@toon-protocol/sdk', async (importOriginal) => {
-  const actual = await importOriginal<typeof SdkModule>();
-  return {
-    ...actual,
-    createNode: vi.fn(async () => ({
-      identity: { pubkey: 'a'.repeat(64) },
-      on: vi.fn(),
-      start: vi.fn((): Promise<void> => Promise.resolve()),
-      stop: vi.fn((): Promise<void> => Promise.resolve()),
-    })),
-    createArweaveDvmHandler: vi.fn(() => vi.fn()),
-    ChunkManager: vi.fn(() => ({})),
-  };
-});
+vi.mock('./arweave-dvm-handler.js', () => ({
+  createArweaveDvmHandler: vi.fn(() => vi.fn()),
+}));
+vi.mock('./chunk-manager.js', () => ({
+  ChunkManager: vi.fn(() => ({})),
+}));
 
 // Mock @ardrive/turbo-sdk/node so we can introspect which path createTurboAdapter
 // took without doing real network / signer work.

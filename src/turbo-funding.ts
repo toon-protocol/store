@@ -49,7 +49,7 @@
  * account itself.
  */
 
-import type { ArweaveUploadAdapter } from '@toon-protocol/sdk';
+import type { ArweaveUploadAdapter } from './turbo-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Network and mint selection

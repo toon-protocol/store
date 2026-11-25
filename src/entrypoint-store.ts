@@ -56,16 +56,11 @@ import { readFileSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { getPublicKey } from 'nostr-tools/pure';
-import type { StoreHealthResponse } from '@toon-protocol/sdk';
-import {
-  createArweaveDvmHandler,
-  type ArweaveDvmConfig,
-  ChunkManager,
-  base58Decode,
-  base58Encode,
-  generateSolanaKeypair,
-} from '@toon-protocol/sdk';
-import type { NodeConfig } from '@toon-protocol/sdk';
+import { generateKeyPairSync } from 'node:crypto';
+import { base58Decode, base58Encode } from '@toon-protocol/core';
+import { createArweaveDvmHandler, type ArweaveDvmConfig } from './arweave-dvm-handler.js';
+import { ChunkManager } from './chunk-manager.js';
+import type { StoreHealthResponse } from './store-health.js';
 import { startStoreBackend, type StoreBackend, type StoreHandler } from './store-backend.js';
 import {
   ARNS_BUY_KIND,
@@ -295,8 +290,25 @@ export async function createTurboAdapter(
   };
 }
 
-// --- store config extends NodeConfig with store-managed fields not in the SDK ---
-type StoreConfig = Partial<NodeConfig> & { blsPort?: number };
+// --- Fresh Solana keypair: 64-byte secret (seed || public key), as Solana tooling expects ---
+function generateSolanaKeypair(): { secretKey: Uint8Array } {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const jwk = privateKey.export({ format: 'jwk' });
+  const secretKey = new Uint8Array(64);
+  secretKey.set(Buffer.from(jwk.d as string, 'base64url'), 0);
+  secretKey.set(Buffer.from(jwk.x as string, 'base64url'), 32);
+  return { secretKey };
+}
+
+// --- What the store reads from its config (it no longer extends the SDK's NodeConfig) ---
+interface StoreConfig {
+  secretKey?: Uint8Array;
+  blsPort?: number;
+  handlerPort?: number;
+  // Still carried so /health is unchanged; informational (the connector prices).
+  basePricePerByte?: bigint;
+  kindPricing?: Record<number, bigint>;
+}
 
 // --- Raw config shape ---
 interface StoreRawConfig {
